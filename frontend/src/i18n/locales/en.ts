@@ -643,6 +643,14 @@ export default {
       noLimit: 'unlimited',
       disabled: 'Disabled',
     },
+    accountWindowQuota: {
+      title: 'Official Window Quota',
+      subtitle: 'Percentage cap of official utilization',
+      account: 'Account #{id}',
+      window5h: '5-hour window',
+      window7d: '7-day window',
+      resetsAt: 'Resets {time}',
+    },
     tokenUsageTrend: 'Token Usage Trend',
     noDataAvailable: 'No data available',
     model: 'Model',
@@ -2030,7 +2038,37 @@ export default {
         cellColumnTooltip: 'Only platforms with a limit are shown',
         subscriptionWarning: 'This user has an active subscription. Platform quotas only apply to balance (standard) mode requests; subscription mode requests are not subject to these limits.',
         invalidNumber: 'The following fields contain invalid numbers. Please fix them before saving: {fields}',
+      },
+      windowQuota: {
+        title: 'Window % Quota (Codex)',
+        subtitle: "Per-user share of the official 5h / 7d window (default 23% each)",
+        ceilingLabel: 'Window total ceiling (sum of all users):',
+        save: 'Save',
+        empty: 'No data yet — rows are created on first usage; the default 23% applies automatically.',
+        hint: 'Used % is attributed from the official utilization and resets follow the official window refresh. Set the limit % per account per window; the sum across all users may not exceed the ceiling.',
+        account: 'Account #{id}',
+        window5h: '5h',
+        window7d: '7d (weekly)',
+        columns: {
+          window: 'Window',
+          used: 'Used',
+          limit: 'Limit %',
+          reset: 'Resets',
+        },
+        saveSuccess: 'Saved',
+        saveFailed: 'Save failed',
+        invalidLimit: 'Limit must be a number between 0 and 100',
+        invalidCeiling: 'Ceiling must be a number between 1 and 100',
       }
+    },
+
+    windowQuotaOverview: {
+      title: 'Window Quota Overview (Codex)',
+      subtitle: "Each member's share of every account's 5h / 7d window",
+      account: 'Account #{id}',
+      user: 'User',
+      window5h: '5h',
+      window7d: '7d',
     },
 
     // Groups

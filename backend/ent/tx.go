@@ -74,6 +74,8 @@ type Tx struct {
 	UsageLog *UsageLogClient
 	// User is the client for interacting with the User builders.
 	User *UserClient
+	// UserAccountWindowQuota is the client for interacting with the UserAccountWindowQuota builders.
+	UserAccountWindowQuota *UserAccountWindowQuotaClient
 	// UserAllowedGroup is the client for interacting with the UserAllowedGroup builders.
 	UserAllowedGroup *UserAllowedGroupClient
 	// UserAttributeDefinition is the client for interacting with the UserAttributeDefinition builders.
@@ -245,6 +247,7 @@ func (tx *Tx) init() {
 	tx.UsageCleanupTask = NewUsageCleanupTaskClient(tx.config)
 	tx.UsageLog = NewUsageLogClient(tx.config)
 	tx.User = NewUserClient(tx.config)
+	tx.UserAccountWindowQuota = NewUserAccountWindowQuotaClient(tx.config)
 	tx.UserAllowedGroup = NewUserAllowedGroupClient(tx.config)
 	tx.UserAttributeDefinition = NewUserAttributeDefinitionClient(tx.config)
 	tx.UserAttributeValue = NewUserAttributeValueClient(tx.config)

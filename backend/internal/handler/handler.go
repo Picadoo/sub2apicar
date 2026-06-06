@@ -53,9 +53,10 @@ type Handlers struct {
 	OpenAIGateway    *OpenAIGatewayHandler
 	Setting          *SettingHandler
 	Totp             *TotpHandler
-	Payment          *PaymentHandler
-	PaymentWebhook   *PaymentWebhookHandler
-	AvailableChannel *AvailableChannelHandler
+	Payment            *PaymentHandler
+	PaymentWebhook     *PaymentWebhookHandler
+	AvailableChannel   *AvailableChannelHandler
+	AccountWindowQuota *AccountWindowQuotaHandler
 }
 
 // BuildInfo contains build-time information

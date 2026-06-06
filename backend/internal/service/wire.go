@@ -583,7 +583,16 @@ var ProviderSet = wire.NewSet(
 	ProvideChannelMonitorRunner,
 	NewChannelMonitorRequestTemplateService,
 	ProvideUserPlatformQuotaUsageFlusher,
+	NewAccountWindowQuotaService,
+	ProvideAccountWindowQuotaResetService,
 )
+
+// ProvideAccountWindowQuotaResetService 创建并启动 user×account×window 配额的定时重置兜底服务。
+func ProvideAccountWindowQuotaResetService(quota *AccountWindowQuotaService) *AccountWindowQuotaResetService {
+	svc := NewAccountWindowQuotaResetService(quota, time.Minute)
+	svc.Start()
+	return svc
+}
 
 // ProvideUserPlatformQuotaUsageFlusher 创建并启动 UserPlatformQuotaUsageFlusher。
 func ProvideUserPlatformQuotaUsageFlusher(cfg *config.Config, cache BillingCache, quotaRepo UserPlatformQuotaRepository, tw *TimingWheelService) *UserPlatformQuotaUsageFlusher {

@@ -7,6 +7,12 @@
       </div>
 
       <template v-else-if="stats">
+        <!-- 窗口百分比配额总览（自用拼车：各成员对每个账号的 5h/7d 占用，无数据则不显示） -->
+        <AdminWindowQuotaOverviewCard />
+
+        <!-- 网页版 ChatGPT 共享代理在线情况（看门人，无数据/未部署则不显示） -->
+        <ChatProxyStatusCard />
+
         <!-- Row 1: Core Stats -->
         <div class="grid grid-cols-2 gap-4 lg:grid-cols-4">
           <!-- Total API Keys -->
@@ -314,6 +320,8 @@ import DateRangePicker from '@/components/common/DateRangePicker.vue'
 import Select from '@/components/common/Select.vue'
 import ModelDistributionChart from '@/components/charts/ModelDistributionChart.vue'
 import TokenUsageTrend from '@/components/charts/TokenUsageTrend.vue'
+import AdminWindowQuotaOverviewCard from '@/components/admin/AdminWindowQuotaOverviewCard.vue'
+import ChatProxyStatusCard from '@/components/user/dashboard/ChatProxyStatusCard.vue'
 
 import {
   Chart as ChartJS,

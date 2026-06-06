@@ -369,6 +369,18 @@ func (f UserFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error)
 	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UserMutation", m)
 }
 
+// The UserAccountWindowQuotaFunc type is an adapter to allow the use of ordinary
+// function as UserAccountWindowQuota mutator.
+type UserAccountWindowQuotaFunc func(context.Context, *ent.UserAccountWindowQuotaMutation) (ent.Value, error)
+
+// Mutate calls f(ctx, m).
+func (f UserAccountWindowQuotaFunc) Mutate(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+	if mv, ok := m.(*ent.UserAccountWindowQuotaMutation); ok {
+		return f(ctx, mv)
+	}
+	return nil, fmt.Errorf("unexpected mutation type %T. expect *ent.UserAccountWindowQuotaMutation", m)
+}
+
 // The UserAllowedGroupFunc type is an adapter to allow the use of ordinary
 // function as UserAllowedGroup mutator.
 type UserAllowedGroupFunc func(context.Context, *ent.UserAllowedGroupMutation) (ent.Value, error)

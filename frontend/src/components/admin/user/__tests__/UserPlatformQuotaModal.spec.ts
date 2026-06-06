@@ -18,6 +18,14 @@ vi.mock('@/api/admin', () => ({
   },
 }))
 
+// 窗口百分比配额区块的 API：本测试只关注平台配额，mock 成空数据以隔离。
+vi.mock('@/api/accountWindowQuota', () => ({
+  getUserAccountWindowQuotas: vi.fn().mockResolvedValue({ enabled: false, windows: [] }),
+  getAccountWindowCeilings: vi.fn().mockResolvedValue({ enabled: false, ceilings: [] }),
+  setAccountWindowLimit: vi.fn().mockResolvedValue(undefined),
+  setAccountWindowCeiling: vi.fn().mockResolvedValue(undefined),
+}))
+
 vi.mock('@/stores/app', () => ({
   useAppStore: () => ({
     showError: vi.fn(),
@@ -96,7 +104,7 @@ describe('UserPlatformQuotaModal', () => {
       ],
     })
     const w = await mountAndOpen()
-    const inputs = w.findAll('input[type=number]')
+    const inputs = w.find('[data-testid="platform-quota-table"]').findAll('input[type=number]')
     // 4 platforms × 3 windows = 12 inputs
     expect(inputs.length).toBe(12)
     // 第一个 input 是 anthropic.daily = 10
@@ -140,7 +148,7 @@ describe('UserPlatformQuotaModal', () => {
     await clearBtn!.trigger('click')
     await flushPromises()
     expect(confirmSpy).toHaveBeenCalledTimes(1)
-    const inputs = w.findAll('input[type=number]')
+    const inputs = w.find('[data-testid="platform-quota-table"]').findAll('input[type=number]')
     for (const inp of inputs) {
       expect((inp.element as HTMLInputElement).value).toBe('')
     }

@@ -45,6 +45,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/usagecleanuptask"
 	"github.com/Wei-Shaw/sub2api/ent/usagelog"
 	"github.com/Wei-Shaw/sub2api/ent/user"
+	"github.com/Wei-Shaw/sub2api/ent/useraccountwindowquota"
 	"github.com/Wei-Shaw/sub2api/ent/userallowedgroup"
 	"github.com/Wei-Shaw/sub2api/ent/userattributedefinition"
 	"github.com/Wei-Shaw/sub2api/ent/userattributevalue"
@@ -119,6 +120,8 @@ type Client struct {
 	UsageLog *UsageLogClient
 	// User is the client for interacting with the User builders.
 	User *UserClient
+	// UserAccountWindowQuota is the client for interacting with the UserAccountWindowQuota builders.
+	UserAccountWindowQuota *UserAccountWindowQuotaClient
 	// UserAllowedGroup is the client for interacting with the UserAllowedGroup builders.
 	UserAllowedGroup *UserAllowedGroupClient
 	// UserAttributeDefinition is the client for interacting with the UserAttributeDefinition builders.
@@ -170,6 +173,7 @@ func (c *Client) init() {
 	c.UsageCleanupTask = NewUsageCleanupTaskClient(c.config)
 	c.UsageLog = NewUsageLogClient(c.config)
 	c.User = NewUserClient(c.config)
+	c.UserAccountWindowQuota = NewUserAccountWindowQuotaClient(c.config)
 	c.UserAllowedGroup = NewUserAllowedGroupClient(c.config)
 	c.UserAttributeDefinition = NewUserAttributeDefinitionClient(c.config)
 	c.UserAttributeValue = NewUserAttributeValueClient(c.config)
@@ -297,6 +301,7 @@ func (c *Client) Tx(ctx context.Context) (*Tx, error) {
 		UsageCleanupTask:              NewUsageCleanupTaskClient(cfg),
 		UsageLog:                      NewUsageLogClient(cfg),
 		User:                          NewUserClient(cfg),
+		UserAccountWindowQuota:        NewUserAccountWindowQuotaClient(cfg),
 		UserAllowedGroup:              NewUserAllowedGroupClient(cfg),
 		UserAttributeDefinition:       NewUserAttributeDefinitionClient(cfg),
 		UserAttributeValue:            NewUserAttributeValueClient(cfg),
@@ -351,6 +356,7 @@ func (c *Client) BeginTx(ctx context.Context, opts *sql.TxOptions) (*Tx, error) 
 		UsageCleanupTask:              NewUsageCleanupTaskClient(cfg),
 		UsageLog:                      NewUsageLogClient(cfg),
 		User:                          NewUserClient(cfg),
+		UserAccountWindowQuota:        NewUserAccountWindowQuotaClient(cfg),
 		UserAllowedGroup:              NewUserAllowedGroupClient(cfg),
 		UserAttributeDefinition:       NewUserAttributeDefinitionClient(cfg),
 		UserAttributeValue:            NewUserAttributeValueClient(cfg),
@@ -393,8 +399,9 @@ func (c *Client) Use(hooks ...Hook) {
 		c.PaymentOrder, c.PaymentProviderInstance, c.PendingAuthSession, c.PromoCode,
 		c.PromoCodeUsage, c.Proxy, c.RedeemCode, c.SecuritySecret, c.Setting,
 		c.SubscriptionPlan, c.TLSFingerprintProfile, c.UsageCleanupTask, c.UsageLog,
-		c.User, c.UserAllowedGroup, c.UserAttributeDefinition, c.UserAttributeValue,
-		c.UserPlatformQuota, c.UserSubscription,
+		c.User, c.UserAccountWindowQuota, c.UserAllowedGroup,
+		c.UserAttributeDefinition, c.UserAttributeValue, c.UserPlatformQuota,
+		c.UserSubscription,
 	} {
 		n.Use(hooks...)
 	}
@@ -412,8 +419,9 @@ func (c *Client) Intercept(interceptors ...Interceptor) {
 		c.PaymentOrder, c.PaymentProviderInstance, c.PendingAuthSession, c.PromoCode,
 		c.PromoCodeUsage, c.Proxy, c.RedeemCode, c.SecuritySecret, c.Setting,
 		c.SubscriptionPlan, c.TLSFingerprintProfile, c.UsageCleanupTask, c.UsageLog,
-		c.User, c.UserAllowedGroup, c.UserAttributeDefinition, c.UserAttributeValue,
-		c.UserPlatformQuota, c.UserSubscription,
+		c.User, c.UserAccountWindowQuota, c.UserAllowedGroup,
+		c.UserAttributeDefinition, c.UserAttributeValue, c.UserPlatformQuota,
+		c.UserSubscription,
 	} {
 		n.Intercept(interceptors...)
 	}
@@ -482,6 +490,8 @@ func (c *Client) Mutate(ctx context.Context, m Mutation) (Value, error) {
 		return c.UsageLog.mutate(ctx, m)
 	case *UserMutation:
 		return c.User.mutate(ctx, m)
+	case *UserAccountWindowQuotaMutation:
+		return c.UserAccountWindowQuota.mutate(ctx, m)
 	case *UserAllowedGroupMutation:
 		return c.UserAllowedGroup.mutate(ctx, m)
 	case *UserAttributeDefinitionMutation:
@@ -5408,6 +5418,141 @@ func (c *UserClient) mutate(ctx context.Context, m *UserMutation) (Value, error)
 	}
 }
 
+// UserAccountWindowQuotaClient is a client for the UserAccountWindowQuota schema.
+type UserAccountWindowQuotaClient struct {
+	config
+}
+
+// NewUserAccountWindowQuotaClient returns a client for the UserAccountWindowQuota from the given config.
+func NewUserAccountWindowQuotaClient(c config) *UserAccountWindowQuotaClient {
+	return &UserAccountWindowQuotaClient{config: c}
+}
+
+// Use adds a list of mutation hooks to the hooks stack.
+// A call to `Use(f, g, h)` equals to `useraccountwindowquota.Hooks(f(g(h())))`.
+func (c *UserAccountWindowQuotaClient) Use(hooks ...Hook) {
+	c.hooks.UserAccountWindowQuota = append(c.hooks.UserAccountWindowQuota, hooks...)
+}
+
+// Intercept adds a list of query interceptors to the interceptors stack.
+// A call to `Intercept(f, g, h)` equals to `useraccountwindowquota.Intercept(f(g(h())))`.
+func (c *UserAccountWindowQuotaClient) Intercept(interceptors ...Interceptor) {
+	c.inters.UserAccountWindowQuota = append(c.inters.UserAccountWindowQuota, interceptors...)
+}
+
+// Create returns a builder for creating a UserAccountWindowQuota entity.
+func (c *UserAccountWindowQuotaClient) Create() *UserAccountWindowQuotaCreate {
+	mutation := newUserAccountWindowQuotaMutation(c.config, OpCreate)
+	return &UserAccountWindowQuotaCreate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// CreateBulk returns a builder for creating a bulk of UserAccountWindowQuota entities.
+func (c *UserAccountWindowQuotaClient) CreateBulk(builders ...*UserAccountWindowQuotaCreate) *UserAccountWindowQuotaCreateBulk {
+	return &UserAccountWindowQuotaCreateBulk{config: c.config, builders: builders}
+}
+
+// MapCreateBulk creates a bulk creation builder from the given slice. For each item in the slice, the function creates
+// a builder and applies setFunc on it.
+func (c *UserAccountWindowQuotaClient) MapCreateBulk(slice any, setFunc func(*UserAccountWindowQuotaCreate, int)) *UserAccountWindowQuotaCreateBulk {
+	rv := reflect.ValueOf(slice)
+	if rv.Kind() != reflect.Slice {
+		return &UserAccountWindowQuotaCreateBulk{err: fmt.Errorf("calling to UserAccountWindowQuotaClient.MapCreateBulk with wrong type %T, need slice", slice)}
+	}
+	builders := make([]*UserAccountWindowQuotaCreate, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		builders[i] = c.Create()
+		setFunc(builders[i], i)
+	}
+	return &UserAccountWindowQuotaCreateBulk{config: c.config, builders: builders}
+}
+
+// Update returns an update builder for UserAccountWindowQuota.
+func (c *UserAccountWindowQuotaClient) Update() *UserAccountWindowQuotaUpdate {
+	mutation := newUserAccountWindowQuotaMutation(c.config, OpUpdate)
+	return &UserAccountWindowQuotaUpdate{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOne returns an update builder for the given entity.
+func (c *UserAccountWindowQuotaClient) UpdateOne(_m *UserAccountWindowQuota) *UserAccountWindowQuotaUpdateOne {
+	mutation := newUserAccountWindowQuotaMutation(c.config, OpUpdateOne, withUserAccountWindowQuota(_m))
+	return &UserAccountWindowQuotaUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// UpdateOneID returns an update builder for the given id.
+func (c *UserAccountWindowQuotaClient) UpdateOneID(id int64) *UserAccountWindowQuotaUpdateOne {
+	mutation := newUserAccountWindowQuotaMutation(c.config, OpUpdateOne, withUserAccountWindowQuotaID(id))
+	return &UserAccountWindowQuotaUpdateOne{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// Delete returns a delete builder for UserAccountWindowQuota.
+func (c *UserAccountWindowQuotaClient) Delete() *UserAccountWindowQuotaDelete {
+	mutation := newUserAccountWindowQuotaMutation(c.config, OpDelete)
+	return &UserAccountWindowQuotaDelete{config: c.config, hooks: c.Hooks(), mutation: mutation}
+}
+
+// DeleteOne returns a builder for deleting the given entity.
+func (c *UserAccountWindowQuotaClient) DeleteOne(_m *UserAccountWindowQuota) *UserAccountWindowQuotaDeleteOne {
+	return c.DeleteOneID(_m.ID)
+}
+
+// DeleteOneID returns a builder for deleting the given entity by its id.
+func (c *UserAccountWindowQuotaClient) DeleteOneID(id int64) *UserAccountWindowQuotaDeleteOne {
+	builder := c.Delete().Where(useraccountwindowquota.ID(id))
+	builder.mutation.id = &id
+	builder.mutation.op = OpDeleteOne
+	return &UserAccountWindowQuotaDeleteOne{builder}
+}
+
+// Query returns a query builder for UserAccountWindowQuota.
+func (c *UserAccountWindowQuotaClient) Query() *UserAccountWindowQuotaQuery {
+	return &UserAccountWindowQuotaQuery{
+		config: c.config,
+		ctx:    &QueryContext{Type: TypeUserAccountWindowQuota},
+		inters: c.Interceptors(),
+	}
+}
+
+// Get returns a UserAccountWindowQuota entity by its id.
+func (c *UserAccountWindowQuotaClient) Get(ctx context.Context, id int64) (*UserAccountWindowQuota, error) {
+	return c.Query().Where(useraccountwindowquota.ID(id)).Only(ctx)
+}
+
+// GetX is like Get, but panics if an error occurs.
+func (c *UserAccountWindowQuotaClient) GetX(ctx context.Context, id int64) *UserAccountWindowQuota {
+	obj, err := c.Get(ctx, id)
+	if err != nil {
+		panic(err)
+	}
+	return obj
+}
+
+// Hooks returns the client hooks.
+func (c *UserAccountWindowQuotaClient) Hooks() []Hook {
+	hooks := c.hooks.UserAccountWindowQuota
+	return append(hooks[:len(hooks):len(hooks)], useraccountwindowquota.Hooks[:]...)
+}
+
+// Interceptors returns the client interceptors.
+func (c *UserAccountWindowQuotaClient) Interceptors() []Interceptor {
+	inters := c.inters.UserAccountWindowQuota
+	return append(inters[:len(inters):len(inters)], useraccountwindowquota.Interceptors[:]...)
+}
+
+func (c *UserAccountWindowQuotaClient) mutate(ctx context.Context, m *UserAccountWindowQuotaMutation) (Value, error) {
+	switch m.Op() {
+	case OpCreate:
+		return (&UserAccountWindowQuotaCreate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdate:
+		return (&UserAccountWindowQuotaUpdate{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpUpdateOne:
+		return (&UserAccountWindowQuotaUpdateOne{config: c.config, hooks: c.Hooks(), mutation: m}).Save(ctx)
+	case OpDelete, OpDeleteOne:
+		return (&UserAccountWindowQuotaDelete{config: c.config, hooks: c.Hooks(), mutation: m}).Exec(ctx)
+	default:
+		return nil, fmt.Errorf("ent: unknown UserAccountWindowQuota mutation op: %q", m.Op())
+	}
+}
+
 // UserAllowedGroupClient is a client for the UserAllowedGroup schema.
 type UserAllowedGroupClient struct {
 	config
@@ -6199,9 +6344,9 @@ type (
 		Group, IdempotencyRecord, IdentityAdoptionDecision, PaymentAuditLog,
 		PaymentOrder, PaymentProviderInstance, PendingAuthSession, PromoCode,
 		PromoCodeUsage, Proxy, RedeemCode, SecuritySecret, Setting, SubscriptionPlan,
-		TLSFingerprintProfile, UsageCleanupTask, UsageLog, User, UserAllowedGroup,
-		UserAttributeDefinition, UserAttributeValue, UserPlatformQuota,
-		UserSubscription []ent.Hook
+		TLSFingerprintProfile, UsageCleanupTask, UsageLog, User,
+		UserAccountWindowQuota, UserAllowedGroup, UserAttributeDefinition,
+		UserAttributeValue, UserPlatformQuota, UserSubscription []ent.Hook
 	}
 	inters struct {
 		APIKey, Account, AccountGroup, Announcement, AnnouncementRead, AuthIdentity,
@@ -6210,9 +6355,9 @@ type (
 		Group, IdempotencyRecord, IdentityAdoptionDecision, PaymentAuditLog,
 		PaymentOrder, PaymentProviderInstance, PendingAuthSession, PromoCode,
 		PromoCodeUsage, Proxy, RedeemCode, SecuritySecret, Setting, SubscriptionPlan,
-		TLSFingerprintProfile, UsageCleanupTask, UsageLog, User, UserAllowedGroup,
-		UserAttributeDefinition, UserAttributeValue, UserPlatformQuota,
-		UserSubscription []ent.Interceptor
+		TLSFingerprintProfile, UsageCleanupTask, UsageLog, User,
+		UserAccountWindowQuota, UserAllowedGroup, UserAttributeDefinition,
+		UserAttributeValue, UserPlatformQuota, UserSubscription []ent.Interceptor
 	}
 )
 

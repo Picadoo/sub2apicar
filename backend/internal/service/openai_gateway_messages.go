@@ -33,6 +33,10 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	promptCacheKey string,
 	defaultMappedModel string,
 ) (*OpenAIForwardResult, error) {
+	if s.enforceAccountWindowQuota(ctx, c, account) {
+		return nil, ErrUserAccountWindowQuotaExceeded
+	}
+
 	startTime := time.Now()
 
 	// 1. Parse Anthropic request
@@ -387,7 +391,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	// Extract and save Codex usage snapshot from response headers (for OAuth accounts)
 	if handleErr == nil && account.Type == AccountTypeOAuth {
 		if snapshot := ParseCodexRateLimitHeaders(resp.Header); snapshot != nil {
-			s.updateCodexUsageSnapshot(ctx, account.ID, snapshot)
+			s.updateCodexUsageSnapshot(ctx, userIDFromGinContext(c), account.ID, snapshot)
 		}
 	}
 

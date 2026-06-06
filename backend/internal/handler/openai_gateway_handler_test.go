@@ -1302,6 +1302,7 @@ func TestOpenAIResponsesWebSocket_FailoverOnUpstreamUsageLimitEvent(t *testing.T
 		nil,
 		nil,
 		nil,
+		nil, // accountWindowQuota
 	)
 
 	cache := &concurrencyCacheMock{
@@ -1488,6 +1489,7 @@ func runOpenAIResponsesWebSocketUsageLogCase(t *testing.T, tc openAIResponsesWSU
 		nil,
 		nil,
 		nil, // userPlatformQuotaRepo
+		nil, // accountWindowQuota
 	)
 
 	cache := &concurrencyCacheMock{

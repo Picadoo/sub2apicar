@@ -61,6 +61,10 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	promptCacheKey string,
 	defaultMappedModel string,
 ) (*OpenAIForwardResult, error) {
+	if s.enforceAccountWindowQuota(ctx, c, account) {
+		return nil, ErrUserAccountWindowQuotaExceeded
+	}
+
 	// 入口分流：APIKey 账号 + 强制或已探测确认上游不支持 Responses，走 CC 直转。
 	// 自动模式下标记缺失（未探测）按"现状即证据"原则继续走下方原 Responses 转换路径。
 	if account.Type == AccountTypeAPIKey && !openai_compat.ShouldUseResponsesAPI(account.Extra) {
@@ -310,7 +314,7 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	// Extract and save Codex usage snapshot from response headers (for OAuth accounts)
 	if handleErr == nil && account.Type == AccountTypeOAuth {
 		if snapshot := ParseCodexRateLimitHeaders(resp.Header); snapshot != nil {
-			s.updateCodexUsageSnapshot(ctx, account.ID, snapshot)
+			s.updateCodexUsageSnapshot(ctx, userIDFromGinContext(c), account.ID, snapshot)
 		}
 	}
 

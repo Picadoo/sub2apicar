@@ -379,6 +379,11 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			service.SetOpsLatencyMs(c, service.OpsTimeToFirstTokenMsKey, int64(*result.FirstTokenMs))
 		}
 		if err != nil {
+			// 用户在该账号上的窗口配额已耗尽：429 响应已在 Forward 内写出。
+			// 这是客户端业务限制而非账号健康问题，不上报调度失败、不触发 failover、不二次写响应。
+			if errors.Is(err, service.ErrUserAccountWindowQuotaExceeded) {
+				return
+			}
 			if result != nil && result.ImageCount > 0 {
 				reqLog.Warn("openai.forward_partial_error_with_image_result",
 					zap.Int64("account_id", account.ID),
@@ -449,7 +454,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 		}
 		if result != nil {
 			if account.Type == service.AccountTypeOAuth {
-				h.gatewayService.UpdateCodexUsageSnapshotFromHeaders(c.Request.Context(), account.ID, result.ResponseHeaders)
+				h.gatewayService.UpdateCodexUsageSnapshotFromHeaders(c.Request.Context(), apiKey.UserID, account.ID, result.ResponseHeaders)
 			}
 			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, true, result.FirstTokenMs)
 		} else {
@@ -778,6 +783,11 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			service.SetOpsLatencyMs(c, service.OpsTimeToFirstTokenMsKey, int64(*result.FirstTokenMs))
 		}
 		if err != nil {
+			// 用户在该账号上的窗口配额已耗尽：429 响应已在 ForwardAsAnthropic 内写出。
+			// 客户端业务限制而非账号健康问题，不上报调度失败、不 failover、不二次写响应。
+			if errors.Is(err, service.ErrUserAccountWindowQuotaExceeded) {
+				return
+			}
 			if result != nil && result.ImageCount > 0 {
 				reqLog.Warn("openai_messages.forward_partial_error_with_image_result",
 					zap.Int64("account_id", account.ID),
@@ -1442,7 +1452,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 					return
 				}
 				if account.Type == service.AccountTypeOAuth {
-					h.gatewayService.UpdateCodexUsageSnapshotFromHeaders(ctx, account.ID, result.ResponseHeaders)
+					h.gatewayService.UpdateCodexUsageSnapshotFromHeaders(ctx, apiKey.UserID, account.ID, result.ResponseHeaders)
 				}
 				h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, true, result.FirstTokenMs)
 				inboundEndpoint := GetInboundEndpoint(c)

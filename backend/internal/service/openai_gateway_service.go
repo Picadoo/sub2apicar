@@ -127,16 +127,11 @@ type NormalizedCodexLimits struct {
 }
 
 func normalizeCodexFiveHourUsedPercent(raw *float64) *float64 {
-	if raw == nil {
-		return nil
-	}
-	// OpenAI's 5h Codex quota header is remaining%, despite the upstream header
-	// name saying "used"; the canonical codex_5h_used_percent field stores used%.
-	used := 100 - *raw
-	if used < 0 {
-		used = 0
-	}
-	return &used
+	// The upstream header x-codex-secondary-used-percent already reports USED percent
+	// (≈0 on a fresh window), identical in meaning to the 7d/primary header. An earlier
+	// version applied `100 - raw` on the mistaken belief it was remaining%, which made
+	// fresh accounts display 100% used and inverted the 5h window quota. Pass through as-is.
+	return raw
 }
 
 // Normalize converts primary/secondary fields to canonical 5h/7d fields.
@@ -334,6 +329,11 @@ var defaultOpenAICodexSnapshotPersistThrottle = newAccountWriteThrottle(openAICo
 // support but no compatible account is available.
 var ErrNoAvailableCompactAccounts = errors.New("no available OpenAI accounts support /responses/compact")
 
+// ErrUserAccountWindowQuotaExceeded 表示发起用户在该账号的某官方窗口占用已达上限，
+// 转发前预检直接拒绝。enforceAccountWindowQuota 命中时已写好 429 响应，调用方/处理器
+// 不应再写任何响应，只需结束请求。
+var ErrUserAccountWindowQuotaExceeded = errors.New("user account window quota exceeded")
+
 // OpenAIGatewayService handles OpenAI API gateway operations
 type OpenAIGatewayService struct {
 	accountRepo           AccountRepository
@@ -360,6 +360,7 @@ type OpenAIGatewayService struct {
 	balanceNotifyService  *BalanceNotifyService
 	settingService        *SettingService
 	userPlatformQuotaRepo UserPlatformQuotaRepository
+	accountWindowQuota    *AccountWindowQuotaService
 
 	openaiWSPoolOnce              sync.Once
 	openaiWSStateStoreOnce        sync.Once
@@ -405,6 +406,7 @@ func NewOpenAIGatewayService(
 	balanceNotifyService *BalanceNotifyService,
 	settingService *SettingService,
 	userPlatformQuotaRepo UserPlatformQuotaRepository,
+	accountWindowQuota *AccountWindowQuotaService,
 ) *OpenAIGatewayService {
 	svc := &OpenAIGatewayService{
 		accountRepo:         accountRepo,
@@ -437,6 +439,7 @@ func NewOpenAIGatewayService(
 		balanceNotifyService:  balanceNotifyService,
 		settingService:        settingService,
 		userPlatformQuotaRepo: userPlatformQuotaRepo,
+		accountWindowQuota:    accountWindowQuota,
 		responseHeaderFilter:  compileResponseHeaderFilter(cfg),
 		codexSnapshotThrottle: newAccountWriteThrottle(openAICodexSnapshotPersistMinInterval),
 	}
@@ -2347,6 +2350,10 @@ func (s *OpenAIGatewayService) handleFailoverSideEffects(ctx context.Context, re
 func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, account *Account, body []byte) (*OpenAIForwardResult, error) {
 	startTime := time.Now()
 
+	if s.enforceAccountWindowQuota(ctx, c, account) {
+		return nil, ErrUserAccountWindowQuotaExceeded
+	}
+
 	restrictionResult := s.detectCodexClientRestriction(c, account)
 	apiKeyID := getAPIKeyIDFromContext(c)
 	logCodexCLIOnlyDetection(ctx, c, account, apiKeyID, restrictionResult, body)
@@ -3064,7 +3071,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		// Extract and save Codex usage snapshot from response headers (for OAuth accounts)
 		if account.Type == AccountTypeOAuth {
 			if snapshot := ParseCodexRateLimitHeaders(resp.Header); snapshot != nil {
-				s.updateCodexUsageSnapshot(ctx, account.ID, snapshot)
+				s.updateCodexUsageSnapshot(ctx, userIDFromGinContext(c), account.ID, snapshot)
 			}
 		}
 
@@ -3308,7 +3315,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 	}
 
 	if snapshot := ParseCodexRateLimitHeaders(resp.Header); snapshot != nil {
-		s.updateCodexUsageSnapshot(ctx, account.ID, snapshot)
+		s.updateCodexUsageSnapshot(ctx, userIDFromGinContext(c), account.ID, snapshot)
 	}
 
 	if usage == nil {
@@ -6114,13 +6121,75 @@ func buildCodexUsageExtraUpdates(snapshot *OpenAICodexUsageSnapshot, fallbackNow
 	return updates
 }
 
+// userIDFromGinContext 从 gin 上下文取出鉴权用户 ID（供配额分摊使用）。
+// 读取 ApiKeyAuth 中间件写入的 "api_key"（*APIKey）；缺失或类型不符时返回 0。
+// 直接读裸键避免 service → middleware 的导入环（middleware 依赖 service）。
+func userIDFromGinContext(c *gin.Context) int64 {
+	if c == nil {
+		return 0
+	}
+	if v, ok := c.Get("api_key"); ok {
+		if apiKey, ok := v.(*APIKey); ok && apiKey != nil {
+			return apiKey.UserID
+		}
+	}
+	return 0
+}
+
+// enforceAccountWindowQuota 在转发前校验发起用户在该账号官方窗口（5h/7d）的占用是否已达上限。
+// 命中上限时直接写 429（含被打满窗口、重置时间与 Retry-After）并返回 true（调用方应中止转发）。
+// fail-open：服务未启用、无用户身份或底层异常时返回 false（放行）。
+func (s *OpenAIGatewayService) enforceAccountWindowQuota(ctx context.Context, c *gin.Context, account *Account) bool {
+	if c == nil || account == nil || s.accountWindowQuota == nil || !s.accountWindowQuota.Enabled() {
+		return false
+	}
+	userID := userIDFromGinContext(c)
+	if userID <= 0 {
+		return false
+	}
+	eligible, window, resetAt := s.accountWindowQuota.CheckUserAccountEligible(ctx, userID, account.ID)
+	if eligible {
+		return false
+	}
+
+	MarkOpsClientBusinessLimited(c, OpsClientBusinessLimitedReasonWindowQuotaExceeded)
+
+	errBody := gin.H{
+		"type":    "rate_limit_error",
+		"code":    "user_account_window_quota_exceeded",
+		"message": fmt.Sprintf("You have reached your %s window usage limit on this account; access resumes after the official window resets.", window),
+		"window":  window,
+	}
+	if resetAt != nil {
+		retryAfter := int(time.Until(*resetAt).Seconds())
+		if retryAfter < 1 {
+			retryAfter = 1
+		}
+		c.Header("Retry-After", strconv.Itoa(retryAfter))
+		errBody["reset_at"] = resetAt.UTC().Format(time.RFC3339)
+	}
+	c.JSON(http.StatusTooManyRequests, gin.H{"error": errBody})
+	return true
+}
+
 // updateCodexUsageSnapshot saves the Codex usage snapshot to account's Extra field
-func (s *OpenAIGatewayService) updateCodexUsageSnapshot(ctx context.Context, accountID int64, snapshot *OpenAICodexUsageSnapshot) {
+// 并把账号级官方利用率增量分摊给发起请求的用户（userID<=0 时跳过分摊）。
+func (s *OpenAIGatewayService) updateCodexUsageSnapshot(ctx context.Context, userID, accountID int64, snapshot *OpenAICodexUsageSnapshot) {
 	if snapshot == nil {
 		return
 	}
 	if s == nil || s.accountRepo == nil {
 		return
+	}
+
+	// 用户配额分摊：不受快照持久化节流影响，确保每次响应都精确归属到对应用户。
+	// 后台 goroutine + 独立超时，避免阻塞响应主流程，并在请求 ctx 取消后仍能完成写入。
+	if s.accountWindowQuota != nil && s.accountWindowQuota.Enabled() && userID > 0 && accountID > 0 {
+		go func() {
+			attrCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			s.accountWindowQuota.Attribute(attrCtx, userID, accountID, snapshot)
+		}()
 	}
 
 	now := time.Now()
@@ -6139,12 +6208,12 @@ func (s *OpenAIGatewayService) updateCodexUsageSnapshot(ctx context.Context, acc
 	}()
 }
 
-func (s *OpenAIGatewayService) UpdateCodexUsageSnapshotFromHeaders(ctx context.Context, accountID int64, headers http.Header) {
+func (s *OpenAIGatewayService) UpdateCodexUsageSnapshotFromHeaders(ctx context.Context, userID, accountID int64, headers http.Header) {
 	if accountID <= 0 || headers == nil {
 		return
 	}
 	if snapshot := ParseCodexRateLimitHeaders(headers); snapshot != nil {
-		s.updateCodexUsageSnapshot(ctx, accountID, snapshot)
+		s.updateCodexUsageSnapshot(ctx, userID, accountID, snapshot)
 	}
 }
 

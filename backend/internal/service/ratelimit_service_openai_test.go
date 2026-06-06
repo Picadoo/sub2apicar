@@ -46,12 +46,13 @@ func TestCalculateOpenAI429ResetTime_7dExhausted(t *testing.T) {
 func TestCalculateOpenAI429ResetTime_5hExhausted(t *testing.T) {
 	svc := &RateLimitService{}
 
-	// Simulate headers when 5h limit is exhausted (100% used)
+	// Simulate headers when 5h limit is exhausted (100% used).
+	// used-percent 是「已用%」(passthrough)：5h 打满 = secondary-used=100。
 	headers := http.Header{}
 	headers.Set("x-codex-primary-used-percent", "50")
 	headers.Set("x-codex-primary-reset-after-seconds", "500000")
 	headers.Set("x-codex-primary-window-minutes", "10080") // 7 days
-	headers.Set("x-codex-secondary-used-percent", "0")
+	headers.Set("x-codex-secondary-used-percent", "100")
 	headers.Set("x-codex-secondary-reset-after-seconds", "3600") // 1 hour
 	headers.Set("x-codex-secondary-window-minutes", "300")       // 5 hours
 
@@ -122,7 +123,7 @@ func TestCalculateOpenAI429ResetTime_ReversedWindowOrder(t *testing.T) {
 
 	// Test when OpenAI sends primary as 5h and secondary as 7d (reversed)
 	headers := http.Header{}
-	headers.Set("x-codex-primary-used-percent", "0")           // This is 5h remaining%
+	headers.Set("x-codex-primary-used-percent", "100")         // 5h used% (passthrough) — 5h 打满
 	headers.Set("x-codex-primary-reset-after-seconds", "3600") // 1 hour
 	headers.Set("x-codex-primary-window-minutes", "300")       // 5 hours - smaller!
 	headers.Set("x-codex-secondary-used-percent", "50")
@@ -192,8 +193,9 @@ func TestHandle429_OpenAIPersistsCodexSnapshotImmediately(t *testing.T) {
 	if len(repo.updatedExtra) == 0 {
 		t.Fatal("expected codex snapshot to be persisted on 429")
 	}
-	if got := repo.updatedExtra["codex_5h_used_percent"]; got != 100.0 {
-		t.Fatalf("codex_5h_used_percent = %v, want 100", got)
+	// 5h = secondary used%=0 直通（此 429 来自 7d/primary=100 打满）。曾断言 100 为旧反转残留。
+	if got := repo.updatedExtra["codex_5h_used_percent"]; got != 0.0 {
+		t.Fatalf("codex_5h_used_percent = %v, want 0", got)
 	}
 	if got := repo.updatedExtra["codex_7d_used_percent"]; got != 100.0 {
 		t.Fatalf("codex_7d_used_percent = %v, want 100", got)
@@ -224,7 +226,7 @@ func TestNormalizedCodexLimits(t *testing.T) {
 	pUsed := 100.0
 	pReset := 384607
 	pWindow := 10080
-	sRemaining := 3.0
+	sUsed := 3.0
 	sReset := 17369
 	sWindow := 300
 
@@ -232,7 +234,7 @@ func TestNormalizedCodexLimits(t *testing.T) {
 		PrimaryUsedPercent:         &pUsed,
 		PrimaryResetAfterSeconds:   &pReset,
 		PrimaryWindowMinutes:       &pWindow,
-		SecondaryUsedPercent:       &sRemaining,
+		SecondaryUsedPercent:       &sUsed,
 		SecondaryResetAfterSeconds: &sReset,
 		SecondaryWindowMinutes:     &sWindow,
 	}
@@ -249,8 +251,8 @@ func TestNormalizedCodexLimits(t *testing.T) {
 	if normalized.Reset7dSeconds == nil || *normalized.Reset7dSeconds != 384607 {
 		t.Errorf("expected Reset7dSeconds=384607, got %v", normalized.Reset7dSeconds)
 	}
-	if normalized.Used5hPercent == nil || *normalized.Used5hPercent != 97.0 {
-		t.Errorf("expected Used5hPercent=97, got %v", normalized.Used5hPercent)
+	if normalized.Used5hPercent == nil || *normalized.Used5hPercent != 3.0 {
+		t.Errorf("expected Used5hPercent=3 (used%% passthrough), got %v", normalized.Used5hPercent)
 	}
 	if normalized.Reset5hSeconds == nil || *normalized.Reset5hSeconds != 17369 {
 		t.Errorf("expected Reset5hSeconds=17369, got %v", normalized.Reset5hSeconds)
@@ -338,11 +340,11 @@ func TestRateLimitService_HandleUpstreamError_403FallsBackToRawBody(t *testing.T
 
 func TestNormalizedCodexLimits_OnlySecondaryData(t *testing.T) {
 	// Test when only secondary has data, no window_minutes
-	sRemaining := 60.0
+	sUsed := 60.0
 	sReset := 3000
 
 	snapshot := &OpenAICodexUsageSnapshot{
-		SecondaryUsedPercent:       &sRemaining,
+		SecondaryUsedPercent:       &sUsed,
 		SecondaryResetAfterSeconds: &sReset,
 		// No window_minutes, no primary data
 	}
@@ -354,8 +356,8 @@ func TestNormalizedCodexLimits_OnlySecondaryData(t *testing.T) {
 
 	// Legacy assumption: primary=7d, secondary=5h
 	// So secondary goes to 5h
-	if normalized.Used5hPercent == nil || *normalized.Used5hPercent != 40.0 {
-		t.Errorf("expected Used5hPercent=40, got %v", normalized.Used5hPercent)
+	if normalized.Used5hPercent == nil || *normalized.Used5hPercent != 60.0 {
+		t.Errorf("expected Used5hPercent=60 (used%% passthrough), got %v", normalized.Used5hPercent)
 	}
 	if normalized.Reset5hSeconds == nil || *normalized.Reset5hSeconds != 3000 {
 		t.Errorf("expected Reset5hSeconds=3000, got %v", normalized.Reset5hSeconds)
@@ -370,13 +372,13 @@ func TestNormalizedCodexLimits_BothDataNoWindowMinutes(t *testing.T) {
 	// Test when both have data but no window_minutes
 	pUsed := 100.0
 	pReset := 400000
-	sRemaining := 30.0
+	sUsed := 30.0
 	sReset := 10000
 
 	snapshot := &OpenAICodexUsageSnapshot{
 		PrimaryUsedPercent:         &pUsed,
 		PrimaryResetAfterSeconds:   &pReset,
-		SecondaryUsedPercent:       &sRemaining,
+		SecondaryUsedPercent:       &sUsed,
 		SecondaryResetAfterSeconds: &sReset,
 		// No window_minutes
 	}
@@ -393,8 +395,8 @@ func TestNormalizedCodexLimits_BothDataNoWindowMinutes(t *testing.T) {
 	if normalized.Reset7dSeconds == nil || *normalized.Reset7dSeconds != 400000 {
 		t.Errorf("expected Reset7dSeconds=400000, got %v", normalized.Reset7dSeconds)
 	}
-	if normalized.Used5hPercent == nil || *normalized.Used5hPercent != 70.0 {
-		t.Errorf("expected Used5hPercent=70, got %v", normalized.Used5hPercent)
+	if normalized.Used5hPercent == nil || *normalized.Used5hPercent != 30.0 {
+		t.Errorf("expected Used5hPercent=30 (used%% passthrough), got %v", normalized.Used5hPercent)
 	}
 	if normalized.Reset5hSeconds == nil || *normalized.Reset5hSeconds != 10000 {
 		t.Errorf("expected Reset5hSeconds=10000, got %v", normalized.Reset5hSeconds)

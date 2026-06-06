@@ -132,7 +132,9 @@ func TestAccountTestService_OpenAISuccessPersistsSnapshotFromHeaders(t *testing.
 	require.Len(t, upstream.requests, 1)
 	require.Equal(t, HTTPUpstreamProfileOpenAI, HTTPUpstreamProfileFromContext(upstream.requests[0].Context()))
 	require.NotEmpty(t, repo.updatedExtra)
-	require.Equal(t, 58.0, repo.updatedExtra["codex_5h_used_percent"])
+	// 5h = secondary（window=300）按 used% 直通；7d = primary（window=10080）直通。
+	// 历史上这里曾断言 58（=100−42），那是上游 100−raw 反转 bug 的残留；已与线上 passthrough 对齐。
+	require.Equal(t, 42.0, repo.updatedExtra["codex_5h_used_percent"])
 	require.Equal(t, 88.0, repo.updatedExtra["codex_7d_used_percent"])
 	require.Contains(t, recorder.Body.String(), "test_complete")
 }
@@ -189,7 +191,8 @@ func TestAccountTestService_OpenAI429PersistsSnapshotAndRateLimitState(t *testin
 	err := svc.testOpenAIAccountConnection(ctx, account, "gpt-5.4", "", "")
 	require.Error(t, err)
 	require.NotEmpty(t, repo.updatedExtra)
-	require.Equal(t, 100.0, repo.updatedExtra["codex_5h_used_percent"])
+	// 5h = secondary used%=0 直通（该 429 来自 7d/primary=100 打满，不是 5h）。曾断言 100（=100−0）为旧反转残留。
+	require.Equal(t, 0.0, repo.updatedExtra["codex_5h_used_percent"])
 	require.Equal(t, account.ID, repo.rateLimitedID)
 	require.NotNil(t, repo.rateLimitedAt)
 	require.Equal(t, account.ID, repo.clearedErrorID)

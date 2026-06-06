@@ -1494,6 +1494,45 @@ var (
 			},
 		},
 	}
+	// UserAccountWindowQuotasColumns holds the columns for the "user_account_window_quotas" table.
+	UserAccountWindowQuotasColumns = []*schema.Column{
+		{Name: "id", Type: field.TypeInt64, Increment: true},
+		{Name: "created_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "updated_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "deleted_at", Type: field.TypeTime, Nullable: true, SchemaType: map[string]string{"postgres": "timestamptz"}},
+		{Name: "user_id", Type: field.TypeInt64},
+		{Name: "account_id", Type: field.TypeInt64},
+		{Name: "window_type", Type: field.TypeString, Size: 8},
+		{Name: "limit_percent", Type: field.TypeFloat64, Default: 23, SchemaType: map[string]string{"postgres": "decimal(7,4)"}},
+		{Name: "attributed_percent", Type: field.TypeFloat64, Default: 0, SchemaType: map[string]string{"postgres": "decimal(10,4)"}},
+		{Name: "window_reset_at", Type: field.TypeTime, Nullable: true, SchemaType: map[string]string{"postgres": "timestamptz"}},
+	}
+	// UserAccountWindowQuotasTable holds the schema information for the "user_account_window_quotas" table.
+	UserAccountWindowQuotasTable = &schema.Table{
+		Name:       "user_account_window_quotas",
+		Columns:    UserAccountWindowQuotasColumns,
+		PrimaryKey: []*schema.Column{UserAccountWindowQuotasColumns[0]},
+		Indexes: []*schema.Index{
+			{
+				Name:    "useraccountwindowquota_user_id_account_id_window_type",
+				Unique:  true,
+				Columns: []*schema.Column{UserAccountWindowQuotasColumns[4], UserAccountWindowQuotasColumns[5], UserAccountWindowQuotasColumns[6]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "deleted_at IS NULL",
+				},
+			},
+			{
+				Name:    "useraccountwindowquota_account_id_window_type",
+				Unique:  false,
+				Columns: []*schema.Column{UserAccountWindowQuotasColumns[5], UserAccountWindowQuotasColumns[6]},
+			},
+			{
+				Name:    "useraccountwindowquota_user_id",
+				Unique:  false,
+				Columns: []*schema.Column{UserAccountWindowQuotasColumns[4]},
+			},
+		},
+	}
 	// UserAllowedGroupsColumns holds the columns for the "user_allowed_groups" table.
 	UserAllowedGroupsColumns = []*schema.Column{
 		{Name: "created_at", Type: field.TypeTime, SchemaType: map[string]string{"postgres": "timestamptz"}},
@@ -1781,6 +1820,7 @@ var (
 		UsageCleanupTasksTable,
 		UsageLogsTable,
 		UsersTable,
+		UserAccountWindowQuotasTable,
 		UserAllowedGroupsTable,
 		UserAttributeDefinitionsTable,
 		UserAttributeValuesTable,
@@ -1904,6 +1944,9 @@ func init() {
 	}
 	UsersTable.Annotation = &entsql.Annotation{
 		Table: "users",
+	}
+	UserAccountWindowQuotasTable.Annotation = &entsql.Annotation{
+		Table: "user_account_window_quotas",
 	}
 	UserAllowedGroupsTable.ForeignKeys[0].RefTable = UsersTable
 	UserAllowedGroupsTable.ForeignKeys[1].RefTable = GroupsTable

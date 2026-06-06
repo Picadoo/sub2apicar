@@ -36,6 +36,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/usagecleanuptask"
 	"github.com/Wei-Shaw/sub2api/ent/usagelog"
 	"github.com/Wei-Shaw/sub2api/ent/user"
+	"github.com/Wei-Shaw/sub2api/ent/useraccountwindowquota"
 	"github.com/Wei-Shaw/sub2api/ent/userallowedgroup"
 	"github.com/Wei-Shaw/sub2api/ent/userattributedefinition"
 	"github.com/Wei-Shaw/sub2api/ent/userattributevalue"
@@ -1874,6 +1875,52 @@ func init() {
 	userDescRpmLimit := userFields[19].Descriptor()
 	// user.DefaultRpmLimit holds the default value on creation for the rpm_limit field.
 	user.DefaultRpmLimit = userDescRpmLimit.Default.(int)
+	useraccountwindowquotaMixin := schema.UserAccountWindowQuota{}.Mixin()
+	useraccountwindowquotaMixinHooks1 := useraccountwindowquotaMixin[1].Hooks()
+	useraccountwindowquota.Hooks[0] = useraccountwindowquotaMixinHooks1[0]
+	useraccountwindowquotaMixinInters1 := useraccountwindowquotaMixin[1].Interceptors()
+	useraccountwindowquota.Interceptors[0] = useraccountwindowquotaMixinInters1[0]
+	useraccountwindowquotaMixinFields0 := useraccountwindowquotaMixin[0].Fields()
+	_ = useraccountwindowquotaMixinFields0
+	useraccountwindowquotaFields := schema.UserAccountWindowQuota{}.Fields()
+	_ = useraccountwindowquotaFields
+	// useraccountwindowquotaDescCreatedAt is the schema descriptor for created_at field.
+	useraccountwindowquotaDescCreatedAt := useraccountwindowquotaMixinFields0[0].Descriptor()
+	// useraccountwindowquota.DefaultCreatedAt holds the default value on creation for the created_at field.
+	useraccountwindowquota.DefaultCreatedAt = useraccountwindowquotaDescCreatedAt.Default.(func() time.Time)
+	// useraccountwindowquotaDescUpdatedAt is the schema descriptor for updated_at field.
+	useraccountwindowquotaDescUpdatedAt := useraccountwindowquotaMixinFields0[1].Descriptor()
+	// useraccountwindowquota.DefaultUpdatedAt holds the default value on creation for the updated_at field.
+	useraccountwindowquota.DefaultUpdatedAt = useraccountwindowquotaDescUpdatedAt.Default.(func() time.Time)
+	// useraccountwindowquota.UpdateDefaultUpdatedAt holds the default value on update for the updated_at field.
+	useraccountwindowquota.UpdateDefaultUpdatedAt = useraccountwindowquotaDescUpdatedAt.UpdateDefault.(func() time.Time)
+	// useraccountwindowquotaDescWindowType is the schema descriptor for window_type field.
+	useraccountwindowquotaDescWindowType := useraccountwindowquotaFields[2].Descriptor()
+	// useraccountwindowquota.WindowTypeValidator is a validator for the "window_type" field. It is called by the builders before save.
+	useraccountwindowquota.WindowTypeValidator = func() func(string) error {
+		validators := useraccountwindowquotaDescWindowType.Validators
+		fns := [...]func(string) error{
+			validators[0].(func(string) error),
+			validators[1].(func(string) error),
+			validators[2].(func(string) error),
+		}
+		return func(window_type string) error {
+			for _, fn := range fns {
+				if err := fn(window_type); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}()
+	// useraccountwindowquotaDescLimitPercent is the schema descriptor for limit_percent field.
+	useraccountwindowquotaDescLimitPercent := useraccountwindowquotaFields[3].Descriptor()
+	// useraccountwindowquota.DefaultLimitPercent holds the default value on creation for the limit_percent field.
+	useraccountwindowquota.DefaultLimitPercent = useraccountwindowquotaDescLimitPercent.Default.(float64)
+	// useraccountwindowquotaDescAttributedPercent is the schema descriptor for attributed_percent field.
+	useraccountwindowquotaDescAttributedPercent := useraccountwindowquotaFields[4].Descriptor()
+	// useraccountwindowquota.DefaultAttributedPercent holds the default value on creation for the attributed_percent field.
+	useraccountwindowquota.DefaultAttributedPercent = useraccountwindowquotaDescAttributedPercent.Default.(float64)
 	userallowedgroupFields := schema.UserAllowedGroup{}.Fields()
 	_ = userallowedgroupFields
 	// userallowedgroupDescCreatedAt is the schema descriptor for created_at field.

@@ -84,8 +84,10 @@ func TestExtractOpenAICodexProbeUpdatesAccepts429WithCodexHeaders(t *testing.T) 
 	if len(updates) == 0 {
 		t.Fatal("expected codex probe updates from 429 headers")
 	}
-	if got := updates["codex_5h_used_percent"]; got != 100.0 {
-		t.Fatalf("codex_5h_used_percent = %v, want 100", got)
+	// secondary(5h) used header is 0 → 5h used% must be 0 (passthrough, not inverted).
+	// The 429 here is driven by the primary(7d) window at 100%, not the 5h window.
+	if got := updates["codex_5h_used_percent"]; got != 0.0 {
+		t.Fatalf("codex_5h_used_percent = %v, want 0 (used%% passthrough)", got)
 	}
 	if got := updates["codex_7d_used_percent"]; got != 100.0 {
 		t.Fatalf("codex_7d_used_percent = %v, want 100", got)

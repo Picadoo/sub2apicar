@@ -43,6 +43,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/ent/usagecleanuptask"
 	"github.com/Wei-Shaw/sub2api/ent/usagelog"
 	"github.com/Wei-Shaw/sub2api/ent/user"
+	"github.com/Wei-Shaw/sub2api/ent/useraccountwindowquota"
 	"github.com/Wei-Shaw/sub2api/ent/userallowedgroup"
 	"github.com/Wei-Shaw/sub2api/ent/userattributedefinition"
 	"github.com/Wei-Shaw/sub2api/ent/userattributevalue"
@@ -90,6 +91,7 @@ const (
 	TypeUsageCleanupTask              = "UsageCleanupTask"
 	TypeUsageLog                      = "UsageLog"
 	TypeUser                          = "User"
+	TypeUserAccountWindowQuota        = "UserAccountWindowQuota"
 	TypeUserAllowedGroup              = "UserAllowedGroup"
 	TypeUserAttributeDefinition       = "UserAttributeDefinition"
 	TypeUserAttributeValue            = "UserAttributeValue"
@@ -41032,6 +41034,940 @@ func (m *UserMutation) ResetEdge(name string) error {
 		return nil
 	}
 	return fmt.Errorf("unknown User edge %s", name)
+}
+
+// UserAccountWindowQuotaMutation represents an operation that mutates the UserAccountWindowQuota nodes in the graph.
+type UserAccountWindowQuotaMutation struct {
+	config
+	op                    Op
+	typ                   string
+	id                    *int64
+	created_at            *time.Time
+	updated_at            *time.Time
+	deleted_at            *time.Time
+	user_id               *int64
+	adduser_id            *int64
+	account_id            *int64
+	addaccount_id         *int64
+	window_type           *string
+	limit_percent         *float64
+	addlimit_percent      *float64
+	attributed_percent    *float64
+	addattributed_percent *float64
+	window_reset_at       *time.Time
+	clearedFields         map[string]struct{}
+	done                  bool
+	oldValue              func(context.Context) (*UserAccountWindowQuota, error)
+	predicates            []predicate.UserAccountWindowQuota
+}
+
+var _ ent.Mutation = (*UserAccountWindowQuotaMutation)(nil)
+
+// useraccountwindowquotaOption allows management of the mutation configuration using functional options.
+type useraccountwindowquotaOption func(*UserAccountWindowQuotaMutation)
+
+// newUserAccountWindowQuotaMutation creates new mutation for the UserAccountWindowQuota entity.
+func newUserAccountWindowQuotaMutation(c config, op Op, opts ...useraccountwindowquotaOption) *UserAccountWindowQuotaMutation {
+	m := &UserAccountWindowQuotaMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeUserAccountWindowQuota,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withUserAccountWindowQuotaID sets the ID field of the mutation.
+func withUserAccountWindowQuotaID(id int64) useraccountwindowquotaOption {
+	return func(m *UserAccountWindowQuotaMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *UserAccountWindowQuota
+		)
+		m.oldValue = func(ctx context.Context) (*UserAccountWindowQuota, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().UserAccountWindowQuota.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withUserAccountWindowQuota sets the old UserAccountWindowQuota of the mutation.
+func withUserAccountWindowQuota(node *UserAccountWindowQuota) useraccountwindowquotaOption {
+	return func(m *UserAccountWindowQuotaMutation) {
+		m.oldValue = func(context.Context) (*UserAccountWindowQuota, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m UserAccountWindowQuotaMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m UserAccountWindowQuotaMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *UserAccountWindowQuotaMutation) ID() (id int64, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *UserAccountWindowQuotaMutation) IDs(ctx context.Context) ([]int64, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []int64{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().UserAccountWindowQuota.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *UserAccountWindowQuotaMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *UserAccountWindowQuotaMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the UserAccountWindowQuota entity.
+// If the UserAccountWindowQuota object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserAccountWindowQuotaMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *UserAccountWindowQuotaMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// SetUpdatedAt sets the "updated_at" field.
+func (m *UserAccountWindowQuotaMutation) SetUpdatedAt(t time.Time) {
+	m.updated_at = &t
+}
+
+// UpdatedAt returns the value of the "updated_at" field in the mutation.
+func (m *UserAccountWindowQuotaMutation) UpdatedAt() (r time.Time, exists bool) {
+	v := m.updated_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUpdatedAt returns the old "updated_at" field's value of the UserAccountWindowQuota entity.
+// If the UserAccountWindowQuota object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserAccountWindowQuotaMutation) OldUpdatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUpdatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUpdatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUpdatedAt: %w", err)
+	}
+	return oldValue.UpdatedAt, nil
+}
+
+// ResetUpdatedAt resets all changes to the "updated_at" field.
+func (m *UserAccountWindowQuotaMutation) ResetUpdatedAt() {
+	m.updated_at = nil
+}
+
+// SetDeletedAt sets the "deleted_at" field.
+func (m *UserAccountWindowQuotaMutation) SetDeletedAt(t time.Time) {
+	m.deleted_at = &t
+}
+
+// DeletedAt returns the value of the "deleted_at" field in the mutation.
+func (m *UserAccountWindowQuotaMutation) DeletedAt() (r time.Time, exists bool) {
+	v := m.deleted_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDeletedAt returns the old "deleted_at" field's value of the UserAccountWindowQuota entity.
+// If the UserAccountWindowQuota object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserAccountWindowQuotaMutation) OldDeletedAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDeletedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDeletedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDeletedAt: %w", err)
+	}
+	return oldValue.DeletedAt, nil
+}
+
+// ClearDeletedAt clears the value of the "deleted_at" field.
+func (m *UserAccountWindowQuotaMutation) ClearDeletedAt() {
+	m.deleted_at = nil
+	m.clearedFields[useraccountwindowquota.FieldDeletedAt] = struct{}{}
+}
+
+// DeletedAtCleared returns if the "deleted_at" field was cleared in this mutation.
+func (m *UserAccountWindowQuotaMutation) DeletedAtCleared() bool {
+	_, ok := m.clearedFields[useraccountwindowquota.FieldDeletedAt]
+	return ok
+}
+
+// ResetDeletedAt resets all changes to the "deleted_at" field.
+func (m *UserAccountWindowQuotaMutation) ResetDeletedAt() {
+	m.deleted_at = nil
+	delete(m.clearedFields, useraccountwindowquota.FieldDeletedAt)
+}
+
+// SetUserID sets the "user_id" field.
+func (m *UserAccountWindowQuotaMutation) SetUserID(i int64) {
+	m.user_id = &i
+	m.adduser_id = nil
+}
+
+// UserID returns the value of the "user_id" field in the mutation.
+func (m *UserAccountWindowQuotaMutation) UserID() (r int64, exists bool) {
+	v := m.user_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUserID returns the old "user_id" field's value of the UserAccountWindowQuota entity.
+// If the UserAccountWindowQuota object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserAccountWindowQuotaMutation) OldUserID(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUserID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUserID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUserID: %w", err)
+	}
+	return oldValue.UserID, nil
+}
+
+// AddUserID adds i to the "user_id" field.
+func (m *UserAccountWindowQuotaMutation) AddUserID(i int64) {
+	if m.adduser_id != nil {
+		*m.adduser_id += i
+	} else {
+		m.adduser_id = &i
+	}
+}
+
+// AddedUserID returns the value that was added to the "user_id" field in this mutation.
+func (m *UserAccountWindowQuotaMutation) AddedUserID() (r int64, exists bool) {
+	v := m.adduser_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetUserID resets all changes to the "user_id" field.
+func (m *UserAccountWindowQuotaMutation) ResetUserID() {
+	m.user_id = nil
+	m.adduser_id = nil
+}
+
+// SetAccountID sets the "account_id" field.
+func (m *UserAccountWindowQuotaMutation) SetAccountID(i int64) {
+	m.account_id = &i
+	m.addaccount_id = nil
+}
+
+// AccountID returns the value of the "account_id" field in the mutation.
+func (m *UserAccountWindowQuotaMutation) AccountID() (r int64, exists bool) {
+	v := m.account_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAccountID returns the old "account_id" field's value of the UserAccountWindowQuota entity.
+// If the UserAccountWindowQuota object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserAccountWindowQuotaMutation) OldAccountID(ctx context.Context) (v int64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAccountID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAccountID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAccountID: %w", err)
+	}
+	return oldValue.AccountID, nil
+}
+
+// AddAccountID adds i to the "account_id" field.
+func (m *UserAccountWindowQuotaMutation) AddAccountID(i int64) {
+	if m.addaccount_id != nil {
+		*m.addaccount_id += i
+	} else {
+		m.addaccount_id = &i
+	}
+}
+
+// AddedAccountID returns the value that was added to the "account_id" field in this mutation.
+func (m *UserAccountWindowQuotaMutation) AddedAccountID() (r int64, exists bool) {
+	v := m.addaccount_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetAccountID resets all changes to the "account_id" field.
+func (m *UserAccountWindowQuotaMutation) ResetAccountID() {
+	m.account_id = nil
+	m.addaccount_id = nil
+}
+
+// SetWindowType sets the "window_type" field.
+func (m *UserAccountWindowQuotaMutation) SetWindowType(s string) {
+	m.window_type = &s
+}
+
+// WindowType returns the value of the "window_type" field in the mutation.
+func (m *UserAccountWindowQuotaMutation) WindowType() (r string, exists bool) {
+	v := m.window_type
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWindowType returns the old "window_type" field's value of the UserAccountWindowQuota entity.
+// If the UserAccountWindowQuota object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserAccountWindowQuotaMutation) OldWindowType(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWindowType is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWindowType requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWindowType: %w", err)
+	}
+	return oldValue.WindowType, nil
+}
+
+// ResetWindowType resets all changes to the "window_type" field.
+func (m *UserAccountWindowQuotaMutation) ResetWindowType() {
+	m.window_type = nil
+}
+
+// SetLimitPercent sets the "limit_percent" field.
+func (m *UserAccountWindowQuotaMutation) SetLimitPercent(f float64) {
+	m.limit_percent = &f
+	m.addlimit_percent = nil
+}
+
+// LimitPercent returns the value of the "limit_percent" field in the mutation.
+func (m *UserAccountWindowQuotaMutation) LimitPercent() (r float64, exists bool) {
+	v := m.limit_percent
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLimitPercent returns the old "limit_percent" field's value of the UserAccountWindowQuota entity.
+// If the UserAccountWindowQuota object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserAccountWindowQuotaMutation) OldLimitPercent(ctx context.Context) (v float64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLimitPercent is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLimitPercent requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLimitPercent: %w", err)
+	}
+	return oldValue.LimitPercent, nil
+}
+
+// AddLimitPercent adds f to the "limit_percent" field.
+func (m *UserAccountWindowQuotaMutation) AddLimitPercent(f float64) {
+	if m.addlimit_percent != nil {
+		*m.addlimit_percent += f
+	} else {
+		m.addlimit_percent = &f
+	}
+}
+
+// AddedLimitPercent returns the value that was added to the "limit_percent" field in this mutation.
+func (m *UserAccountWindowQuotaMutation) AddedLimitPercent() (r float64, exists bool) {
+	v := m.addlimit_percent
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetLimitPercent resets all changes to the "limit_percent" field.
+func (m *UserAccountWindowQuotaMutation) ResetLimitPercent() {
+	m.limit_percent = nil
+	m.addlimit_percent = nil
+}
+
+// SetAttributedPercent sets the "attributed_percent" field.
+func (m *UserAccountWindowQuotaMutation) SetAttributedPercent(f float64) {
+	m.attributed_percent = &f
+	m.addattributed_percent = nil
+}
+
+// AttributedPercent returns the value of the "attributed_percent" field in the mutation.
+func (m *UserAccountWindowQuotaMutation) AttributedPercent() (r float64, exists bool) {
+	v := m.attributed_percent
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldAttributedPercent returns the old "attributed_percent" field's value of the UserAccountWindowQuota entity.
+// If the UserAccountWindowQuota object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserAccountWindowQuotaMutation) OldAttributedPercent(ctx context.Context) (v float64, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldAttributedPercent is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldAttributedPercent requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldAttributedPercent: %w", err)
+	}
+	return oldValue.AttributedPercent, nil
+}
+
+// AddAttributedPercent adds f to the "attributed_percent" field.
+func (m *UserAccountWindowQuotaMutation) AddAttributedPercent(f float64) {
+	if m.addattributed_percent != nil {
+		*m.addattributed_percent += f
+	} else {
+		m.addattributed_percent = &f
+	}
+}
+
+// AddedAttributedPercent returns the value that was added to the "attributed_percent" field in this mutation.
+func (m *UserAccountWindowQuotaMutation) AddedAttributedPercent() (r float64, exists bool) {
+	v := m.addattributed_percent
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetAttributedPercent resets all changes to the "attributed_percent" field.
+func (m *UserAccountWindowQuotaMutation) ResetAttributedPercent() {
+	m.attributed_percent = nil
+	m.addattributed_percent = nil
+}
+
+// SetWindowResetAt sets the "window_reset_at" field.
+func (m *UserAccountWindowQuotaMutation) SetWindowResetAt(t time.Time) {
+	m.window_reset_at = &t
+}
+
+// WindowResetAt returns the value of the "window_reset_at" field in the mutation.
+func (m *UserAccountWindowQuotaMutation) WindowResetAt() (r time.Time, exists bool) {
+	v := m.window_reset_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldWindowResetAt returns the old "window_reset_at" field's value of the UserAccountWindowQuota entity.
+// If the UserAccountWindowQuota object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *UserAccountWindowQuotaMutation) OldWindowResetAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldWindowResetAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldWindowResetAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldWindowResetAt: %w", err)
+	}
+	return oldValue.WindowResetAt, nil
+}
+
+// ClearWindowResetAt clears the value of the "window_reset_at" field.
+func (m *UserAccountWindowQuotaMutation) ClearWindowResetAt() {
+	m.window_reset_at = nil
+	m.clearedFields[useraccountwindowquota.FieldWindowResetAt] = struct{}{}
+}
+
+// WindowResetAtCleared returns if the "window_reset_at" field was cleared in this mutation.
+func (m *UserAccountWindowQuotaMutation) WindowResetAtCleared() bool {
+	_, ok := m.clearedFields[useraccountwindowquota.FieldWindowResetAt]
+	return ok
+}
+
+// ResetWindowResetAt resets all changes to the "window_reset_at" field.
+func (m *UserAccountWindowQuotaMutation) ResetWindowResetAt() {
+	m.window_reset_at = nil
+	delete(m.clearedFields, useraccountwindowquota.FieldWindowResetAt)
+}
+
+// Where appends a list predicates to the UserAccountWindowQuotaMutation builder.
+func (m *UserAccountWindowQuotaMutation) Where(ps ...predicate.UserAccountWindowQuota) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the UserAccountWindowQuotaMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *UserAccountWindowQuotaMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.UserAccountWindowQuota, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *UserAccountWindowQuotaMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *UserAccountWindowQuotaMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (UserAccountWindowQuota).
+func (m *UserAccountWindowQuotaMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *UserAccountWindowQuotaMutation) Fields() []string {
+	fields := make([]string, 0, 9)
+	if m.created_at != nil {
+		fields = append(fields, useraccountwindowquota.FieldCreatedAt)
+	}
+	if m.updated_at != nil {
+		fields = append(fields, useraccountwindowquota.FieldUpdatedAt)
+	}
+	if m.deleted_at != nil {
+		fields = append(fields, useraccountwindowquota.FieldDeletedAt)
+	}
+	if m.user_id != nil {
+		fields = append(fields, useraccountwindowquota.FieldUserID)
+	}
+	if m.account_id != nil {
+		fields = append(fields, useraccountwindowquota.FieldAccountID)
+	}
+	if m.window_type != nil {
+		fields = append(fields, useraccountwindowquota.FieldWindowType)
+	}
+	if m.limit_percent != nil {
+		fields = append(fields, useraccountwindowquota.FieldLimitPercent)
+	}
+	if m.attributed_percent != nil {
+		fields = append(fields, useraccountwindowquota.FieldAttributedPercent)
+	}
+	if m.window_reset_at != nil {
+		fields = append(fields, useraccountwindowquota.FieldWindowResetAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *UserAccountWindowQuotaMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case useraccountwindowquota.FieldCreatedAt:
+		return m.CreatedAt()
+	case useraccountwindowquota.FieldUpdatedAt:
+		return m.UpdatedAt()
+	case useraccountwindowquota.FieldDeletedAt:
+		return m.DeletedAt()
+	case useraccountwindowquota.FieldUserID:
+		return m.UserID()
+	case useraccountwindowquota.FieldAccountID:
+		return m.AccountID()
+	case useraccountwindowquota.FieldWindowType:
+		return m.WindowType()
+	case useraccountwindowquota.FieldLimitPercent:
+		return m.LimitPercent()
+	case useraccountwindowquota.FieldAttributedPercent:
+		return m.AttributedPercent()
+	case useraccountwindowquota.FieldWindowResetAt:
+		return m.WindowResetAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *UserAccountWindowQuotaMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case useraccountwindowquota.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	case useraccountwindowquota.FieldUpdatedAt:
+		return m.OldUpdatedAt(ctx)
+	case useraccountwindowquota.FieldDeletedAt:
+		return m.OldDeletedAt(ctx)
+	case useraccountwindowquota.FieldUserID:
+		return m.OldUserID(ctx)
+	case useraccountwindowquota.FieldAccountID:
+		return m.OldAccountID(ctx)
+	case useraccountwindowquota.FieldWindowType:
+		return m.OldWindowType(ctx)
+	case useraccountwindowquota.FieldLimitPercent:
+		return m.OldLimitPercent(ctx)
+	case useraccountwindowquota.FieldAttributedPercent:
+		return m.OldAttributedPercent(ctx)
+	case useraccountwindowquota.FieldWindowResetAt:
+		return m.OldWindowResetAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown UserAccountWindowQuota field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *UserAccountWindowQuotaMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case useraccountwindowquota.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	case useraccountwindowquota.FieldUpdatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUpdatedAt(v)
+		return nil
+	case useraccountwindowquota.FieldDeletedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDeletedAt(v)
+		return nil
+	case useraccountwindowquota.FieldUserID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUserID(v)
+		return nil
+	case useraccountwindowquota.FieldAccountID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAccountID(v)
+		return nil
+	case useraccountwindowquota.FieldWindowType:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWindowType(v)
+		return nil
+	case useraccountwindowquota.FieldLimitPercent:
+		v, ok := value.(float64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLimitPercent(v)
+		return nil
+	case useraccountwindowquota.FieldAttributedPercent:
+		v, ok := value.(float64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetAttributedPercent(v)
+		return nil
+	case useraccountwindowquota.FieldWindowResetAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetWindowResetAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown UserAccountWindowQuota field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *UserAccountWindowQuotaMutation) AddedFields() []string {
+	var fields []string
+	if m.adduser_id != nil {
+		fields = append(fields, useraccountwindowquota.FieldUserID)
+	}
+	if m.addaccount_id != nil {
+		fields = append(fields, useraccountwindowquota.FieldAccountID)
+	}
+	if m.addlimit_percent != nil {
+		fields = append(fields, useraccountwindowquota.FieldLimitPercent)
+	}
+	if m.addattributed_percent != nil {
+		fields = append(fields, useraccountwindowquota.FieldAttributedPercent)
+	}
+	return fields
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *UserAccountWindowQuotaMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case useraccountwindowquota.FieldUserID:
+		return m.AddedUserID()
+	case useraccountwindowquota.FieldAccountID:
+		return m.AddedAccountID()
+	case useraccountwindowquota.FieldLimitPercent:
+		return m.AddedLimitPercent()
+	case useraccountwindowquota.FieldAttributedPercent:
+		return m.AddedAttributedPercent()
+	}
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *UserAccountWindowQuotaMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	case useraccountwindowquota.FieldUserID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddUserID(v)
+		return nil
+	case useraccountwindowquota.FieldAccountID:
+		v, ok := value.(int64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddAccountID(v)
+		return nil
+	case useraccountwindowquota.FieldLimitPercent:
+		v, ok := value.(float64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddLimitPercent(v)
+		return nil
+	case useraccountwindowquota.FieldAttributedPercent:
+		v, ok := value.(float64)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddAttributedPercent(v)
+		return nil
+	}
+	return fmt.Errorf("unknown UserAccountWindowQuota numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *UserAccountWindowQuotaMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(useraccountwindowquota.FieldDeletedAt) {
+		fields = append(fields, useraccountwindowquota.FieldDeletedAt)
+	}
+	if m.FieldCleared(useraccountwindowquota.FieldWindowResetAt) {
+		fields = append(fields, useraccountwindowquota.FieldWindowResetAt)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *UserAccountWindowQuotaMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *UserAccountWindowQuotaMutation) ClearField(name string) error {
+	switch name {
+	case useraccountwindowquota.FieldDeletedAt:
+		m.ClearDeletedAt()
+		return nil
+	case useraccountwindowquota.FieldWindowResetAt:
+		m.ClearWindowResetAt()
+		return nil
+	}
+	return fmt.Errorf("unknown UserAccountWindowQuota nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *UserAccountWindowQuotaMutation) ResetField(name string) error {
+	switch name {
+	case useraccountwindowquota.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	case useraccountwindowquota.FieldUpdatedAt:
+		m.ResetUpdatedAt()
+		return nil
+	case useraccountwindowquota.FieldDeletedAt:
+		m.ResetDeletedAt()
+		return nil
+	case useraccountwindowquota.FieldUserID:
+		m.ResetUserID()
+		return nil
+	case useraccountwindowquota.FieldAccountID:
+		m.ResetAccountID()
+		return nil
+	case useraccountwindowquota.FieldWindowType:
+		m.ResetWindowType()
+		return nil
+	case useraccountwindowquota.FieldLimitPercent:
+		m.ResetLimitPercent()
+		return nil
+	case useraccountwindowquota.FieldAttributedPercent:
+		m.ResetAttributedPercent()
+		return nil
+	case useraccountwindowquota.FieldWindowResetAt:
+		m.ResetWindowResetAt()
+		return nil
+	}
+	return fmt.Errorf("unknown UserAccountWindowQuota field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *UserAccountWindowQuotaMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *UserAccountWindowQuotaMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *UserAccountWindowQuotaMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *UserAccountWindowQuotaMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *UserAccountWindowQuotaMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *UserAccountWindowQuotaMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *UserAccountWindowQuotaMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown UserAccountWindowQuota unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *UserAccountWindowQuotaMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown UserAccountWindowQuota edge %s", name)
 }
 
 // UserAllowedGroupMutation represents an operation that mutates the UserAllowedGroup nodes in the graph.

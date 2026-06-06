@@ -33,6 +33,10 @@ func RegisterUserRoutes(
 			user.POST("/auth-identities/bind/start", h.User.StartIdentityBinding)
 			user.GET("/api-keys/:id/usage/daily", h.Usage.GetMyAPIKeyDailyUsage)
 			user.GET("/platform-quotas", h.User.GetMyPlatformQuotas)
+			user.GET("/account-window-quotas", h.AccountWindowQuota.GetMyWindows)
+			user.GET("/account-window-quotas/overview", h.AccountWindowQuota.AdminOverview)
+			user.POST("/account-window-quotas/donate", h.AccountWindowQuota.Donate)
+			user.GET("/chat-proxy-status", handler.ChatProxyStatus)
 
 			// 通知邮箱管理
 			notifyEmail := user.Group("/notify-email")

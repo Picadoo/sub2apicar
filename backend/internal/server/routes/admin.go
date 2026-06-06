@@ -97,6 +97,20 @@ func RegisterAdminRoutes(
 
 		// 邀请返利（专属用户管理）
 		registerAffiliateRoutes(admin, h)
+
+		// 账号窗口百分比配额（per-user × account × window 上限覆盖）
+		registerAccountWindowQuotaRoutes(admin, h)
+	}
+}
+
+func registerAccountWindowQuotaRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	quotas := admin.Group("/account-window-quotas")
+	{
+		quotas.GET("/overview", h.AccountWindowQuota.AdminOverview)
+		quotas.GET("/users/:id", h.AccountWindowQuota.AdminGetUserWindows)
+		quotas.POST("/limit", h.AccountWindowQuota.AdminSetLimit)
+		quotas.GET("/ceilings", h.AccountWindowQuota.AdminGetCeilings)
+		quotas.POST("/ceiling", h.AccountWindowQuota.AdminSetCeiling)
 	}
 }
 

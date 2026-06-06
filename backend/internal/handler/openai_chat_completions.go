@@ -200,6 +200,11 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			service.SetOpsLatencyMs(c, service.OpsTimeToFirstTokenMsKey, int64(*result.FirstTokenMs))
 		}
 		if err != nil {
+			// 用户在该账号上的窗口配额已耗尽：429 响应已在 ForwardAsChatCompletions 内写出。
+			// 客户端业务限制而非账号健康问题，不上报调度失败、不 failover、不二次写响应。
+			if errors.Is(err, service.ErrUserAccountWindowQuotaExceeded) {
+				return
+			}
 			if result != nil && result.ImageCount > 0 {
 				reqLog.Warn("openai_chat_completions.forward_partial_error_with_image_result",
 					zap.Int64("account_id", account.ID),
