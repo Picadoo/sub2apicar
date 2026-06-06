@@ -2126,6 +2126,9 @@ export default {
         saveFailed: '保存失败',
         invalidLimit: 'limit 必须是 0–100 之间的数字',
         invalidCeiling: '总额上限必须是 1–100 之间的数字',
+        seatsLabel: '车位数（共享人数）：',
+        seatsHint: '人均默认 = 上限/车位 ≈ {pct}%（换 3/5/8 人车只改这里，已设过的 limit 不受影响）',
+        invalidSeats: '车位数必须是 1–100 之间的整数',
       }
     },
 

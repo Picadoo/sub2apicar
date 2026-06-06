@@ -111,9 +111,6 @@ type stubWindowRepo struct {
 	rows []UserAccountWindowQuotaRecord
 }
 
-func (s *stubWindowRepo) AddAttributedPercent(context.Context, int64, int64, string, float64, *time.Time, float64) error {
-	return nil
-}
 func (s *stubWindowRepo) ResetWindowForAccount(context.Context, int64, string, *time.Time) error {
 	return nil
 }
@@ -138,7 +135,7 @@ func (s *stubWindowRepo) RecomputeWindowShares(context.Context, int64, string, f
 func (s *stubWindowRepo) ListAllWithUser(context.Context) ([]AdminWindowQuotaOverviewRow, error) {
 	return nil, nil
 }
-func (s *stubWindowRepo) SetDonatePoolFraction(context.Context, int64, int64, string, float64) error {
+func (s *stubWindowRepo) SetDonatePoolFraction(context.Context, int64, int64, string, float64, float64) error {
 	return nil
 }
 

@@ -68,12 +68,21 @@ export interface AccountWindowCeilingItem {
 export interface AccountWindowCeilingsResponse {
   enabled: boolean
   ceilings: AccountWindowCeilingItem[]
+  /** 车位数（共享人数）。 */
+  seats?: number
+  /** 人均默认上限 = ceiling/seats。 */
+  default_limit_percent?: number
 }
 
-/** 管理端：获取各官方窗口的总额上限（所有用户 limit 之和的上限，默认 92%）。 */
+/** 管理端：获取各官方窗口的总额上限（所有用户 limit 之和的上限，默认 92%）+ 车位数。 */
 export async function getAccountWindowCeilings(): Promise<AccountWindowCeilingsResponse> {
   const { data } = await apiClient.get<AccountWindowCeilingsResponse>('/admin/account-window-quotas/ceilings')
   return data
+}
+
+/** 管理端：设置车位数（共享人数）。换 3/5/8 人车只改这个，人均默认 = ceiling/seats 自动适配。 */
+export async function setAccountWindowSeats(seats: number): Promise<void> {
+  await apiClient.post('/admin/account-window-quotas/seats', { seats })
 }
 
 export interface SetAccountWindowCeilingPayload {
@@ -106,8 +115,12 @@ export interface AdminWindowQuotaOverviewItem {
   limit_percent: number
   used_percent: number
   remaining_percent: number
-  /** 5h 救急池捐赠比例（占自己份额，0~1）；7d 恒 0。 */
+  /** 本窗口救急池捐赠比例（5h/7d 各自独立，0~1）。 */
   donate_fraction: number
+  /** 含救急池增量/捐赠自留后的有效上限%。 */
+  effective_limit_percent?: number
+  /** 该账号该窗口救急池当前可借总额%。 */
+  pool_available_percent?: number
   window_reset_at?: string
   reset_in_seconds?: number
 }
@@ -133,6 +146,7 @@ export const accountWindowQuotaAPI = {
   setAccountWindowLimit,
   getAccountWindowCeilings,
   setAccountWindowCeiling,
+  setAccountWindowSeats,
   setAccountWindowDonate,
 }
 

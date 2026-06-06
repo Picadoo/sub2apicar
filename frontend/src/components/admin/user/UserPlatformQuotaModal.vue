@@ -135,6 +135,16 @@
           </div>
         </div>
 
+        <!-- 车位数（共享人数）：人均默认 = ceiling/seats，换 3/5/8 人车只改这里 -->
+        <div class="mb-3 flex flex-wrap items-center gap-3 rounded-lg bg-gray-50 px-3 py-2 dark:bg-dark-800">
+          <span class="text-xs text-gray-600 dark:text-gray-300">{{ t('admin.users.windowQuota.seatsLabel') }}</span>
+          <input v-model.number="seatsDraft" type="number" min="1" max="100" step="1" class="input w-20" />
+          <span class="text-xs text-gray-400">{{ t('admin.users.windowQuota.seatsHint', { pct: perSeatPct }) }}</span>
+          <button type="button" class="btn btn-primary btn-sm" :disabled="seatsSaving" @click="onSaveSeats">
+            {{ t('admin.users.windowQuota.save') }}
+          </button>
+        </div>
+
         <div v-if="windowLoading" class="py-6 text-center text-gray-500">{{ t('common.loading') }}</div>
         <template v-else>
           <div
@@ -226,6 +236,7 @@ import {
   setAccountWindowLimit,
   getAccountWindowCeilings,
   setAccountWindowCeiling,
+  setAccountWindowSeats,
   type AccountWindowQuotaItem,
 } from '@/api/accountWindowQuota'
 import type { AdminUser, PlatformQuotaItem, PlatformQuotaPlatform, PlatformQuotaWindow } from '@/types'
@@ -268,6 +279,14 @@ const windowRows = ref<AccountWindowQuotaItem[]>([])
 const windowSaving = reactive<Record<string, boolean>>({})
 const ceilingDraft = reactive<Record<WindowType, number>>({ '5h': 92, '7d': 92 })
 const ceilingSaving = reactive<Record<string, boolean>>({})
+// 车位数（共享人数）：人均默认 = ceiling/seats
+const seatsDraft = ref(4)
+const seatsSaving = ref(false)
+const perSeatPct = computed(() => {
+  const s = seatsDraft.value
+  if (!s || s <= 0) return 0
+  return Math.round((ceilingDraft['5h'] / s) * 10) / 10
+})
 
 interface WindowGroup {
   accountId: number
@@ -329,6 +348,9 @@ async function loadWindows() {
           ceilingDraft[c.window_type] = c.ceiling_percent
         }
       }
+      if (typeof ceil.seats === 'number' && ceil.seats > 0) {
+        seatsDraft.value = ceil.seats
+      }
     }
   } catch {
     windowRows.value = []
@@ -376,6 +398,23 @@ async function onSaveCeiling(wt: WindowType) {
     appStore.showError(e?.response?.data?.message || t('admin.users.windowQuota.saveFailed'))
   } finally {
     ceilingSaving[wt] = false
+  }
+}
+
+async function onSaveSeats() {
+  const v = seatsDraft.value
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 1 || v > 100) {
+    appStore.showError(t('admin.users.windowQuota.invalidSeats'))
+    return
+  }
+  seatsSaving.value = true
+  try {
+    await setAccountWindowSeats(Math.round(v))
+    appStore.showSuccess(t('admin.users.windowQuota.saveSuccess'))
+  } catch (e: any) {
+    appStore.showError(e?.response?.data?.message || t('admin.users.windowQuota.saveFailed'))
+  } finally {
+    seatsSaving.value = false
   }
 }
 

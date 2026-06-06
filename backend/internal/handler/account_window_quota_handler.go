@@ -145,17 +145,19 @@ func (h *AccountWindowQuotaHandler) AdminGetUserWindows(c *gin.Context) {
 }
 
 type adminWindowQuotaOverviewItem struct {
-	UserID           int64   `json:"user_id"`
-	Email            string  `json:"email"`
-	Username         string  `json:"username"`
-	AccountID        int64   `json:"account_id"`
-	WindowType       string  `json:"window_type"`
-	LimitPercent     float64 `json:"limit_percent"`
-	UsedPercent      float64 `json:"used_percent"`
-	RemainingPercent float64 `json:"remaining_percent"`
-	DonateFraction   float64 `json:"donate_fraction"` // 5h 救急池捐赠比例（占自己份额）；7d 恒 0
-	WindowResetAt    *string `json:"window_reset_at,omitempty"`
-	ResetInSeconds   *int64  `json:"reset_in_seconds,omitempty"`
+	UserID                int64   `json:"user_id"`
+	Email                 string  `json:"email"`
+	Username              string  `json:"username"`
+	AccountID             int64   `json:"account_id"`
+	WindowType            string  `json:"window_type"`
+	LimitPercent          float64 `json:"limit_percent"`
+	UsedPercent           float64 `json:"used_percent"`
+	RemainingPercent      float64 `json:"remaining_percent"`
+	DonateFraction        float64 `json:"donate_fraction"`         // 本窗口救急池捐赠比例（5h/7d 各自独立）
+	EffectiveLimitPercent float64 `json:"effective_limit_percent"` // 含救急池增量/捐赠自留后的有效上限
+	PoolAvailablePercent  float64 `json:"pool_available_percent"`  // 该账号该窗口救急池当前可借总额
+	WindowResetAt         *string `json:"window_reset_at,omitempty"`
+	ResetInSeconds        *int64  `json:"reset_in_seconds,omitempty"`
 }
 
 // AdminOverview 返回所有用户在所有账号所有窗口的配额（带邮箱），供管理员仪表盘总览。
@@ -173,20 +175,26 @@ func (h *AccountWindowQuotaHandler) AdminOverview(c *gin.Context) {
 	now := time.Now()
 	rows := make([]adminWindowQuotaOverviewItem, 0, len(records))
 	for _, r := range records {
-		remaining := r.LimitPercent - r.AttributedPercent
+		effLimit := r.EffectiveLimitPercent
+		if effLimit <= 0 {
+			effLimit = r.LimitPercent
+		}
+		remaining := effLimit - r.AttributedPercent
 		if remaining < 0 {
 			remaining = 0
 		}
 		item := adminWindowQuotaOverviewItem{
-			UserID:           r.UserID,
-			Email:            r.Email,
-			Username:         r.Username,
-			AccountID:        r.AccountID,
-			WindowType:       r.WindowType,
-			LimitPercent:     r.LimitPercent,
-			UsedPercent:      r.AttributedPercent,
-			RemainingPercent: remaining,
-			DonateFraction:   r.DonatePoolFraction,
+			UserID:                r.UserID,
+			Email:                 r.Email,
+			Username:              r.Username,
+			AccountID:             r.AccountID,
+			WindowType:            r.WindowType,
+			LimitPercent:          r.LimitPercent,
+			UsedPercent:           r.AttributedPercent,
+			RemainingPercent:      remaining,
+			DonateFraction:        r.DonatePoolFraction,
+			EffectiveLimitPercent: effLimit,
+			PoolAvailablePercent:  r.PoolAvailablePercent,
 		}
 		if r.WindowResetAt != nil {
 			iso := r.WindowResetAt.UTC().Format(time.RFC3339)
@@ -261,7 +269,41 @@ func (h *AccountWindowQuotaHandler) AdminGetCeilings(c *gin.Context) {
 		{WindowType: service.WindowType5h, CeilingPercent: h.quota.GetTotalCeiling(ctx, service.WindowType5h)},
 		{WindowType: service.WindowType7d, CeilingPercent: h.quota.GetTotalCeiling(ctx, service.WindowType7d)},
 	}
-	response.Success(c, gin.H{"enabled": true, "ceilings": ceilings})
+	seats := h.quota.GetSeats(ctx)
+	response.Success(c, gin.H{
+		"enabled":  true,
+		"ceilings": ceilings,
+		"seats":    seats,
+		// 人均默认上限 = ceiling/seats（仅作展示提示，自动建行时用）。
+		"default_limit_percent": h.quota.GetTotalCeiling(ctx, service.WindowType5h) / float64(seats),
+	})
+}
+
+type setAccountWindowSeatsRequest struct {
+	Seats int `json:"seats"`
+}
+
+// AdminSetSeats 设置车位数（共享人数）。换 3/5/8 人车只改这个，人均默认 = ceiling/seats 自动适配。
+// POST /api/v1/admin/account-window-quotas/seats
+func (h *AccountWindowQuotaHandler) AdminSetSeats(c *gin.Context) {
+	var req setAccountWindowSeatsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request body")
+		return
+	}
+	if req.Seats <= 0 || req.Seats > 100 {
+		response.BadRequest(c, "seats must be between 1 and 100")
+		return
+	}
+	if h.quota == nil || !h.quota.Enabled() {
+		response.BadRequest(c, "account window quota is not enabled")
+		return
+	}
+	if err := h.quota.SetSeats(c.Request.Context(), req.Seats); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"ok": true})
 }
 
 type setAccountWindowCeilingRequest struct {

@@ -25,6 +25,10 @@ const (
 	// 运行时可通过 SetTotalCeiling 覆盖（存 Redis，无 TTL），缺省回落到本默认值。
 	DefaultAccountWindowTotalCeilingPercent = 92.0
 
+	// DefaultAccountSeats 是默认车位数（共享同一账号的人数）。人均默认上限 = ceiling/seats。
+	// 4 人车：92/4=23%。运行时可通过 SetSeats 覆盖（存 Redis），换成 3/5/8 人车无需改代码。
+	DefaultAccountSeats = 4
+
 	// accountWindowBaselineTTLSeconds 是 Redis 基线键存活时间（8 天 > 最长 7d 窗口）。
 	accountWindowBaselineTTLSeconds = 8 * 24 * 60 * 60
 
@@ -61,15 +65,17 @@ type UserAccountWindowQuotaRecord struct {
 
 // AdminWindowQuotaOverviewRow 是管理端总览用的配额行（带用户邮箱/用户名）。
 type AdminWindowQuotaOverviewRow struct {
-	UserID             int64
-	Email              string
-	Username           string
-	AccountID          int64
-	WindowType         string
-	LimitPercent       float64
-	AttributedPercent  float64
-	WindowResetAt      *time.Time
-	DonatePoolFraction float64
+	UserID                int64
+	Email                 string
+	Username              string
+	AccountID             int64
+	WindowType            string
+	LimitPercent          float64
+	AttributedPercent     float64
+	WindowResetAt         *time.Time
+	DonatePoolFraction    float64
+	EffectiveLimitPercent float64 // 含救急池增量/捐赠自留后的当前有效上限
+	PoolAvailablePercent  float64 // 该账号该窗口救急池当前可借总额
 }
 
 // AccountWindowReset 标识一个待重置的 (账号, 窗口) 组合。
@@ -80,11 +86,8 @@ type AccountWindowReset struct {
 
 // UserAccountWindowQuotaRepository 定义 user × account × window 配额台账的数据访问接口。
 type UserAccountWindowQuotaRepository interface {
-	// AddAttributedPercent 累加 delta 到 (user, account, window) 的 attributed_percent。
-	// 行不存在时插入（limit_percent=defaultLimit，attributed_percent=delta）；
-	// 存在时累加并以 COALESCE 更新 window_reset_at（不覆盖已有 limit_percent）。
-	AddAttributedPercent(ctx context.Context, userID, accountID int64, window string, delta float64, resetAt *time.Time, defaultLimit float64) error
 	// ResetWindowForAccount 把某账号某窗口下所有活跃用户的 attributed_percent 清零，并刷新 window_reset_at。
+	// 7d 窗口重置时同时把 donate_pool_fraction 清零（周额度是"真捐"，每周需重新自愿；5h 保持不变）。
 	ResetWindowForAccount(ctx context.Context, accountID int64, window string, newResetAt *time.Time) error
 	// GetByUserAccountWindow 查询单条配额；未找到返回 (nil, nil)。
 	GetByUserAccountWindow(ctx context.Context, userID, accountID int64, window string) (*UserAccountWindowQuotaRecord, error)
@@ -97,7 +100,8 @@ type UserAccountWindowQuotaRepository interface {
 	// SetLimitForUserAccount 设置（或新建）某 (user, account, window) 的 limit_percent。
 	SetLimitForUserAccount(ctx context.Context, userID, accountID int64, window string, limitPercent float64) error
 	// SetDonatePoolFraction 设置（或新建）某 (user, account, window) 的救急池捐赠比例（∈[0,1]）。
-	SetDonatePoolFraction(ctx context.Context, userID, accountID int64, window string, fraction float64) error
+	// 新建行时 limit_percent 取 defaultLimit（人均默认 = ceiling/seats）。
+	SetDonatePoolFraction(ctx context.Context, userID, accountID int64, window string, fraction, defaultLimit float64) error
 	// RecomputeWindowShares 按"本窗口内各用户实际 token 占比"重算该账号该窗口下所有有用量用户的
 	// attributed_percent = officialPct × (该用户 token / 全部 token)。幂等：从 usage_logs 权威重算，
 	// 不累加、不受调用次数影响（不会重复计数）。windowStart 之后（含）的 usage_logs 计入当前窗口。
@@ -159,6 +163,11 @@ func accountWindowCeilingKey(window string) string {
 	return "uawq:ceiling:" + window
 }
 
+// accountWindowSeatsKey 是车位数（共享人数）配置键，全局一份（本部署 = 一辆车）。
+func accountWindowSeatsKey() string {
+	return "uawq:seats"
+}
+
 // Attribute 把本次响应携带的账号级官方利用率快照增量分摊给发起请求的用户。
 // best-effort：任何错误只记日志、不影响请求主流程。
 func (s *AccountWindowQuotaService) Attribute(ctx context.Context, userID, accountID int64, snapshot *OpenAICodexUsageSnapshot) {
@@ -189,8 +198,8 @@ func (s *AccountWindowQuotaService) attributeWindow(ctx context.Context, userID,
 		resetAt = &t
 	}
 
-	// observeBaseline 现在只用于"官方窗口回落/刷新"检测；归因不再依赖它的 delta。
-	if _, isReset, err := s.observeBaseline(ctx, accountID, window, officialPercent); err != nil {
+	// observeBaseline 只用于"官方窗口回落/刷新"检测。
+	if isReset, err := s.observeBaseline(ctx, accountID, window, officialPercent); err != nil {
 		slog.Warn("account_window_quota.baseline_failed", "account_id", accountID, "window", window, "error", err)
 	} else if isReset {
 		// 官方窗口刷新：先把该账号该窗口下所有用户清零并刷新重置时间，清掉上一窗口的归因。
@@ -206,29 +215,25 @@ func (s *AccountWindowQuotaService) attributeWindow(ctx context.Context, userID,
 	if resetAt != nil {
 		windowStart = resetAt.Add(-time.Duration(windowLengthSeconds(window)) * time.Second)
 	}
-	if err := s.repo.RecomputeWindowShares(ctx, accountID, window, officialPercent, windowStart, resetAt, DefaultAccountWindowLimitPercent); err != nil {
+	if err := s.repo.RecomputeWindowShares(ctx, accountID, window, officialPercent, windowStart, resetAt, s.defaultUserLimitPercent(ctx)); err != nil {
 		slog.Warn("account_window_quota.recompute_failed", "account_id", accountID, "window", window, "error", err)
 	}
 }
 
-// observeBaseline 调用 Lua 脚本原子地比较并更新基线，返回 (delta, isReset, error)。
-func (s *AccountWindowQuotaService) observeBaseline(ctx context.Context, accountID int64, window string, newPercent float64) (float64, bool, error) {
+// observeBaseline 调用 Lua 脚本原子地比较并更新基线，返回 (isReset, error)。
+// 仅用于检测官方窗口回落/刷新（脚本仍返回 delta，但归因改走 RecomputeWindowShares，这里不再使用 delta）。
+func (s *AccountWindowQuotaService) observeBaseline(ctx context.Context, accountID int64, window string, newPercent float64) (bool, error) {
 	res, err := s.rdb.Eval(ctx, accountWindowBaselineScript,
 		[]string{accountWindowBaselineKey(accountID, window)},
 		strconv.FormatFloat(newPercent, 'f', -1, 64),
 		accountWindowBaselineTTLSeconds,
 	).Result()
 	if err != nil {
-		return 0, false, err
+		return false, err
 	}
 	arr, ok := res.([]any)
 	if !ok || len(arr) < 2 {
-		return 0, false, nil
-	}
-	deltaStr, _ := arr[0].(string)
-	delta, _ := strconv.ParseFloat(deltaStr, 64)
-	if delta < 0 {
-		delta = 0
+		return false, nil
 	}
 	isReset := false
 	switch v := arr[1].(type) {
@@ -237,7 +242,7 @@ func (s *AccountWindowQuotaService) observeBaseline(ctx context.Context, account
 	case string:
 		isReset = v == "1"
 	}
-	return delta, isReset, nil
+	return isReset, nil
 }
 
 // windowQuotaEpsilon 是浮点比较容差，避免 decimal→float 误差在边界处导致放行/拦截抖动。
@@ -527,11 +532,50 @@ func (s *AccountWindowQuotaService) ListUserWindows(ctx context.Context, userID 
 }
 
 // ListAllForAdmin 返回所有用户在所有账号所有窗口的配额（带用户信息，管理端总览用）。
+// 顺带按账号建救急池视图，补上"有效上限/池剩余"，使管理端与用户端口径一致（能看出谁在借池）。
 func (s *AccountWindowQuotaService) ListAllForAdmin(ctx context.Context) ([]AdminWindowQuotaOverviewRow, error) {
 	if s == nil || s.repo == nil {
 		return nil, nil
 	}
-	return s.repo.ListAllWithUser(ctx)
+	rows, err := s.repo.ListAllWithUser(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// 按账号汇总成池视图。
+	byAccount := map[int64][]UserAccountWindowQuotaRecord{}
+	for _, r := range rows {
+		byAccount[r.AccountID] = append(byAccount[r.AccountID], UserAccountWindowQuotaRecord{
+			UserID:             r.UserID,
+			AccountID:          r.AccountID,
+			WindowType:         r.WindowType,
+			LimitPercent:       r.LimitPercent,
+			AttributedPercent:  r.AttributedPercent,
+			WindowResetAt:      r.WindowResetAt,
+			DonatePoolFraction: r.DonatePoolFraction,
+		})
+	}
+	pvByAccount := make(map[int64]*accountWindowPoolView, len(byAccount))
+	for acc, recs := range byAccount {
+		pvByAccount[acc] = buildAccountWindowPoolView(recs)
+	}
+	for i := range rows {
+		pv := pvByAccount[rows[i].AccountID]
+		if pv == nil {
+			rows[i].EffectiveLimitPercent = rows[i].LimitPercent
+			continue
+		}
+		switch rows[i].WindowType {
+		case WindowType5h:
+			rows[i].EffectiveLimitPercent = pv.effective5hLimit(rows[i].UserID)
+			rows[i].PoolAvailablePercent = pv.pool5hAvailable()
+		case WindowType7d:
+			rows[i].EffectiveLimitPercent = pv.effective7dLimit(rows[i].UserID)
+			rows[i].PoolAvailablePercent = pv.pool7dAvailable()
+		default:
+			rows[i].EffectiveLimitPercent = rows[i].LimitPercent
+		}
+	}
+	return rows, nil
 }
 
 // IsValidWindowType 报告 window 是否为受支持的官方窗口类型。
@@ -568,6 +612,51 @@ func (s *AccountWindowQuotaService) SetTotalCeiling(ctx context.Context, window 
 		return fmt.Errorf("ceiling percent must be in (0,100], got %.2f", percent)
 	}
 	return s.rdb.Set(ctx, accountWindowCeilingKey(window), strconv.FormatFloat(percent, 'f', -1, 64), 0).Err()
+}
+
+// GetSeats 返回车位数（共享同一账号的人数），缺失/非法回落到 DefaultAccountSeats。
+func (s *AccountWindowQuotaService) GetSeats(ctx context.Context) int {
+	if s == nil || s.rdb == nil {
+		return DefaultAccountSeats
+	}
+	v, err := s.rdb.Get(ctx, accountWindowSeatsKey()).Result()
+	if err != nil {
+		return DefaultAccountSeats
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 || n > 100 {
+		return DefaultAccountSeats
+	}
+	return n
+}
+
+// SetSeats 设置车位数（运行时可配，存 Redis，无 TTL）。换 3/5/8 人车只改这个。
+func (s *AccountWindowQuotaService) SetSeats(ctx context.Context, seats int) error {
+	if s == nil || s.rdb == nil {
+		return errors.New("account window quota service unavailable")
+	}
+	if seats <= 0 || seats > 100 {
+		return fmt.Errorf("seats must be in [1,100], got %d", seats)
+	}
+	return s.rdb.Set(ctx, accountWindowSeatsKey(), strconv.Itoa(seats), 0).Err()
+}
+
+// defaultUserLimitPercent 返回人均默认上限 = ceiling/seats（自动适配 3/5/8 人车）。
+// 仅用于"自动建行"时的默认 limit_percent；管理端显式设过的 limit 不受影响。
+// 任何异常回落到 DefaultAccountWindowLimitPercent（23），叠加账号级硬闸兜底，绝不超 ceiling。
+func (s *AccountWindowQuotaService) defaultUserLimitPercent(ctx context.Context) float64 {
+	if s == nil || s.rdb == nil {
+		return DefaultAccountWindowLimitPercent
+	}
+	seats := s.GetSeats(ctx)
+	if seats <= 0 {
+		return DefaultAccountWindowLimitPercent
+	}
+	dl := s.GetTotalCeiling(ctx, WindowType5h) / float64(seats)
+	if dl <= 0 || dl > 100 {
+		return DefaultAccountWindowLimitPercent
+	}
+	return dl
 }
 
 // SetLimitForUserAccount 设置某 (user, account, window) 的 limit_percent（管理端覆盖默认 23%）。
@@ -613,7 +702,7 @@ func (s *AccountWindowQuotaService) SetDonateFraction(ctx context.Context, userI
 	if !IsValidWindowType(window) {
 		return fmt.Errorf("invalid window type: %s", window)
 	}
-	return s.repo.SetDonatePoolFraction(ctx, userID, accountID, window, clampFraction(fraction))
+	return s.repo.SetDonatePoolFraction(ctx, userID, accountID, window, clampFraction(fraction), s.defaultUserLimitPercent(ctx))
 }
 
 // UserWindowQuotaView 是用户侧展示用的窗口配额（含救急池信息）。

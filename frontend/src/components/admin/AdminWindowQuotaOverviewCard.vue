@@ -121,19 +121,26 @@ function donatePctOf(u: UserRow): number {
   return Math.round(f * 100)
 }
 
-// 单元格：进度条 + "已用% / 上限%"；无数据显示 "-"
+// 单元格：进度条 + "已用% / 有效上限%"；借池时上限>基础会标蓝。无数据显示 "-"
 const WindowCell: FunctionalComponent<{ item?: AdminWindowQuotaOverviewItem }> = (props) => {
   const it = props.item
   if (!it) return h('span', { class: 'text-xs text-gray-400' }, '-')
-  const p = calcPercent(it.used_percent, it.limit_percent)
+  const eff = it.effective_limit_percent && it.effective_limit_percent > 0 ? it.effective_limit_percent : it.limit_percent
+  const borrowing = eff > it.limit_percent + 0.01
+  const p = calcPercent(it.used_percent, eff)
   return h('div', { class: 'flex items-center gap-2' }, [
     h('div', { class: 'h-1.5 w-12 shrink-0 overflow-hidden rounded-full bg-gray-200 dark:bg-dark-700' }, [
       h('div', { class: ['h-full rounded-full', barClass(p)], style: { width: p + '%' } }),
     ]),
     h(
       'span',
-      { class: 'whitespace-nowrap font-mono text-xs text-gray-600 dark:text-gray-300' },
-      `${fmt(it.used_percent)}% / ${fmt(it.limit_percent)}%`,
+      {
+        class: [
+          'whitespace-nowrap font-mono text-xs',
+          borrowing ? 'text-blue-600 dark:text-blue-400' : 'text-gray-600 dark:text-gray-300',
+        ],
+      },
+      `${fmt(it.used_percent)}% / ${fmt(eff)}%${borrowing ? ' 🤝' : ''}`,
     ),
   ])
 }

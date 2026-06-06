@@ -22,22 +22,6 @@ func NewUserAccountWindowQuotaRepository(client *dbent.Client) service.UserAccou
 	return &userAccountWindowQuotaRepository{client: client}
 }
 
-// AddAttributedPercent 累加 delta 到 (user, account, window) 的 attributed_percent。
-// 行不存在时插入（limit_percent=defaultLimit）；存在时累加并 COALESCE 更新 window_reset_at，
-// 保留管理员可能已设置的个性化 limit_percent（ON CONFLICT 不覆盖 limit_percent）。
-func (r *userAccountWindowQuotaRepository) AddAttributedPercent(ctx context.Context, userID, accountID int64, window string, delta float64, resetAt *time.Time, defaultLimit float64) error {
-	client := clientFromContext(ctx, r.client)
-	const q = `INSERT INTO user_account_window_quotas
-		(user_id, account_id, window_type, limit_percent, attributed_percent, window_reset_at, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
-		ON CONFLICT (user_id, account_id, window_type) WHERE deleted_at IS NULL DO UPDATE SET
-			attributed_percent = user_account_window_quotas.attributed_percent + EXCLUDED.attributed_percent,
-			window_reset_at    = COALESCE(EXCLUDED.window_reset_at, user_account_window_quotas.window_reset_at),
-			updated_at         = EXCLUDED.updated_at`
-	_, err := client.ExecContext(ctx, q, userID, accountID, window, defaultLimit, delta, nullableTime(resetAt), time.Now())
-	return err
-}
-
 // RecomputeWindowShares 按"本窗口内各用户实际 token 占比"重算该账号该窗口下所有有用量用户的
 // attributed_percent = officialPct × (该用户 token / 全部 token)。
 // 幂等：从 usage_logs 权威聚合重算（不累加、不受调用次数影响），attributed_percent 为绝对 SET。
@@ -98,10 +82,13 @@ func (r *userAccountWindowQuotaRepository) RecomputeWindowShares(ctx context.Con
 }
 
 // ResetWindowForAccount 把某账号某窗口下所有活跃记录的 attributed_percent 清零并刷新 window_reset_at。
+// 7d 窗口重置时同时把 donate_pool_fraction 清零：周额度是"真捐"，每周需重新自愿捐；5h 保持不变（便宜、刷新快）。
 func (r *userAccountWindowQuotaRepository) ResetWindowForAccount(ctx context.Context, accountID int64, window string, newResetAt *time.Time) error {
 	client := clientFromContext(ctx, r.client)
 	const q = `UPDATE user_account_window_quotas
-		SET attributed_percent = 0, window_reset_at = $3, updated_at = $4
+		SET attributed_percent = 0,
+			donate_pool_fraction = CASE WHEN $2 = '7d' THEN 0 ELSE donate_pool_fraction END,
+			window_reset_at = $3, updated_at = $4
 		WHERE account_id = $1 AND window_type = $2 AND deleted_at IS NULL`
 	_, err := client.ExecContext(ctx, q, accountID, window, nullableTime(newResetAt), time.Now())
 	return err
@@ -178,7 +165,7 @@ func scanWindowQuotaRecords(rows *sql.Rows) ([]service.UserAccountWindowQuotaRec
 
 // SetDonatePoolFraction 设置（或新建）某 (user, account, window) 的救急池捐赠比例（∈[0,1]）。
 // 5h、7d 各自独立；ON CONFLICT 不覆盖 limit_percent / attributed_percent（仅改捐赠比例）。
-func (r *userAccountWindowQuotaRepository) SetDonatePoolFraction(ctx context.Context, userID, accountID int64, window string, fraction float64) error {
+func (r *userAccountWindowQuotaRepository) SetDonatePoolFraction(ctx context.Context, userID, accountID int64, window string, fraction, defaultLimit float64) error {
 	client := clientFromContext(ctx, r.client)
 	const q = `INSERT INTO user_account_window_quotas
 		(user_id, account_id, window_type, limit_percent, attributed_percent, donate_pool_fraction, created_at, updated_at)
@@ -186,7 +173,7 @@ func (r *userAccountWindowQuotaRepository) SetDonatePoolFraction(ctx context.Con
 		ON CONFLICT (user_id, account_id, window_type) WHERE deleted_at IS NULL DO UPDATE SET
 			donate_pool_fraction = EXCLUDED.donate_pool_fraction,
 			updated_at           = EXCLUDED.updated_at`
-	_, err := client.ExecContext(ctx, q, userID, accountID, window, service.DefaultAccountWindowLimitPercent, fraction, time.Now())
+	_, err := client.ExecContext(ctx, q, userID, accountID, window, defaultLimit, fraction, time.Now())
 	return err
 }
 

@@ -111,6 +111,7 @@ func registerAccountWindowQuotaRoutes(admin *gin.RouterGroup, h *handler.Handler
 		quotas.POST("/limit", h.AccountWindowQuota.AdminSetLimit)
 		quotas.GET("/ceilings", h.AccountWindowQuota.AdminGetCeilings)
 		quotas.POST("/ceiling", h.AccountWindowQuota.AdminSetCeiling)
+		quotas.POST("/seats", h.AccountWindowQuota.AdminSetSeats)
 	}
 }
 
