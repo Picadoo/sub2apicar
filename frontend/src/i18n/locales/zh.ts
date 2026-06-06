@@ -2125,11 +2125,23 @@ export default {
         saveSuccess: '已保存',
         saveFailed: '保存失败',
         invalidLimit: 'limit 必须是 0–100 之间的数字',
-        invalidCeiling: '总额上限必须是 1–100 之间的数字',
-        seatsLabel: '车位数（共享人数）：',
-        seatsHint: '人均默认 = 上限/车位 ≈ {pct}%（换 3/5/8 人车只改这里，已设过的 limit 不受影响）',
-        invalidSeats: '车位数必须是 1–100 之间的整数',
+        globalConfigHint: '全局的「车位数 / 窗口总额上限」已移到管理员仪表盘顶部统一配置；这里只设这一个用户的 limit%（留空/默认走人均=上限÷车位）。',
       }
+    },
+
+    windowQuotaConfig: {
+      title: '拼车配额配置（Codex）',
+      subtitle: '整辆车的全局设置：车位数 + 窗口总额上限',
+      seatsLabel: '车位数（共享人数）',
+      perSeat: '人均默认 ≈ {pct}%',
+      ceiling5h: '5h 窗口总额上限',
+      ceiling7d: '7d 窗口总额上限',
+      save: '保存',
+      saved: '已保存',
+      saveFailed: '保存失败',
+      invalidSeats: '车位数必须是 1–100 之间的整数',
+      invalidCeiling: '总额上限必须是 1–100 之间的数字',
+      note: '全局设置，影响整辆车。换 3/5/8 人车只改车位数即可（人均=上限÷车位 自动适配）；已手动单独设过 limit% 的用户不受影响。',
     },
 
     windowQuotaOverview: {

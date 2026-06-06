@@ -7,6 +7,9 @@
       </div>
 
       <template v-else-if="stats">
+        <!-- 拼车配额全局配置（车位数 + 窗口总额上限）——仅管理员仪表盘可见可改 -->
+        <AdminWindowQuotaConfigCard />
+
         <!-- 窗口百分比配额总览（自用拼车：各成员对每个账号的 5h/7d 占用，无数据则不显示） -->
         <AdminWindowQuotaOverviewCard />
 
@@ -321,6 +324,7 @@ import Select from '@/components/common/Select.vue'
 import ModelDistributionChart from '@/components/charts/ModelDistributionChart.vue'
 import TokenUsageTrend from '@/components/charts/TokenUsageTrend.vue'
 import AdminWindowQuotaOverviewCard from '@/components/admin/AdminWindowQuotaOverviewCard.vue'
+import AdminWindowQuotaConfigCard from '@/components/admin/AdminWindowQuotaConfigCard.vue'
 import ChatProxyStatusCard from '@/components/user/dashboard/ChatProxyStatusCard.vue'
 
 import {
