@@ -129,9 +129,9 @@ func (h *APIKeyHandler) GetByID(c *gin.Context) {
 		return
 	}
 
-	// 验证所有权
+	// 验证所有权：返回 404 而非 403，避免泄露"key 是否存在"（CWE-204 信息泄露，借鉴上游 #2961）
 	if key.UserID != subject.UserID {
-		response.Forbidden(c, "Not authorized to access this key")
+		response.NotFound(c, "API key not found")
 		return
 	}
 
