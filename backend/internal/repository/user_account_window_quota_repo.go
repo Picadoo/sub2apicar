@@ -82,12 +82,13 @@ func (r *userAccountWindowQuotaRepository) RecomputeWindowShares(ctx context.Con
 }
 
 // ResetWindowForAccount 把某账号某窗口下所有活跃记录的 attributed_percent 清零并刷新 window_reset_at。
-// 7d 窗口重置时同时把 donate_pool_fraction 清零：周额度是"真捐"，每周需重新自愿捐；5h 保持不变（便宜、刷新快）。
+// 同时把 donate_pool_fraction 清零：捐赠是「逐窗口」的自愿行为，不跨窗口延续
+// （这个 5h/这周没用所以捐，不代表下个窗口也捐）；下个窗口想捐需重新拖滑块。
 func (r *userAccountWindowQuotaRepository) ResetWindowForAccount(ctx context.Context, accountID int64, window string, newResetAt *time.Time) error {
 	client := clientFromContext(ctx, r.client)
 	const q = `UPDATE user_account_window_quotas
 		SET attributed_percent = 0,
-			donate_pool_fraction = CASE WHEN $2 = '7d' THEN 0 ELSE donate_pool_fraction END,
+			donate_pool_fraction = 0,
 			window_reset_at = $3, updated_at = $4
 		WHERE account_id = $1 AND window_type = $2 AND deleted_at IS NULL`
 	_, err := client.ExecContext(ctx, q, accountID, window, nullableTime(newResetAt), time.Now())
