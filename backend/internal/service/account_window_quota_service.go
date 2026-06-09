@@ -87,7 +87,7 @@ type AccountWindowReset struct {
 // UserAccountWindowQuotaRepository 定义 user × account × window 配额台账的数据访问接口。
 type UserAccountWindowQuotaRepository interface {
 	// ResetWindowForAccount 把某账号某窗口下所有活跃用户的 attributed_percent 清零，并刷新 window_reset_at。
-	// 同时把 donate_pool_fraction 清零：捐赠逐窗口自愿、不跨窗口延续（5h/7d 一致）。
+	// 仅 5h 重置清零 donate_pool_fraction（5h 逐窗口重新决定）；7d 捐赠永久保留，绝不自动清。
 	ResetWindowForAccount(ctx context.Context, accountID int64, window string, newResetAt *time.Time) error
 	// GetByUserAccountWindow 查询单条配额；未找到返回 (nil, nil)。
 	GetByUserAccountWindow(ctx context.Context, userID, accountID int64, window string) (*UserAccountWindowQuotaRecord, error)

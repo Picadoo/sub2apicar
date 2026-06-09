@@ -653,7 +653,7 @@ export default {
       poolRemaining: '可借 {pct}%',
       donateHint: '自愿捐出本窗口份额的 {donate}%，自留 {keep}%',
       donateNote5h: '5h 临时让出（仅本窗口）：窗口刷新后自动归零，下个 5h 想捐再拖一次；被借走的下个窗口就回来，几乎无损。',
-      donateNote7d: '7d 真捐周额度（仅本周）：本周重置后自动归零，下周想捐再拖一次；随时拉回收回还没被借走的，已被借走的下周才回来。',
+      donateNote7d: '7d 真捐周额度（长期保留）：设了就一直有效、不会自动清零，想停手动拖回 0；随时拉回收回还没被借走的，已被借走的等下周重置才回来。',
       borrowing: '🤝 救急池提额 +{pct}%',
       acctRemaining: '账号合计还剩 {pct}% 未用',
     },
