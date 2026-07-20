@@ -19,6 +19,8 @@ func newAccountWindowQuotaRoutesTestRouter() *gin.Engine {
 
 	RegisterUserRoutes(v1, h, servermiddleware.JWTAuthMiddleware(func(c *gin.Context) {
 		c.Next()
+	}), servermiddleware.AuditLogMiddleware(func(c *gin.Context) {
+		c.Next()
 	}), nil)
 
 	admin := v1.Group("/admin")
