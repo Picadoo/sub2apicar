@@ -203,6 +203,23 @@ func TestBuildWindowItemsIncludesMinimumDonationFraction(t *testing.T) {
 	require.InDelta(t, 12.0/23.0, items[0].MinimumDonateFraction, 1e-9)
 }
 
+// 全捐且未用的捐赠者有效上限是合法的 0，不能回落成基础上限展示。
+func TestBuildOverviewItemsKeepsZeroEffectiveLimitForFullDonor(t *testing.T) {
+	rows := buildOverviewItems([]service.AdminWindowQuotaOverviewRow{{
+		UserID:                2,
+		AccountID:             7,
+		WindowType:            service.WindowType5h,
+		LimitPercent:          23,
+		AttributedPercent:     0,
+		DonatePoolFraction:    1,
+		EffectiveLimitPercent: 0,
+	}}, time.Now())
+
+	require.Len(t, rows, 1)
+	require.Zero(t, rows[0].EffectiveLimitPercent)
+	require.Zero(t, rows[0].RemainingPercent)
+}
+
 func TestAccountWindowQuotaHandler_DonateRejectsBorrowedReclaim(t *testing.T) {
 	repo := &accountWindowQuotaHandlerRepo{rows: []service.UserAccountWindowQuotaRecord{
 		{UserID: 1, AccountID: 7, WindowType: service.WindowType5h, LimitPercent: 23, AttributedPercent: 35},

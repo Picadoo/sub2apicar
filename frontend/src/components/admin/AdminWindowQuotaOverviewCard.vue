@@ -189,13 +189,15 @@
                       u.username || u.email || '#' + u.userId
                     }}</span>
                     <span
-                      v-if="donatePctOf(u) > 0"
+                      v-for="badge in donorBadges(u)"
+                      :key="badge.window"
                       class="rounded bg-blue-100 px-1 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/40 dark:text-blue-300"
                       :title="t('admin.windowQuotaOverview.donorTip')"
                     >
                       {{
                         t('admin.windowQuotaOverview.donor', {
-                          pct: donatePctOf(u),
+                          window: badge.window,
+                          pct: badge.pct,
                         })
                       }}
                     </span>
@@ -332,8 +334,17 @@ function safeEqual(diagnostic: AdminWindowQuotaSummary, fallbackMembers: number)
   const members = diagnostic.member_count > 0 ? diagnostic.member_count : fallbackMembers
   return members > 0 ? diagnostic.ceiling_percent / members : 0
 }
-function donatePctOf(u: UserRow): number {
-  return Math.round((u.w5h?.donate_fraction ?? 0) * 100)
+// 5h / 7d 捐赠各自独立，逐窗口出徽标；此前只看 5h，7d 捐赠者不显示。
+function donorBadges(u: UserRow): Array<{ window: string; pct: number }> {
+  const badges: Array<{ window: string; pct: number }> = []
+  for (const [window, item] of [
+    ['5h', u.w5h],
+    ['7d', u.w7d],
+  ] as const) {
+    const fraction = item?.donate_fraction ?? 0
+    if (fraction > 0) badges.push({ window, pct: Math.round(fraction * 1000) / 10 })
+  }
+  return badges
 }
 function togglePreview(accountId: number) {
   previewAccountId.value = previewAccountId.value === accountId ? null : accountId
@@ -445,9 +456,11 @@ const WindowCell: FunctionalComponent<{
 }> = (props) => {
   const it = props.item
   if (!it) return h('span', { class: 'text-xs text-gray-400' }, '-')
+  // 0 是合法有效上限（全捐且未用的捐赠者），不能回落到基础上限。
+  const effRaw = it.effective_limit_percent
   const eff =
-    it.effective_limit_percent && it.effective_limit_percent > 0
-      ? it.effective_limit_percent
+    typeof effRaw === 'number' && Number.isFinite(effRaw) && effRaw >= 0
+      ? effRaw
       : it.limit_percent
   const borrowing = eff > it.limit_percent + 0.01
   const p = calcPercent(it.used_percent, eff)

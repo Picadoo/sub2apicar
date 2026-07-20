@@ -114,6 +114,43 @@ describe('AdminWindowQuotaOverviewCard', () => {
     expect(wrapper.text()).toContain('admin.windowQuotaOverview.overallocatedWarning')
   })
 
+  it('shows per-window donor badges including 7d donations', async () => {
+    apiMocks.getOverview.mockResolvedValue({
+      enabled: true,
+      rows: [
+        {
+          user_id: 1,
+          email: 'a@example.com',
+          username: 'A',
+          account_id: 7,
+          window_type: '5h',
+          limit_percent: 23,
+          used_percent: 0,
+          remaining_percent: 23,
+          donate_fraction: 0.5,
+        },
+        {
+          user_id: 1,
+          email: 'a@example.com',
+          username: 'A',
+          account_id: 7,
+          window_type: '7d',
+          limit_percent: 23,
+          used_percent: 0,
+          remaining_percent: 23,
+          donate_fraction: 1,
+        },
+      ],
+      summaries: [],
+    })
+
+    const wrapper = mount(AdminWindowQuotaOverviewCard)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('admin.windowQuotaOverview.donor:{"window":"5h","pct":50}')
+    expect(wrapper.text()).toContain('admin.windowQuotaOverview.donor:{"window":"7d","pct":100}')
+  })
+
   it('previews safe equal values, confirms, rebalances and refreshes', async () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     const wrapper = mount(AdminWindowQuotaOverviewCard)

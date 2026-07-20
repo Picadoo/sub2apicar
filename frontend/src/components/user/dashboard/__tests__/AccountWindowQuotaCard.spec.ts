@@ -88,6 +88,9 @@ describe('AccountWindowQuotaCard', () => {
     expect(Number(slider.attributes('min'))).toBeCloseTo((12 / 23) * 100)
     expect(wrapper.text()).toContain('dashboard.accountWindowQuota.lockedDonationHint')
     expect(wrapper.text()).toContain('"pct":"52.2"')
+    // 全捐且未用：有效上限就是 0，不得回落显示基础上限 23。
+    expect(wrapper.text()).toContain('0% / 0%')
+    expect(wrapper.text()).not.toContain('0% / 23%')
 
     await slider.setValue('0')
     await slider.trigger('change')

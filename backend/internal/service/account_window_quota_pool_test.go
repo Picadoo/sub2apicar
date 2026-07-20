@@ -92,6 +92,46 @@ func TestAccountWindowPool_EqualSplitAmongNeedy(t *testing.T) {
 	}
 }
 
+// 池已被借空：后来的缺额者不能再借到别人已经消费掉的容量（超借防护）。
+func TestAccountWindowPool_ExhaustedPoolBlocksLateBorrower(t *testing.T) {
+	recs := []UserAccountWindowQuotaRecord{
+		awqRec(1, WindowType5h, 23, 46, 0), // Alice 已把池 23 全部借走
+		awqRec(2, WindowType5h, 23, 0, 1),  // Bob 全捐 23
+		awqRec(3, WindowType5h, 23, 23, 0), // Carol 刚顶满，想借
+	}
+	pv := buildAccountWindowPoolView(recs)
+	if got := pv.pool5hAvailable(); !awqApproxEq(got, 0) {
+		t.Fatalf("pool available = %v, want 0", got)
+	}
+	if got := pv.effective5hLimit(3); !awqApproxEq(got, 23) {
+		t.Fatalf("carol effective = %v, want 23 (pool exhausted)", got)
+	}
+	// Alice 的既有借用不追回，但公平份额缩到 11.5 → 已超出即拦截，不能继续借。
+	if got := pv.effective5hLimit(1); !awqApproxEq(got, 34.5) {
+		t.Fatalf("alice effective = %v, want 34.5", got)
+	}
+}
+
+// 正当借用 7d 救急池的用户不应被排除在 5h 借用之外（与 7d 判定口径一致）。
+func TestAccountWindowPool_7dPoolBorrowerCanStillBorrow5h(t *testing.T) {
+	recs := []UserAccountWindowQuotaRecord{
+		awqRec(1, WindowType5h, 23, 23, 0), // Alice 5h 顶满
+		awqRec(1, WindowType7d, 23, 23, 0), // Alice 7d 顶满自己份额
+		awqRec(2, WindowType5h, 23, 0, 1),  // Bob 捐 5h
+		awqRec(2, WindowType7d, 23, 0, 1),  // Bob 捐 7d → Alice 7d 仍有余量
+	}
+	pv := buildAccountWindowPoolView(recs)
+	if !pv.within7d(1) {
+		t.Fatalf("alice should be within 7d via the 7d pool")
+	}
+	if got := pv.needy5hCount(); got != 1 {
+		t.Fatalf("needy = %d, want 1", got)
+	}
+	if got := pv.effective5hLimit(1); !awqApproxEq(got, 46) {
+		t.Fatalf("alice 5h effective = %v, want 46", got)
+	}
+}
+
 func TestAccountWindowPool_SubtractsBorrowedUsageFromAvailable(t *testing.T) {
 	records := []UserAccountWindowQuotaRecord{
 		awqRec(1, WindowType5h, 23, 35, 0),

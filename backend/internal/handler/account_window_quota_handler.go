@@ -190,9 +190,11 @@ type adminWindowQuotaSummaryItem struct {
 func buildOverviewItems(records []service.AdminWindowQuotaOverviewRow, now time.Time) []adminWindowQuotaOverviewItem {
 	rows := make([]adminWindowQuotaOverviewItem, 0, len(records))
 	for _, r := range records {
+		// EffectiveLimitPercent == 0 是合法值（全捐且未用的捐赠者自留上限为 0），
+		// 不能回落到基础上限，否则前端会把已让出的份额显示成仍然可用。
 		effLimit := r.EffectiveLimitPercent
-		if effLimit <= 0 {
-			effLimit = r.LimitPercent
+		if effLimit < 0 {
+			effLimit = 0
 		}
 		remaining := effLimit - r.AttributedPercent
 		if remaining < 0 {

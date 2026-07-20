@@ -189,9 +189,10 @@ function dKey(w: AccountWindowQuotaItem): string {
 }
 
 // 有效上限：含救急池增量（后端给的 effective_limit_percent），缺失时回落到基础上限。
+// 0 是合法值（全捐且未用 → 自留上限 0），不能当成"缺失"回落到基础上限。
 function effLimit(w: AccountWindowQuotaItem): number {
   const eff = w.effective_limit_percent
-  return Number.isFinite(eff) && eff > 0 ? eff : w.limit_percent
+  return typeof eff === 'number' && Number.isFinite(eff) && eff >= 0 ? eff : w.limit_percent
 }
 
 // 是否正在借用救急池：有效上限高于基础上限且已用已超出基础份额（5h / 7d 通用）。
@@ -284,9 +285,10 @@ async function load() {
     windows.value = data.windows ?? []
     sharedMembers.value = data.members ?? []
     for (const w of windows.value) {
+      // 保留 0.1% 精度，与滑块 step 一致；取整会让 52.2% 之类的值显示漂移。
       donatePct[dKey(w)] = Math.max(
         minDonatePct(w),
-        Math.round((w.donate_fraction ?? 0) * 100),
+        Math.round((w.donate_fraction ?? 0) * 1000) / 10,
       )
     }
   } catch (error) {

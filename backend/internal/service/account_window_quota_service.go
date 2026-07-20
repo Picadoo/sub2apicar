@@ -422,12 +422,14 @@ func (pv *accountWindowPoolView) minimumDonateFraction(userID int64, window stri
 }
 
 // within7d 报告用户 7d 周配额是否仍有余量（无 7d 记录或上限<=0 视为不限）。
+// 按 7d 有效上限判断：正当借用 7d 救急池的用户不应被排除在 5h 借用之外，
+// 与 CheckUserAccountEligible 第 1 步的 7d 判定口径保持一致。
 func (pv *accountWindowPoolView) within7d(userID int64) bool {
 	limit, ok := pv.limit7d[userID]
 	if !ok || limit <= 0 {
 		return true
 	}
-	return pv.used7d[userID]+windowQuotaEpsilon < limit
+	return pv.used7d[userID]+windowQuotaEpsilon < pv.effective7dLimit(userID)
 }
 
 // donor5hKeepCap 返回捐赠者 5h 的自留有效上限 = max(已用, 基础上限×(1-捐赠比例))。
@@ -507,7 +509,14 @@ func (pv *accountWindowPoolView) effective5hLimit(userID int64) float64 {
 	if needy <= 0 || capacity <= 0 {
 		return base
 	}
-	return base + capacity/float64(needy)
+	// 借用额度同时受公平份额（capacity/needy）与池内实际余额约束：
+	// 别人已经借走的容量不能再许诺给后来者，否则 Σ实际用量会超出捐赠总量。
+	ownBorrowed := math.Max(0, pv.used5h[userID]-base)
+	allowance := math.Min(capacity/float64(needy), pv.pool5hAvailable()+ownBorrowed)
+	if allowance <= 0 {
+		return base
+	}
+	return base + allowance
 }
 
 // memberCount 返回某窗口下账号当前活跃成员数。
@@ -616,7 +625,13 @@ func (pv *accountWindowPoolView) effective7dLimit(userID int64) float64 {
 	if needy <= 0 || capacity <= 0 {
 		return base
 	}
-	return base + capacity/float64(needy)
+	// 与 5h 同构：借用额度受公平份额与池内实际余额双重约束，防止超借。
+	ownBorrowed := math.Max(0, pv.used7d[userID]-base)
+	allowance := math.Min(capacity/float64(needy), pv.pool7dAvailable()+ownBorrowed)
+	if allowance <= 0 {
+		return base
+	}
+	return base + allowance
 }
 
 // CheckUserAccountEligible 校验用户在某账号上是否仍可发起请求。
