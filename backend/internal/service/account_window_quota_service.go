@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strconv"
 	"time"
 
@@ -48,6 +49,15 @@ func windowLengthSeconds(window string) int {
 // ErrAccountWindowCeilingExceeded 表示设置某用户 limit 会令该窗口所有用户之和超过总额上限。
 var ErrAccountWindowCeilingExceeded = errors.New("account window total ceiling exceeded")
 
+// ErrAccountWindowCeilingBelowConfigured 表示新 ceiling 低于现有账号的 configured sum，会制造新的超配不一致。
+var ErrAccountWindowCeilingBelowConfigured = errors.New("account window ceiling is below existing configured sum")
+
+// ErrAccountWindowNoActiveMembers 表示指定账号至少一个窗口没有可均分的活跃成员。
+var ErrAccountWindowNoActiveMembers = errors.New("account window has no active members")
+
+// ErrAccountWindowInvalidMembers 表示显式成员列表为空、含无效用户或账号不存在。
+var ErrAccountWindowInvalidMembers = errors.New("account window member selection is invalid")
+
 // accountWindowTypes 是需要分摊/校验的全部官方窗口。
 var accountWindowTypes = []string{WindowType5h, WindowType7d}
 
@@ -76,6 +86,25 @@ type AdminWindowQuotaOverviewRow struct {
 	DonatePoolFraction    float64
 	EffectiveLimitPercent float64 // 含救急池增量/捐赠自留后的当前有效上限
 	PoolAvailablePercent  float64 // 该账号该窗口救急池当前可借总额
+}
+
+// AdminWindowQuotaSummary 是管理端按账号、窗口聚合的配置/用量诊断。
+type AdminWindowQuotaSummary struct {
+	AccountID            int64
+	WindowType           string
+	MemberCount          int
+	ConfiguredSumPercent float64
+	UsedSumPercent       float64
+	CeilingPercent       float64
+	Overallocated        bool
+}
+
+// AccountWindowEqualizationResult 描述一次按活跃成员均分后的窗口结果。
+type AccountWindowEqualizationResult struct {
+	WindowType        string
+	ActiveMemberCount int
+	SharePercent      float64
+	CeilingPercent    float64
 }
 
 // AccountWindowReset 标识一个待重置的 (账号, 窗口) 组合。
@@ -108,6 +137,12 @@ type UserAccountWindowQuotaRepository interface {
 	RecomputeWindowShares(ctx context.Context, accountID int64, window string, officialPct float64, windowStart time.Time, resetAt *time.Time, defaultLimit float64) error
 	// ListAllWithUser 返回所有活跃配额行（带用户邮箱/用户名），供管理端总览。
 	ListAllWithUser(ctx context.Context) ([]AdminWindowQuotaOverviewRow, error)
+	// GetMaxConfiguredSumForWindow 返回指定窗口中各账号 configured sum 的最大值。
+	GetMaxConfiguredSumForWindow(ctx context.Context, window string) (float64, error)
+	// EqualizeActiveMemberLimits 在单个事务中把指定账号 5h/7d 的 limit 分别均分给各窗口活跃成员。
+	EqualizeActiveMemberLimits(ctx context.Context, accountID int64, ceiling5h, ceiling7d float64) ([]AccountWindowEqualizationResult, error)
+	// SyncAccountMembers 显式同步账号成员；新成员即使从未使用也会创建 5h/7d 配额并参与均分。
+	SyncAccountMembers(ctx context.Context, accountID int64, userIDs []int64, ceiling5h, ceiling7d float64) ([]AccountWindowEqualizationResult, error)
 }
 
 // accountWindowBaselineScript 原子地读取/更新某 (账号, 窗口) 的"上次观测到的官方利用率"基线，
@@ -383,6 +418,27 @@ func (pv *accountWindowPoolView) effective5hLimit(userID int64) float64 {
 	return base + pool/float64(needy)
 }
 
+// memberCount 返回某窗口下账号当前活跃成员数。
+func (pv *accountWindowPoolView) memberCount(window string) int {
+	if window == WindowType7d {
+		return len(pv.limit7d)
+	}
+	return len(pv.base5h)
+}
+
+// sumConfigured 返回某窗口下账号全员配置上限之和。
+func (pv *accountWindowPoolView) sumConfigured(window string) float64 {
+	m := pv.base5h
+	if window == WindowType7d {
+		m = pv.limit7d
+	}
+	sum := 0.0
+	for _, v := range m {
+		sum += v
+	}
+	return sum
+}
+
 // sumUsed 返回某窗口下账号全员已用百分点之和（账号级官方利用率）。
 func (pv *accountWindowPoolView) sumUsed(window string) float64 {
 	m := pv.used5h
@@ -533,13 +589,13 @@ func (s *AccountWindowQuotaService) ListUserWindows(ctx context.Context, userID 
 
 // ListAllForAdmin 返回所有用户在所有账号所有窗口的配额（带用户信息，管理端总览用）。
 // 顺带按账号建救急池视图，补上"有效上限/池剩余"，使管理端与用户端口径一致（能看出谁在借池）。
-func (s *AccountWindowQuotaService) ListAllForAdmin(ctx context.Context) ([]AdminWindowQuotaOverviewRow, error) {
+func (s *AccountWindowQuotaService) ListAllForAdmin(ctx context.Context) ([]AdminWindowQuotaOverviewRow, []AdminWindowQuotaSummary, error) {
 	if s == nil || s.repo == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
 	rows, err := s.repo.ListAllWithUser(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// 按账号汇总成池视图。
 	byAccount := map[int64][]UserAccountWindowQuotaRecord{}
@@ -558,6 +614,10 @@ func (s *AccountWindowQuotaService) ListAllForAdmin(ctx context.Context) ([]Admi
 	for acc, recs := range byAccount {
 		pvByAccount[acc] = buildAccountWindowPoolView(recs)
 	}
+	ceilings := map[string]float64{
+		WindowType5h: s.GetTotalCeiling(ctx, WindowType5h),
+		WindowType7d: s.GetTotalCeiling(ctx, WindowType7d),
+	}
 	for i := range rows {
 		pv := pvByAccount[rows[i].AccountID]
 		if pv == nil {
@@ -575,7 +635,63 @@ func (s *AccountWindowQuotaService) ListAllForAdmin(ctx context.Context) ([]Admi
 			rows[i].EffectiveLimitPercent = rows[i].LimitPercent
 		}
 	}
-	return rows, nil
+
+	summaries := make([]AdminWindowQuotaSummary, 0, len(byAccount)*len(accountWindowTypes))
+	seenSummary := make(map[string]struct{}, len(rows))
+	for _, row := range rows {
+		key := strconv.FormatInt(row.AccountID, 10) + ":" + row.WindowType
+		if _, ok := seenSummary[key]; ok {
+			continue
+		}
+		seenSummary[key] = struct{}{}
+		pv := pvByAccount[row.AccountID]
+		if pv == nil {
+			continue
+		}
+		configured := pv.sumConfigured(row.WindowType)
+		ceiling := ceilings[row.WindowType]
+		summaries = append(summaries, AdminWindowQuotaSummary{
+			AccountID:            row.AccountID,
+			WindowType:           row.WindowType,
+			MemberCount:          pv.memberCount(row.WindowType),
+			ConfiguredSumPercent: configured,
+			UsedSumPercent:       pv.sumUsed(row.WindowType),
+			CeilingPercent:       ceiling,
+			Overallocated:        configured > ceiling+windowQuotaEpsilon,
+		})
+	}
+	return rows, summaries, nil
+}
+
+// ListSharedForUser 返回当前用户实际参与的拼车账号内全体成员额度。
+// 先按当前用户的额度行确定可见账号集合，再过滤全量管理视图，避免普通用户看到其他拼车组。
+func (s *AccountWindowQuotaService) ListSharedForUser(ctx context.Context, userID int64) ([]AdminWindowQuotaOverviewRow, []AdminWindowQuotaSummary, error) {
+	if userID <= 0 {
+		return nil, nil, fmt.Errorf("user_id is required")
+	}
+	rows, summaries, err := s.ListAllForAdmin(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	visibleAccounts := make(map[int64]struct{})
+	for _, row := range rows {
+		if row.UserID == userID {
+			visibleAccounts[row.AccountID] = struct{}{}
+		}
+	}
+	sharedRows := make([]AdminWindowQuotaOverviewRow, 0, len(rows))
+	for _, row := range rows {
+		if _, ok := visibleAccounts[row.AccountID]; ok {
+			sharedRows = append(sharedRows, row)
+		}
+	}
+	sharedSummaries := make([]AdminWindowQuotaSummary, 0, len(summaries))
+	for _, summary := range summaries {
+		if _, ok := visibleAccounts[summary.AccountID]; ok {
+			sharedSummaries = append(sharedSummaries, summary)
+		}
+	}
+	return sharedRows, sharedSummaries, nil
 }
 
 // IsValidWindowType 报告 window 是否为受支持的官方窗口类型。
@@ -601,8 +717,9 @@ func (s *AccountWindowQuotaService) GetTotalCeiling(ctx context.Context, window 
 }
 
 // SetTotalCeiling 设置某窗口的总额上限（运行时可配，存 Redis，无 TTL）。
+// 写入前校验所有账号现有 configured sum，禁止把 ceiling 降到任何现有配置之下而制造新的超配不一致。
 func (s *AccountWindowQuotaService) SetTotalCeiling(ctx context.Context, window string, percent float64) error {
-	if s == nil || s.rdb == nil {
+	if s == nil || s.rdb == nil || s.repo == nil {
 		return errors.New("account window quota service unavailable")
 	}
 	if !IsValidWindowType(window) {
@@ -610,6 +727,14 @@ func (s *AccountWindowQuotaService) SetTotalCeiling(ctx context.Context, window 
 	}
 	if percent <= 0 || percent > 100 {
 		return fmt.Errorf("ceiling percent must be in (0,100], got %.2f", percent)
+	}
+	maxConfigured, err := s.repo.GetMaxConfiguredSumForWindow(ctx, window)
+	if err != nil {
+		return fmt.Errorf("check existing configured sums before setting ceiling: %w", err)
+	}
+	if maxConfigured > percent+windowQuotaEpsilon {
+		return fmt.Errorf("%w: window=%s requested %.2f%%, highest configured sum is %.2f%%; lower account limits or equalize members first",
+			ErrAccountWindowCeilingBelowConfigured, window, percent, maxConfigured)
 	}
 	return s.rdb.Set(ctx, accountWindowCeilingKey(window), strconv.FormatFloat(percent, 'f', -1, 64), 0).Err()
 }
@@ -673,20 +798,80 @@ func (s *AccountWindowQuotaService) SetLimitForUserAccount(ctx context.Context, 
 		limitPercent = 0
 	}
 	ceiling := s.GetTotalCeiling(ctx, window)
-	// 读不到其余用户配额时 fail-open（不因瞬时读错误阻断配置）。
-	if records, err := s.repo.ListByAccount(ctx, accountID); err == nil {
-		sumOthers := 0.0
-		for _, r := range records {
-			if r.WindowType == window && r.UserID != userID {
-				sumOthers += r.LimitPercent
-			}
+	records, err := s.repo.ListByAccount(ctx, accountID)
+	if err != nil {
+		return fmt.Errorf("check account window configured sum before setting limit: %w", err)
+	}
+	sumOthers := 0.0
+	currentLimit := 0.0
+	for _, r := range records {
+		if r.WindowType != window {
+			continue
 		}
-		if sumOthers+limitPercent > ceiling+1e-6 {
-			return fmt.Errorf("%w: account=%d window=%s 其余用户之和 %.2f%% + 本次 %.2f%% 超过上限 %.2f%%",
-				ErrAccountWindowCeilingExceeded, accountID, window, sumOthers, limitPercent, ceiling)
+		if r.UserID == userID {
+			currentLimit = r.LimitPercent
+			continue
 		}
+		sumOthers += r.LimitPercent
+	}
+	prospectiveSum := sumOthers + limitPercent
+	// 已经超配时仍允许持平或降额，便于管理员逐步修复；只有实际增额才严格拒绝。
+	if prospectiveSum > ceiling+windowQuotaEpsilon && limitPercent > currentLimit+windowQuotaEpsilon {
+		return fmt.Errorf("%w: account=%d window=%s configured sum would be %.2f%% (current user %.2f%% -> %.2f%%), ceiling %.2f%%",
+			ErrAccountWindowCeilingExceeded, accountID, window, prospectiveSum, currentLimit, limitPercent, ceiling)
 	}
 	return s.repo.SetLimitForUserAccount(ctx, userID, accountID, window, limitPercent)
+}
+
+// EqualizeAccountActiveMemberLimits 把指定账号 5h/7d 的 ceiling 分别均分给各窗口当前活跃成员。
+// 成员发现、份额计算和两窗口更新全部由 repository 在同一事务内完成；任一窗口无成员或任一更新失败都整体回滚。
+func (s *AccountWindowQuotaService) EqualizeAccountActiveMemberLimits(ctx context.Context, accountID int64) ([]AccountWindowEqualizationResult, error) {
+	if s == nil || s.repo == nil || s.rdb == nil {
+		return nil, errors.New("account window quota service unavailable")
+	}
+	if accountID <= 0 {
+		return nil, fmt.Errorf("account_id is required")
+	}
+	results, err := s.repo.EqualizeActiveMemberLimits(
+		ctx,
+		accountID,
+		s.GetTotalCeiling(ctx, WindowType5h),
+		s.GetTotalCeiling(ctx, WindowType7d),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+// SetAccountMembers 以管理员显式选择的用户列表作为拼车成员，新用户无需先产生用量即可参与均分。
+func (s *AccountWindowQuotaService) SetAccountMembers(ctx context.Context, accountID int64, userIDs []int64) ([]AccountWindowEqualizationResult, error) {
+	if s == nil || s.repo == nil || s.rdb == nil {
+		return nil, errors.New("account window quota service unavailable")
+	}
+	if accountID <= 0 || len(userIDs) == 0 {
+		return nil, fmt.Errorf("%w: account and at least one user are required", ErrAccountWindowInvalidMembers)
+	}
+	seen := make(map[int64]struct{}, len(userIDs))
+	normalized := make([]int64, 0, len(userIDs))
+	for _, userID := range userIDs {
+		if userID <= 0 {
+			return nil, fmt.Errorf("%w: invalid user id %d", ErrAccountWindowInvalidMembers, userID)
+		}
+		if _, ok := seen[userID]; ok {
+			continue
+		}
+		seen[userID] = struct{}{}
+		normalized = append(normalized, userID)
+	}
+	sort.Slice(normalized, func(i, j int) bool { return normalized[i] < normalized[j] })
+	return s.repo.SyncAccountMembers(
+		ctx,
+		accountID,
+		normalized,
+		s.GetTotalCeiling(ctx, WindowType5h),
+		s.GetTotalCeiling(ctx, WindowType7d),
+	)
 }
 
 // SetDonateFraction 设置用户在某账号某窗口（5h/7d）的救急池捐赠比例（占自己该窗口上限，∈[0,1]）。

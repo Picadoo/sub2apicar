@@ -48,7 +48,12 @@ func (h *AccountWindowQuotaHandler) GetMyWindows(c *gin.Context) {
 		return
 	}
 	if h.quota == nil || !h.quota.Enabled() {
-		response.Success(c, gin.H{"enabled": false, "windows": []accountWindowQuotaItem{}})
+		response.Success(c, gin.H{
+			"enabled":   false,
+			"windows":   []accountWindowQuotaItem{},
+			"members":   []adminWindowQuotaOverviewItem{},
+			"summaries": []adminWindowQuotaSummaryItem{},
+		})
 		return
 	}
 	views, err := h.quota.ListUserWindowsWithPool(c.Request.Context(), subject.UserID)
@@ -56,7 +61,17 @@ func (h *AccountWindowQuotaHandler) GetMyWindows(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
-	response.Success(c, gin.H{"enabled": true, "windows": buildWindowItemsFromViews(views, time.Now())})
+	memberRecords, summaryRecords, err := h.quota.ListSharedForUser(c.Request.Context(), subject.UserID)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{
+		"enabled":   true,
+		"windows":   buildWindowItemsFromViews(views, time.Now()),
+		"members":   buildOverviewItems(memberRecords, time.Now()),
+		"summaries": buildSummaryItems(summaryRecords),
+	})
 }
 
 // buildWindowItemsFromViews 把含救急池信息的视图转成前端展示项（剩余按有效上限计）。
@@ -160,19 +175,17 @@ type adminWindowQuotaOverviewItem struct {
 	ResetInSeconds        *int64  `json:"reset_in_seconds,omitempty"`
 }
 
-// AdminOverview 返回所有用户在所有账号所有窗口的配额（带邮箱），供管理员仪表盘总览。
-// GET /api/v1/admin/account-window-quotas/overview
-func (h *AccountWindowQuotaHandler) AdminOverview(c *gin.Context) {
-	if h.quota == nil || !h.quota.Enabled() {
-		response.Success(c, gin.H{"enabled": false, "rows": []adminWindowQuotaOverviewItem{}})
-		return
-	}
-	records, err := h.quota.ListAllForAdmin(c.Request.Context())
-	if err != nil {
-		response.ErrorFrom(c, err)
-		return
-	}
-	now := time.Now()
+type adminWindowQuotaSummaryItem struct {
+	AccountID            int64   `json:"account_id"`
+	WindowType           string  `json:"window_type"`
+	MemberCount          int     `json:"member_count"`
+	ConfiguredSumPercent float64 `json:"configured_sum_percent"`
+	UsedSumPercent       float64 `json:"used_sum_percent"`
+	CeilingPercent       float64 `json:"ceiling_percent"`
+	Overallocated        bool    `json:"overallocated"`
+}
+
+func buildOverviewItems(records []service.AdminWindowQuotaOverviewRow, now time.Time) []adminWindowQuotaOverviewItem {
 	rows := make([]adminWindowQuotaOverviewItem, 0, len(records))
 	for _, r := range records {
 		effLimit := r.EffectiveLimitPercent
@@ -207,7 +220,46 @@ func (h *AccountWindowQuotaHandler) AdminOverview(c *gin.Context) {
 		}
 		rows = append(rows, item)
 	}
-	response.Success(c, gin.H{"enabled": true, "rows": rows})
+	return rows
+}
+
+func buildSummaryItems(records []service.AdminWindowQuotaSummary) []adminWindowQuotaSummaryItem {
+	summaries := make([]adminWindowQuotaSummaryItem, 0, len(records))
+	for _, summary := range records {
+		summaries = append(summaries, adminWindowQuotaSummaryItem{
+			AccountID:            summary.AccountID,
+			WindowType:           summary.WindowType,
+			MemberCount:          summary.MemberCount,
+			ConfiguredSumPercent: summary.ConfiguredSumPercent,
+			UsedSumPercent:       summary.UsedSumPercent,
+			CeilingPercent:       summary.CeilingPercent,
+			Overallocated:        summary.Overallocated,
+		})
+	}
+	return summaries
+}
+
+// AdminOverview 返回所有用户在所有账号所有窗口的配额（带邮箱），供管理员仪表盘总览。
+// GET /api/v1/admin/account-window-quotas/overview
+func (h *AccountWindowQuotaHandler) AdminOverview(c *gin.Context) {
+	if h.quota == nil || !h.quota.Enabled() {
+		response.Success(c, gin.H{
+			"enabled":   false,
+			"rows":      []adminWindowQuotaOverviewItem{},
+			"summaries": []adminWindowQuotaSummaryItem{},
+		})
+		return
+	}
+	records, summaryRecords, err := h.quota.ListAllForAdmin(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{
+		"enabled":   true,
+		"rows":      buildOverviewItems(records, time.Now()),
+		"summaries": buildSummaryItems(summaryRecords),
+	})
 }
 
 type setAccountWindowLimitRequest struct {
@@ -250,6 +302,83 @@ func (h *AccountWindowQuotaHandler) AdminSetLimit(c *gin.Context) {
 		return
 	}
 	response.Success(c, gin.H{"ok": true})
+}
+
+type equalizedAccountWindowItem struct {
+	WindowType     string  `json:"window_type"`
+	MemberCount    int     `json:"member_count"`
+	SharePercent   float64 `json:"share_percent"`
+	CeilingPercent float64 `json:"ceiling_percent"`
+}
+
+func buildEqualizedWindowItems(results []service.AccountWindowEqualizationResult) []equalizedAccountWindowItem {
+	windows := make([]equalizedAccountWindowItem, 0, len(results))
+	for _, result := range results {
+		windows = append(windows, equalizedAccountWindowItem{
+			WindowType:     result.WindowType,
+			MemberCount:    result.ActiveMemberCount,
+			SharePercent:   result.SharePercent,
+			CeilingPercent: result.CeilingPercent,
+		})
+	}
+	return windows
+}
+
+// AdminEqualizeAccountLimits 按指定账号各窗口当前活跃成员数均分 5h/7d ceiling。
+// POST /api/v1/admin/account-window-quotas/accounts/:id/equalize
+func (h *AccountWindowQuotaHandler) AdminEqualizeAccountLimits(c *gin.Context) {
+	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || accountID <= 0 {
+		response.BadRequest(c, "invalid account id")
+		return
+	}
+	if h.quota == nil || !h.quota.Enabled() {
+		response.BadRequest(c, "account window quota is not enabled")
+		return
+	}
+	results, err := h.quota.EqualizeAccountActiveMemberLimits(c.Request.Context(), accountID)
+	if err != nil {
+		if errors.Is(err, service.ErrAccountWindowNoActiveMembers) {
+			response.BadRequest(c, err.Error())
+			return
+		}
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"ok": true, "account_id": accountID, "windows": buildEqualizedWindowItems(results)})
+}
+
+type setAccountWindowMembersRequest struct {
+	UserIDs []int64 `json:"user_ids"`
+}
+
+// AdminSetAccountMembers 显式指定拼车账号成员；未使用过的用户也会创建 5h/7d 配额并立即均分。
+// PUT /api/v1/admin/account-window-quotas/accounts/:id/members
+func (h *AccountWindowQuotaHandler) AdminSetAccountMembers(c *gin.Context) {
+	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || accountID <= 0 {
+		response.BadRequest(c, "invalid account id")
+		return
+	}
+	var req setAccountWindowMembersRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request body")
+		return
+	}
+	if h.quota == nil || !h.quota.Enabled() {
+		response.BadRequest(c, "account window quota is not enabled")
+		return
+	}
+	results, err := h.quota.SetAccountMembers(c.Request.Context(), accountID, req.UserIDs)
+	if err != nil {
+		if errors.Is(err, service.ErrAccountWindowInvalidMembers) {
+			response.BadRequest(c, err.Error())
+			return
+		}
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"ok": true, "account_id": accountID, "windows": buildEqualizedWindowItems(results)})
 }
 
 type accountWindowCeilingItem struct {
@@ -332,6 +461,10 @@ func (h *AccountWindowQuotaHandler) AdminSetCeiling(c *gin.Context) {
 		return
 	}
 	if err := h.quota.SetTotalCeiling(c.Request.Context(), req.WindowType, req.CeilingPercent); err != nil {
+		if errors.Is(err, service.ErrAccountWindowCeilingBelowConfigured) {
+			response.BadRequest(c, err.Error())
+			return
+		}
 		response.ErrorFrom(c, err)
 		return
 	}

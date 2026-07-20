@@ -17,6 +17,7 @@ type AdminHandlers struct {
 	OpenAIOAuth            *admin.OpenAIOAuthHandler
 	GeminiOAuth            *admin.GeminiOAuthHandler
 	AntigravityOAuth       *admin.AntigravityOAuthHandler
+	GrokOAuth              *admin.GrokOAuthHandler
 	Proxy                  *admin.ProxyHandler
 	Redeem                 *admin.RedeemHandler
 	Promo                  *admin.PromoHandler
@@ -36,26 +37,28 @@ type AdminHandlers struct {
 	ContentModeration      *admin.ContentModerationHandler
 	Payment                *admin.PaymentHandler
 	Affiliate              *admin.AffiliateHandler
+	Compliance             *admin.ComplianceHandler
 }
 
 // Handlers contains all HTTP handlers
 type Handlers struct {
-	Auth             *AuthHandler
-	User             *UserHandler
-	APIKey           *APIKeyHandler
-	Usage            *UsageHandler
-	Redeem           *RedeemHandler
-	Subscription     *SubscriptionHandler
-	Announcement     *AnnouncementHandler
-	ChannelMonitor   *ChannelMonitorUserHandler
-	Admin            *AdminHandlers
-	Gateway          *GatewayHandler
-	OpenAIGateway    *OpenAIGatewayHandler
-	Setting          *SettingHandler
-	Totp             *TotpHandler
+	Auth               *AuthHandler
+	User               *UserHandler
+	APIKey             *APIKeyHandler
+	Usage              *UsageHandler
+	Redeem             *RedeemHandler
+	Subscription       *SubscriptionHandler
+	Announcement       *AnnouncementHandler
+	ChannelMonitor     *ChannelMonitorUserHandler
+	Admin              *AdminHandlers
+	Gateway            *GatewayHandler
+	OpenAIGateway      *OpenAIGatewayHandler
+	Setting            *SettingHandler
+	Totp               *TotpHandler
 	Payment            *PaymentHandler
 	PaymentWebhook     *PaymentWebhookHandler
 	AvailableChannel   *AvailableChannelHandler
+	BatchImage         *BatchImageHandler
 	AccountWindowQuota *AccountWindowQuotaHandler
 }
 

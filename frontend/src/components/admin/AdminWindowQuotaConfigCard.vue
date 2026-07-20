@@ -8,7 +8,7 @@
     </div>
 
     <div class="flex flex-wrap items-end gap-x-6 gap-y-3">
-      <!-- 车位数（共享人数） -->
+      <!-- 新记录默认人数：只影响未来自动创建的额度行 -->
       <div class="flex flex-col gap-1">
         <label class="text-xs font-medium text-gray-600 dark:text-gray-300">
           {{ t('admin.windowQuotaConfig.seatsLabel') }}
@@ -109,6 +109,7 @@ async function saveSeats() {
   savingSeats.value = true
   try {
     await setAccountWindowSeats(Math.round(v))
+    await load()
     appStore.showSuccess(t('admin.windowQuotaConfig.saved'))
   } catch (e: any) {
     appStore.showError(e?.response?.data?.message || t('admin.windowQuotaConfig.saveFailed'))
@@ -127,6 +128,7 @@ async function saveCeiling(wt: '5h' | '7d') {
   flag.value = true
   try {
     await setAccountWindowCeiling({ window_type: wt, ceiling_percent: v })
+    await load()
     appStore.showSuccess(t('admin.windowQuotaConfig.saved'))
   } catch (e: any) {
     appStore.showError(e?.response?.data?.message || t('admin.windowQuotaConfig.saveFailed'))

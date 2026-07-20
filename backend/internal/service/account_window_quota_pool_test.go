@@ -2,9 +2,11 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -108,7 +110,16 @@ func TestAccountWindowPool_SevenDayBlocksBorrow(t *testing.T) {
 
 // stubWindowRepo 是 UserAccountWindowQuotaRepository 的最小桩，仅 ListByAccount/ListByUser 返回固定数据。
 type stubWindowRepo struct {
-	rows []UserAccountWindowQuotaRecord
+	rows             []UserAccountWindowQuotaRecord
+	adminRows        []AdminWindowQuotaOverviewRow
+	setCalls         []UserAccountWindowQuotaRecord
+	maxConfigured    float64
+	maxConfiguredErr error
+	equalizeResults  []AccountWindowEqualizationResult
+	equalizeErr      error
+	equalizeAccount  int64
+	equalize5h       float64
+	equalize7d       float64
 }
 
 func (s *stubWindowRepo) ResetWindowForAccount(context.Context, int64, string, *time.Time) error {
@@ -126,17 +137,38 @@ func (s *stubWindowRepo) ListByAccount(context.Context, int64) ([]UserAccountWin
 func (s *stubWindowRepo) ListDueResets(context.Context, time.Time) ([]AccountWindowReset, error) {
 	return nil, nil
 }
-func (s *stubWindowRepo) SetLimitForUserAccount(context.Context, int64, int64, string, float64) error {
+func (s *stubWindowRepo) SetLimitForUserAccount(_ context.Context, userID, accountID int64, window string, limit float64) error {
+	s.setCalls = append(s.setCalls, UserAccountWindowQuotaRecord{
+		UserID:       userID,
+		AccountID:    accountID,
+		WindowType:   window,
+		LimitPercent: limit,
+	})
 	return nil
 }
 func (s *stubWindowRepo) RecomputeWindowShares(context.Context, int64, string, float64, time.Time, *time.Time, float64) error {
 	return nil
 }
 func (s *stubWindowRepo) ListAllWithUser(context.Context) ([]AdminWindowQuotaOverviewRow, error) {
-	return nil, nil
+	return s.adminRows, nil
 }
 func (s *stubWindowRepo) SetDonatePoolFraction(context.Context, int64, int64, string, float64, float64) error {
 	return nil
+}
+func (s *stubWindowRepo) GetMaxConfiguredSumForWindow(context.Context, string) (float64, error) {
+	return s.maxConfigured, s.maxConfiguredErr
+}
+func (s *stubWindowRepo) EqualizeActiveMemberLimits(_ context.Context, accountID int64, ceiling5h, ceiling7d float64) ([]AccountWindowEqualizationResult, error) {
+	s.equalizeAccount = accountID
+	s.equalize5h = ceiling5h
+	s.equalize7d = ceiling7d
+	return s.equalizeResults, s.equalizeErr
+}
+func (s *stubWindowRepo) SyncAccountMembers(_ context.Context, accountID int64, _ []int64, ceiling5h, ceiling7d float64) ([]AccountWindowEqualizationResult, error) {
+	s.equalizeAccount = accountID
+	s.equalize5h = ceiling5h
+	s.equalize7d = ceiling7d
+	return s.equalizeResults, s.equalizeErr
 }
 
 func newStubQuotaService(rows []UserAccountWindowQuotaRecord) *AccountWindowQuotaService {
@@ -228,5 +260,113 @@ func TestCheckEligible_AccountCeilingHardStop(t *testing.T) {
 	eligible, window, _ := svc.CheckUserAccountEligible(context.Background(), 1, 1)
 	if eligible || window != WindowType5h {
 		t.Fatalf("should hard-stop at account ceiling, got eligible=%v window=%q", eligible, window)
+	}
+}
+
+func newQuotaServiceWithMiniRedis(t *testing.T, repo UserAccountWindowQuotaRepository) (*AccountWindowQuotaService, *miniredis.Miniredis) {
+	t.Helper()
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	return NewAccountWindowQuotaService(repo, rdb), mr
+}
+
+func TestSetLimitForUserAccount_OverallocatedAllowsNonIncreasingChanges(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		newLimit  float64
+		wantError bool
+	}{
+		{name: "decrease while still overallocated", newLimit: 50},
+		{name: "hold while overallocated", newLimit: 60},
+		{name: "increase while overallocated", newLimit: 61, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &stubWindowRepo{rows: []UserAccountWindowQuotaRecord{
+				awqRec(1, WindowType5h, 60, 0, 0),
+				awqRec(2, WindowType5h, 50, 0, 0),
+			}}
+			svc, _ := newQuotaServiceWithMiniRedis(t, repo)
+			err := svc.SetLimitForUserAccount(context.Background(), 1, 1, WindowType5h, tc.newLimit)
+			if tc.wantError {
+				if !errors.Is(err, ErrAccountWindowCeilingExceeded) {
+					t.Fatalf("error = %v, want ErrAccountWindowCeilingExceeded", err)
+				}
+				if len(repo.setCalls) != 0 {
+					t.Fatalf("repository write should be rejected")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("SetLimitForUserAccount() error = %v", err)
+			}
+			if len(repo.setCalls) != 1 || !awqApproxEq(repo.setCalls[0].LimitPercent, tc.newLimit) {
+				t.Fatalf("setCalls = %+v, want one write with %.2f", repo.setCalls, tc.newLimit)
+			}
+		})
+	}
+}
+
+func TestSetTotalCeiling_RejectsBelowExistingConfiguredSum(t *testing.T) {
+	repo := &stubWindowRepo{maxConfigured: 95}
+	svc, mr := newQuotaServiceWithMiniRedis(t, repo)
+
+	err := svc.SetTotalCeiling(context.Background(), WindowType5h, 92)
+	if !errors.Is(err, ErrAccountWindowCeilingBelowConfigured) {
+		t.Fatalf("error = %v, want ErrAccountWindowCeilingBelowConfigured", err)
+	}
+	if mr.Exists(accountWindowCeilingKey(WindowType5h)) {
+		t.Fatalf("ceiling must not be written when it is below existing configured sum")
+	}
+}
+
+func TestListAllForAdmin_ReturnsPerAccountWindowSummaries(t *testing.T) {
+	repo := &stubWindowRepo{adminRows: []AdminWindowQuotaOverviewRow{
+		{UserID: 1, AccountID: 7, WindowType: WindowType5h, LimitPercent: 30, AttributedPercent: 10},
+		{UserID: 2, AccountID: 7, WindowType: WindowType5h, LimitPercent: 30, AttributedPercent: 5},
+		{UserID: 1, AccountID: 7, WindowType: WindowType7d, LimitPercent: 40, AttributedPercent: 20},
+		{UserID: 2, AccountID: 7, WindowType: WindowType7d, LimitPercent: 30, AttributedPercent: 15},
+	}}
+	svc, mr := newQuotaServiceWithMiniRedis(t, repo)
+	mr.Set(accountWindowCeilingKey(WindowType5h), "50")
+	mr.Set(accountWindowCeilingKey(WindowType7d), "80")
+
+	_, summaries, err := svc.ListAllForAdmin(context.Background())
+	if err != nil {
+		t.Fatalf("ListAllForAdmin() error = %v", err)
+	}
+	if len(summaries) != 2 {
+		t.Fatalf("summaries len = %d, want 2", len(summaries))
+	}
+	if got := summaries[0]; got.AccountID != 7 || got.WindowType != WindowType5h || got.MemberCount != 2 ||
+		!awqApproxEq(got.ConfiguredSumPercent, 60) || !awqApproxEq(got.UsedSumPercent, 15) ||
+		!awqApproxEq(got.CeilingPercent, 50) || !got.Overallocated {
+		t.Fatalf("5h summary = %+v", got)
+	}
+	if got := summaries[1]; got.AccountID != 7 || got.WindowType != WindowType7d || got.MemberCount != 2 ||
+		!awqApproxEq(got.ConfiguredSumPercent, 70) || !awqApproxEq(got.UsedSumPercent, 35) ||
+		!awqApproxEq(got.CeilingPercent, 80) || got.Overallocated {
+		t.Fatalf("7d summary = %+v", got)
+	}
+}
+
+func TestEqualizeAccountActiveMemberLimits_UsesCurrentCeilings(t *testing.T) {
+	repo := &stubWindowRepo{equalizeResults: []AccountWindowEqualizationResult{
+		{WindowType: WindowType5h, ActiveMemberCount: 2, SharePercent: 40, CeilingPercent: 80},
+		{WindowType: WindowType7d, ActiveMemberCount: 4, SharePercent: 22.5, CeilingPercent: 90},
+	}}
+	svc, mr := newQuotaServiceWithMiniRedis(t, repo)
+	mr.Set(accountWindowCeilingKey(WindowType5h), "80")
+	mr.Set(accountWindowCeilingKey(WindowType7d), "90")
+
+	results, err := svc.EqualizeAccountActiveMemberLimits(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("EqualizeAccountActiveMemberLimits() error = %v", err)
+	}
+	if repo.equalizeAccount != 7 || !awqApproxEq(repo.equalize5h, 80) || !awqApproxEq(repo.equalize7d, 90) {
+		t.Fatalf("repository args account=%d 5h=%.2f 7d=%.2f", repo.equalizeAccount, repo.equalize5h, repo.equalize7d)
+	}
+	if len(results) != 2 {
+		t.Fatalf("results len = %d, want 2", len(results))
 	}
 }

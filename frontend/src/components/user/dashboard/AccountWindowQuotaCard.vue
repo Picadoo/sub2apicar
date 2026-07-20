@@ -83,6 +83,27 @@
               </p>
             </div>
           </div>
+
+          <div v-if="g.members.length > 0" class="border-t border-gray-200 pt-2 dark:border-dark-600">
+            <div class="mb-1.5 text-[11px] font-semibold text-gray-600 dark:text-gray-300">
+              {{ t('dashboard.accountWindowQuota.membersTitle') }}
+            </div>
+            <div class="space-y-1.5">
+              <div
+                v-for="member in g.members"
+                :key="member.userId"
+                class="rounded-md bg-gray-50 px-2 py-1.5 text-[11px] dark:bg-dark-700/40"
+              >
+                <div class="mb-1 truncate font-medium text-gray-700 dark:text-gray-200">
+                  {{ member.name }}
+                </div>
+                <div class="grid grid-cols-2 gap-2 font-mono text-[10px] text-gray-500 dark:text-gray-400">
+                  <span>5h: {{ memberQuota(member.w5h) }}</span>
+                  <span>7d: {{ memberQuota(member.w7d) }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -96,20 +117,30 @@ import {
   getMyAccountWindowQuotas,
   setAccountWindowDonate,
   type AccountWindowQuotaItem,
+  type AdminWindowQuotaOverviewItem,
 } from '@/api/accountWindowQuota'
 
 const { t } = useI18n()
 
 const enabled = ref(false)
 const windows = ref<AccountWindowQuotaItem[]>([])
+const sharedMembers = ref<AdminWindowQuotaOverviewItem[]>([])
 // 每个 (账号, 窗口) 各自一个捐赠比例，key = `${accountId}:${window}`
 const donatePct = reactive<Record<string, number>>({})
 const savingKey = ref<string | null>(null)
 const savedKey = ref<string | null>(null)
 
+interface SharedMember {
+  userId: number
+  name: string
+  w5h?: AdminWindowQuotaOverviewItem
+  w7d?: AdminWindowQuotaOverviewItem
+}
+
 interface AccountGroup {
   accountId: number
   windows: AccountWindowQuotaItem[]
+  members: SharedMember[]
 }
 
 const WINDOW_ORDER: Record<string, number> = { '5h': 0, '7d': 1 }
@@ -121,10 +152,26 @@ const groups = computed<AccountGroup[]>(() => {
     arr.push(w)
     byAccount.set(w.account_id, arr)
   }
+
+  const membersByAccount = new Map<number, Map<number, SharedMember>>()
+  for (const row of sharedMembers.value) {
+    const accountMembers = membersByAccount.get(row.account_id) ?? new Map<number, SharedMember>()
+    const member = accountMembers.get(row.user_id) ?? {
+      userId: row.user_id,
+      name: row.username || row.email || `#${row.user_id}`,
+    }
+    if (row.window_type === '5h') member.w5h = row
+    if (row.window_type === '7d') member.w7d = row
+    accountMembers.set(row.user_id, member)
+    membersByAccount.set(row.account_id, accountMembers)
+  }
+
   const result: AccountGroup[] = []
   for (const [accountId, arr] of byAccount) {
     arr.sort((a, b) => (WINDOW_ORDER[a.window_type] ?? 9) - (WINDOW_ORDER[b.window_type] ?? 9))
-    result.push({ accountId, windows: arr })
+    const members = Array.from(membersByAccount.get(accountId)?.values() ?? [])
+      .sort((a, b) => a.userId - b.userId)
+    result.push({ accountId, windows: arr, members })
   }
   result.sort((a, b) => a.accountId - b.accountId)
   return result
@@ -176,6 +223,11 @@ function formatPct(n: number): string {
   return (Math.round(n * 10) / 10).toString()
 }
 
+function memberQuota(item?: AdminWindowQuotaOverviewItem): string {
+  if (!item) return '-'
+  return `${formatPct(item.used_percent)}% / ${formatPct(item.limit_percent)}%`
+}
+
 function formatResetTime(iso: string | null | undefined): string {
   if (!iso) return ''
   const d = new Date(iso)
@@ -215,6 +267,7 @@ async function load() {
     const data = await getMyAccountWindowQuotas()
     enabled.value = data.enabled
     windows.value = data.windows ?? []
+    sharedMembers.value = data.members ?? []
     for (const w of windows.value) {
       donatePct[dKey(w)] = Math.round((w.donate_fraction ?? 0) * 100)
     }
@@ -222,6 +275,7 @@ async function load() {
     console.warn('Failed to load account window quotas:', error)
     enabled.value = false
     windows.value = []
+    sharedMembers.value = []
   }
 }
 

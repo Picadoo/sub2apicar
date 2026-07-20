@@ -30,6 +30,10 @@ export interface AccountWindowQuotaItem {
 export interface AccountWindowQuotasResponse {
   enabled: boolean
   windows: AccountWindowQuotaItem[]
+  /** 当前用户参与的拼车账号内，全体成员额度。 */
+  members?: AdminWindowQuotaOverviewItem[]
+  /** 当前用户参与的拼车账号汇总。 */
+  summaries?: AdminWindowQuotaSummary[]
 }
 
 /** 获取当前登录用户的全部窗口百分比配额。 */
@@ -125,16 +129,73 @@ export interface AdminWindowQuotaOverviewItem {
   reset_in_seconds?: number
 }
 
+export interface AdminWindowQuotaSummary {
+  account_id: number
+  window_type: string
+  member_count: number
+  /** 当前成员已配置 limit_percent 之和。 */
+  configured_sum_percent: number
+  /** 当前成员已用官方窗口百分比之和。 */
+  used_sum_percent: number
+  /** 该账号该窗口允许分配的安全总额。 */
+  ceiling_percent: number
+  /** configured_sum_percent 是否超过 ceiling_percent。 */
+  overallocated: boolean
+}
+
 export interface AdminWindowQuotaOverviewResponse {
   enabled: boolean
   rows: AdminWindowQuotaOverviewItem[]
+  summaries: AdminWindowQuotaSummary[]
 }
 
-/** 管理端：所有用户在所有账号所有窗口的配额总览（带邮箱），供管理员仪表盘。 */
+export interface RebalanceAccountWindowQuotasPayload {
+  account_id: number
+}
+
+export interface EqualizedAccountWindowItem {
+  window_type: string
+  member_count: number
+  share_percent: number
+  ceiling_percent: number
+}
+
+export interface RebalanceAccountWindowQuotasResponse {
+  ok: boolean
+  account_id: number
+  windows: EqualizedAccountWindowItem[]
+}
+
+/** 管理端：所有用户在所有账号所有窗口的配额总览与分配诊断。 */
 export async function getAccountWindowQuotaOverview(): Promise<AdminWindowQuotaOverviewResponse> {
-  // 用户端点（管理员也是已登录用户，同样可访问）→ 全员都能看团队总览
   const { data } = await apiClient.get<AdminWindowQuotaOverviewResponse>(
-    '/user/account-window-quotas/overview',
+    '/admin/account-window-quotas/overview',
+  )
+  return data
+}
+
+export interface SetAccountWindowMembersPayload {
+  account_id: number
+  user_ids: number[]
+}
+
+/** 管理端：显式指定拼车成员；未使用用户也会创建额度并立即均分。 */
+export async function setAccountWindowMembers(
+  payload: SetAccountWindowMembersPayload,
+): Promise<RebalanceAccountWindowQuotasResponse> {
+  const { data } = await apiClient.put<RebalanceAccountWindowQuotasResponse>(
+    `/admin/account-window-quotas/accounts/${payload.account_id}/members`,
+    { user_ids: payload.user_ids },
+  )
+  return data
+}
+
+/** 管理端：按账号当前成员，将 5h / 7d 配额安全均分。 */
+export async function rebalanceAccountWindowQuotas(
+  payload: RebalanceAccountWindowQuotasPayload,
+): Promise<RebalanceAccountWindowQuotasResponse> {
+  const { data } = await apiClient.post<RebalanceAccountWindowQuotasResponse>(
+    `/admin/account-window-quotas/accounts/${payload.account_id}/equalize`,
   )
   return data
 }
@@ -143,6 +204,8 @@ export const accountWindowQuotaAPI = {
   getMyAccountWindowQuotas,
   getUserAccountWindowQuotas,
   getAccountWindowQuotaOverview,
+  setAccountWindowMembers,
+  rebalanceAccountWindowQuotas,
   setAccountWindowLimit,
   getAccountWindowCeilings,
   setAccountWindowCeiling,

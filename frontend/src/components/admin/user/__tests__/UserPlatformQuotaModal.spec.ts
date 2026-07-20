@@ -87,31 +87,33 @@ describe('UserPlatformQuotaModal', () => {
     expect(apiMocks.getPlatformQuotas).toHaveBeenCalledWith(99)
   })
 
-  it('空数据渲染 4 个 platform 行', async () => {
+  it('空数据渲染 5 个 platform 行', async () => {
     const w = await mountAndOpen()
     const html = w.html()
     expect(html).toContain('anthropic')
     expect(html).toContain('openai')
     expect(html).toContain('gemini')
     expect(html).toContain('antigravity')
+    expect(html).toContain('grok')
   })
 
-  it('已有数据正确填充 limit input', async () => {
+  it('已有数据按 null / 0 / 正数正确呈现三态', async () => {
     apiMocks.getPlatformQuotas.mockResolvedValueOnce({
       platform_quotas: [
-        { platform: 'anthropic', daily_limit_usd: 10, weekly_limit_usd: null, monthly_limit_usd: null,
+        { platform: 'anthropic', daily_limit_usd: 10, weekly_limit_usd: 0, monthly_limit_usd: null,
           daily_usage_usd: 3.2, weekly_usage_usd: 0, monthly_usage_usd: 0 },
       ],
     })
     const w = await mountAndOpen()
-    const inputs = w.find('[data-testid="platform-quota-table"]').findAll('input[type=number]')
-    // 4 platforms × 3 windows = 12 inputs
-    expect(inputs.length).toBe(12)
-    // 第一个 input 是 anthropic.daily = 10
-    expect((inputs[0].element as HTMLInputElement).value).toBe('10')
+    const stateSelects = w.find('[data-testid="platform-quota-table"]').findAll('select')
+    expect(stateSelects.length).toBe(15)
+    expect((w.get('[data-testid="anthropic-daily-state"]').element as HTMLSelectElement).value).toBe('limited')
+    expect((w.get('[data-testid="anthropic-weekly-state"]').element as HTMLSelectElement).value).toBe('disabled')
+    expect((w.get('[data-testid="anthropic-monthly-state"]').element as HTMLSelectElement).value).toBe('unlimited')
+    expect((w.get('[data-testid="anthropic-daily-value"]').element as HTMLInputElement).value).toBe('10')
   })
 
-  it('保存提交完整 4 platform payload', async () => {
+  it('保存提交完整 5 platform payload', async () => {
     apiMocks.getPlatformQuotas.mockResolvedValueOnce({
       platform_quotas: [
         { platform: 'openai', daily_limit_usd: null, weekly_limit_usd: 20, monthly_limit_usd: null,
@@ -128,9 +130,53 @@ describe('UserPlatformQuotaModal', () => {
     expect(apiMocks.updatePlatformQuotas).toHaveBeenCalledTimes(1)
     const [uid, payload] = apiMocks.updatePlatformQuotas.mock.calls[0]
     expect(uid).toBe(99)
-    expect(payload).toHaveLength(4) // 4 platforms always submitted
+    expect(payload).toHaveLength(5) // 5 platforms always submitted
     const openai = payload.find((p: any) => p.platform === 'openai')
     expect(openai.weekly_limit_usd).toBe(20)
+    expect(apiMocks.getPlatformQuotas).toHaveBeenCalledTimes(2)
+    expect(w.emitted('success')).toHaveLength(1)
+    expect(w.emitted('close')).toBeUndefined()
+    expect(w.find('[data-testid="platform-quota-save-success"]').exists()).toBe(true)
+  })
+
+  it('禁用态确认后按 0 保存，不与 null 混淆', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const w = await mountAndOpen()
+    await w.get('[data-testid="openai-daily-state"]').setValue('disabled')
+    const saveBtn = w.findAll('button').find((b) => b.text() === 'admin.users.platformQuota.save')
+    await saveBtn!.trigger('click')
+    await flushPromises()
+    const payload = apiMocks.updatePlatformQuotas.mock.calls[0][1]
+    const openai = payload.find((item: any) => item.platform === 'openai')
+    expect(openai.daily_limit_usd).toBe(0)
+    expect(openai.weekly_limit_usd).toBeNull()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    confirmSpy.mockRestore()
+  })
+
+  it('有未保存变更时关闭需要确认，取消则保持打开', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const w = await mountAndOpen()
+    await w.get('[data-testid="openai-daily-state"]').setValue('limited')
+    w.findComponent({ name: 'BaseDialog' }).vm.$emit('close')
+    await flushPromises()
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(w.emitted('close')).toBeUndefined()
+
+    confirmSpy.mockReturnValue(true)
+    w.findComponent({ name: 'BaseDialog' }).vm.$emit('close')
+    await flushPromises()
+    expect(w.emitted('close')).toHaveLength(1)
+    confirmSpy.mockRestore()
+  })
+
+  it('禁用确认取消时恢复原状态', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const w = await mountAndOpen()
+    await w.get('[data-testid="openai-daily-state"]').setValue('disabled')
+    await flushPromises()
+    expect((w.get('[data-testid="openai-daily-state"]').element as HTMLSelectElement).value).toBe('unlimited')
+    confirmSpy.mockRestore()
   })
 
   it('全部清空把所有 limit 置 null（确认通过）', async () => {
@@ -148,9 +194,9 @@ describe('UserPlatformQuotaModal', () => {
     await clearBtn!.trigger('click')
     await flushPromises()
     expect(confirmSpy).toHaveBeenCalledTimes(1)
-    const inputs = w.find('[data-testid="platform-quota-table"]').findAll('input[type=number]')
-    for (const inp of inputs) {
-      expect((inp.element as HTMLInputElement).value).toBe('')
+    const stateSelects = w.find('[data-testid="platform-quota-table"]').findAll('select')
+    for (const select of stateSelects) {
+      expect((select.element as HTMLSelectElement).value).toBe('unlimited')
     }
     confirmSpy.mockRestore()
   })
@@ -168,10 +214,9 @@ describe('UserPlatformQuotaModal', () => {
     await clearBtn!.trigger('click')
     await flushPromises()
     expect(confirmSpy).toHaveBeenCalledTimes(1)
-    // anthropic daily 应保持 10（未被清空）
-    const inputs = w.findAll('input[type=number]')
-    const dailyVal = (inputs[0].element as HTMLInputElement).value
-    expect(dailyVal).toBe('10')
+    // anthropic daily 应保持“限额 10”
+    expect((w.get('[data-testid="anthropic-daily-state"]').element as HTMLSelectElement).value).toBe('limited')
+    expect((w.get('[data-testid="anthropic-daily-value"]').element as HTMLInputElement).value).toBe('10')
     confirmSpy.mockRestore()
   })
 
