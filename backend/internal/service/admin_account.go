@@ -149,6 +149,7 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 			return nil, err
 		}
 	}
+	s.bootstrapSharedAccountMembers(ctx, account)
 
 	// OAuth 账号：创建后异步设置隐私。
 	// 使用 Ensure（幂等）而非 Force：新建账号 Extra 为空时效果相同，但更安全。
@@ -176,6 +177,15 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	}
 
 	return account, nil
+}
+
+func (s *adminServiceImpl) bootstrapSharedAccountMembers(ctx context.Context, account *Account) {
+	if s == nil || s.accountWindowQuota == nil || account == nil || !account.IsWindowQuotaShared() {
+		return
+	}
+	if _, err := s.accountWindowQuota.BootstrapSharedAccountMembers(ctx, account.ID); err != nil {
+		slog.WarnContext(ctx, "account_window_quota.bootstrap_members_failed", "account_id", account.ID, "error", err)
+	}
 }
 
 func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *UpdateAccountInput) (*Account, error) {
@@ -341,6 +351,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			return nil, err
 		}
 	}
+	s.bootstrapSharedAccountMembers(ctx, account)
 
 	// 重新查询以确保返回完整数据（包括正确的 Proxy 关联对象）
 	updated, err := s.accountRepo.GetByID(ctx, id)

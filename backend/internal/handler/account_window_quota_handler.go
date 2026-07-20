@@ -30,9 +30,10 @@ type accountWindowQuotaItem struct {
 	LimitPercent          float64 `json:"limit_percent"`
 	UsedPercent           float64 `json:"used_percent"`
 	RemainingPercent      float64 `json:"remaining_percent"`
-	DonateFraction        float64 `json:"donate_fraction"`         // 5h 救急池捐赠比例（占自己份额）；7d 恒 0
+	DonateFraction        float64 `json:"donate_fraction"`         // 本窗口救急池捐赠比例（占自己份额）
+	MinimumDonateFraction float64 `json:"minimum_donate_fraction"` // 已借出额度锁定后的最低捐赠比例
 	EffectiveLimitPercent float64 `json:"effective_limit_percent"` // 当前实际可用上限（含救急池增量 / 捐赠自留约束）
-	PoolAvailablePercent  float64 `json:"pool_available_percent"`  // 该账号 5h 救急池当前可借总额；7d 恒 0
+	PoolAvailablePercent  float64 `json:"pool_available_percent"`  // 该账号该窗口尚未被借走的救急池余额
 	AccountUsedPercent    float64 `json:"account_used_percent"`    // 该账号该窗口全员已用之和（账号级利用率）
 	CeilingPercent        float64 `json:"ceiling_percent"`         // 该窗口账号总额上限（官方安全水位）
 	WindowResetAt         *string `json:"window_reset_at,omitempty"`
@@ -89,6 +90,7 @@ func buildWindowItemsFromViews(views []service.UserWindowQuotaView, now time.Tim
 			UsedPercent:           v.AttributedPercent,
 			RemainingPercent:      remaining,
 			DonateFraction:        v.DonateFraction,
+			MinimumDonateFraction: v.MinimumDonateFraction,
 			EffectiveLimitPercent: v.EffectiveLimitPercent,
 			PoolAvailablePercent:  v.PoolAvailablePercent,
 			AccountUsedPercent:    v.AccountUsedPercent,
@@ -244,9 +246,10 @@ func buildSummaryItems(records []service.AdminWindowQuotaSummary) []adminWindowQ
 func (h *AccountWindowQuotaHandler) AdminOverview(c *gin.Context) {
 	if h.quota == nil || !h.quota.Enabled() {
 		response.Success(c, gin.H{
-			"enabled":   false,
-			"rows":      []adminWindowQuotaOverviewItem{},
-			"summaries": []adminWindowQuotaSummaryItem{},
+			"enabled":     false,
+			"rows":        []adminWindowQuotaOverviewItem{},
+			"summaries":   []adminWindowQuotaSummaryItem{},
+			"account_ids": []int64{},
 		})
 		return
 	}
@@ -255,10 +258,16 @@ func (h *AccountWindowQuotaHandler) AdminOverview(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
+	accountIDs, err := h.quota.ListSharedAccountIDs(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
 	response.Success(c, gin.H{
-		"enabled":   true,
-		"rows":      buildOverviewItems(records, time.Now()),
-		"summaries": buildSummaryItems(summaryRecords),
+		"enabled":     true,
+		"rows":        buildOverviewItems(records, time.Now()),
+		"summaries":   buildSummaryItems(summaryRecords),
+		"account_ids": accountIDs,
 	})
 }
 
@@ -510,6 +519,10 @@ func (h *AccountWindowQuotaHandler) Donate(c *gin.Context) {
 		return
 	}
 	if err := h.quota.SetDonateFraction(c.Request.Context(), subject.UserID, req.AccountID, req.WindowType, req.Fraction); err != nil {
+		if errors.Is(err, service.ErrAccountWindowDonationInUse) {
+			response.BadRequest(c, err.Error())
+			return
+		}
 		response.ErrorFrom(c, err)
 		return
 	}

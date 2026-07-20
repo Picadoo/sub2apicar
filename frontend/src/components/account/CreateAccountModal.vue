@@ -163,6 +163,28 @@
         </div>
       </div>
 
+      <div
+        v-if="form.platform === 'openai'"
+        class="rounded-lg border border-gray-200 p-3 dark:border-dark-600"
+      >
+        <label class="flex cursor-pointer items-start gap-3">
+          <input
+            v-model="form.window_quota_shared"
+            type="checkbox"
+            class="mt-0.5"
+            data-testid="window-quota-shared-toggle"
+          />
+          <span>
+            <span class="block text-sm font-medium text-gray-900 dark:text-white">
+              {{ t('admin.accounts.windowQuotaShared') }}
+            </span>
+            <span class="mt-0.5 block text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.windowQuotaSharedHint') }}
+            </span>
+          </span>
+        </label>
+      </div>
+
       <!-- Account Type Selection (Anthropic) -->
       <div v-if="form.platform === 'anthropic'">
         <label class="input-label">{{ t('admin.accounts.accountType') }}</label>
@@ -3932,7 +3954,8 @@ const form = reactive({
   priority: 1,
   rate_multiplier: 1,
   group_ids: [] as number[],
-  expires_at: null as number | null
+  expires_at: null as number | null,
+  window_quota_shared: false
 })
 
 // Helper to check if current type needs OAuth flow
@@ -4468,6 +4491,7 @@ const resetForm = () => {
   form.rate_multiplier = 1
   form.group_ids = []
   form.expires_at = null
+  form.window_quota_shared = false
   accountCategory.value = 'oauth-based'
   addMethod.value = 'oauth'
   apiKeyBaseUrl.value = 'https://api.anthropic.com'
@@ -4646,13 +4670,17 @@ const buildAnthropicExtra = (base?: Record<string, unknown>): Record<string, unk
 
 // Helper function to create account with mixed channel warning handling
 const doCreateAccount = async (payload: CreateAccountRequest) => {
+  const requestPayload: CreateAccountRequest = {
+    ...payload,
+    window_quota_shared: payload.platform === 'openai' ? form.window_quota_shared : undefined
+  }
   const canContinue = await ensureAntigravityMixedChannelConfirmed(async () => {
-    await submitCreateAccount(payload)
+    await submitCreateAccount(requestPayload)
   })
   if (!canContinue) {
     return
   }
-  await submitCreateAccount(payload)
+  await submitCreateAccount(requestPayload)
 }
 
 // Handle mixed channel warning confirmation
@@ -5142,6 +5170,7 @@ const handleGrokValidateRT = async (refreshTokenInput: string) => {
           priority: form.priority,
           rate_multiplier: form.rate_multiplier,
           group_ids: form.group_ids,
+      window_quota_shared: form.window_quota_shared,
           expires_at: form.expires_at,
           auto_pause_on_expired: autoPauseOnExpired.value
         })
@@ -5236,6 +5265,7 @@ const handleOpenAIExchange = async (authCode: string) => {
         priority: form.priority,
         rate_multiplier: form.rate_multiplier,
         group_ids: form.group_ids,
+      window_quota_shared: form.window_quota_shared,
         expires_at: form.expires_at,
         auto_pause_on_expired: autoPauseOnExpired.value
       })
@@ -5313,6 +5343,7 @@ const handleOpenAIImportCodexSession = async (content: string) => {
       priority: form.priority,
       rate_multiplier: form.rate_multiplier,
       group_ids: form.group_ids,
+      window_quota_shared: form.window_quota_shared,
       expires_at: form.expires_at,
       auto_pause_on_expired: autoPauseOnExpired.value,
       credential_extras: Object.keys(credentialExtras).length > 0 ? credentialExtras : undefined,
@@ -5391,6 +5422,7 @@ const handleOpenAIImportCodexPAT = async (accessToken: string) => {
       priority: form.priority,
       rate_multiplier: form.rate_multiplier,
       group_ids: form.group_ids,
+      window_quota_shared: form.window_quota_shared,
       expires_at: form.expires_at,
       auto_pause_on_expired: autoPauseOnExpired.value,
       credential_extras: Object.keys(credentialExtras).length > 0 ? credentialExtras : undefined,
@@ -5489,6 +5521,7 @@ const handleOpenAIBatchRT = async (refreshTokenInput: string, clientId?: string)
             priority: form.priority,
             rate_multiplier: form.rate_multiplier,
             group_ids: form.group_ids,
+      window_quota_shared: form.window_quota_shared,
             expires_at: form.expires_at,
             auto_pause_on_expired: autoPauseOnExpired.value
           })
@@ -5588,6 +5621,7 @@ const handleAntigravityValidateRT = async (refreshTokenInput: string) => {
           priority: form.priority,
           rate_multiplier: form.rate_multiplier,
           group_ids: form.group_ids,
+      window_quota_shared: form.window_quota_shared,
           expires_at: form.expires_at,
           auto_pause_on_expired: autoPauseOnExpired.value
         })
@@ -5967,6 +6001,7 @@ const handleCookieAuth = async (sessionKey: string) => {
           priority: form.priority,
           rate_multiplier: form.rate_multiplier,
           group_ids: form.group_ids,
+      window_quota_shared: form.window_quota_shared,
           expires_at: form.expires_at,
           auto_pause_on_expired: autoPauseOnExpired.value
         })

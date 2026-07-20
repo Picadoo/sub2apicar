@@ -36,6 +36,7 @@ type CodexSessionImportRequest struct {
 	AutoPauseOnExpired      *bool          `json:"auto_pause_on_expired"`
 	CredentialExtras        map[string]any `json:"credential_extras"`
 	Extra                   map[string]any `json:"extra"`
+	WindowQuotaShared       *bool          `json:"window_quota_shared"`
 	UpdateExisting          *bool          `json:"update_existing"`
 	SkipDefaultGroupBind    *bool          `json:"skip_default_group_bind"`
 	ConfirmMixedChannelRisk *bool          `json:"confirm_mixed_channel_risk"`
@@ -172,6 +173,7 @@ func (h *AccountHandler) importCodexSessions(ctx context.Context, req CodexSessi
 		priority = *req.Priority
 	}
 	credentialExtras := sanitizeCodexImportCredentialExtras(req.CredentialExtras)
+	req.Extra = applyWindowQuotaShared(req.Extra, req.WindowQuotaShared)
 	skipDefaultGroupBind := false
 	if req.SkipDefaultGroupBind != nil {
 		skipDefaultGroupBind = *req.SkipDefaultGroupBind

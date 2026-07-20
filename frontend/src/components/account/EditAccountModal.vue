@@ -26,6 +26,28 @@
         <p class="input-hint">{{ t('admin.accounts.notesHint') }}</p>
       </div>
 
+      <div
+        v-if="account.platform === 'openai'"
+        class="rounded-lg border border-gray-200 p-3 dark:border-dark-600"
+      >
+        <label class="flex cursor-pointer items-start gap-3">
+          <input
+            v-model="form.window_quota_shared"
+            type="checkbox"
+            class="mt-0.5"
+            data-testid="window-quota-shared-toggle"
+          />
+          <span>
+            <span class="block text-sm font-medium text-gray-900 dark:text-white">
+              {{ t('admin.accounts.windowQuotaShared') }}
+            </span>
+            <span class="mt-0.5 block text-xs text-gray-500 dark:text-gray-400">
+              {{ t('admin.accounts.windowQuotaSharedHint') }}
+            </span>
+          </span>
+        </label>
+      </div>
+
       <!-- API Key fields (only for apikey type) -->
       <div v-if="account.type === 'apikey'" class="space-y-4">
         <div>
@@ -3063,7 +3085,8 @@ const form = reactive({
   rate_multiplier: 1,
   status: 'active' as 'active' | 'inactive' | 'error',
   group_ids: [] as number[],
-  expires_at: null as number | null
+  expires_at: null as number | null,
+  window_quota_shared: false
 })
 
 const statusOptions = computed(() => {
@@ -3155,6 +3178,9 @@ const syncFormFromAccount = (newAccount: Account | null) => {
     : 'active'
   form.group_ids = newAccount.group_ids || []
   form.expires_at = newAccount.expires_at ?? null
+  form.window_quota_shared =
+    newAccount.platform === 'openai' &&
+    (newAccount.extra as Record<string, unknown> | undefined)?.window_quota_shared === true
 
   // Load intercept warmup requests setting (applies to all account types)
   const credentials = newAccount.credentials as Record<string, unknown> | undefined
@@ -4473,6 +4499,12 @@ const handleSubmit = async () => {
       // Quota notify config
       writeQuotaNotifyToExtra(newExtra, 'update')
       updatePayload.extra = newExtra
+    }
+
+    updatePayload.extra = {
+      ...(((updatePayload.extra as Record<string, unknown> | undefined) ??
+        (props.account.extra as Record<string, unknown> | undefined)) || {}),
+      window_quota_shared: props.account.platform === 'openai' && form.window_quota_shared
     }
 
     const canContinue = await ensureAntigravityMixedChannelConfirmed(async () => {

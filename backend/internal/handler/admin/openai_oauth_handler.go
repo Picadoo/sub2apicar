@@ -121,6 +121,7 @@ type OpenAICodexPATCreateRequest struct {
 	AutoPauseOnExpired      *bool          `json:"auto_pause_on_expired"`
 	CredentialExtras        map[string]any `json:"credential_extras"`
 	Extra                   map[string]any `json:"extra"`
+	WindowQuotaShared       *bool          `json:"window_quota_shared"`
 	SkipDefaultGroupBind    *bool          `json:"skip_default_group_bind"`
 	ConfirmMixedChannelRisk *bool          `json:"confirm_mixed_channel_risk"`
 }
@@ -343,6 +344,7 @@ func (h *OpenAIOAuthHandler) CreateAccountFromCodexPAT(c *gin.Context) {
 		h.openaiOAuthService.BuildAccountCredentials(tokenInfo),
 		sanitizeCodexImportCredentialExtras(req.CredentialExtras),
 	)
+	req.Extra = applyWindowQuotaShared(req.Extra, req.WindowQuotaShared)
 	extra := mergeCodexImportMap(req.Extra, map[string]any{
 		"import_source":       "codex_personal_access_token",
 		"auth_provider":       "codex_personal_access_token",

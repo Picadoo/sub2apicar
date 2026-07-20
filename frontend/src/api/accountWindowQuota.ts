@@ -13,11 +13,13 @@ export interface AccountWindowQuotaItem {
   limit_percent: number
   used_percent: number
   remaining_percent: number
-  /** 5h 救急池捐赠比例（占自己份额，0~1）；7d 恒 0。 */
+  /** 本窗口救急池捐赠比例（占自己份额，0~1）；5h / 7d 各自独立。 */
   donate_fraction: number
+  /** 已被其他成员借用后，本窗口不可撤回的最低捐赠比例（0~1）。 */
+  minimum_donate_fraction?: number
   /** 当前实际可用上限（含救急池增量 / 捐赠自留约束）。 */
   effective_limit_percent: number
-  /** 该账号 5h 救急池当前可借总额；7d 恒 0。 */
+  /** 该账号该窗口尚未被借走的救急池余额。 */
   pool_available_percent: number
   /** 该账号该窗口全员已用之和（账号级利用率%）。 */
   account_used_percent?: number
@@ -147,6 +149,8 @@ export interface AdminWindowQuotaOverviewResponse {
   enabled: boolean
   rows: AdminWindowQuotaOverviewItem[]
   summaries: AdminWindowQuotaSummary[]
+  /** 已启用拼车额度的账号，包括尚无成员额度行的账号。 */
+  account_ids?: number[]
 }
 
 export interface RebalanceAccountWindowQuotasPayload {

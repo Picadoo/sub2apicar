@@ -17,6 +17,8 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 )
 
+const AccountExtraWindowQuotaShared = "window_quota_shared"
+
 type Account struct {
 	ID                      int64
 	Name                    string
@@ -113,6 +115,26 @@ type TempUnschedulableRule struct {
 
 func (a *Account) IsActive() bool {
 	return a.Status == StatusActive
+}
+
+// IsWindowQuotaShared 报告账号是否启用了拼车窗口额度。
+func (a *Account) IsWindowQuotaShared() bool {
+	if a == nil || a.Platform != PlatformOpenAI || a.Extra == nil {
+		return false
+	}
+	raw, ok := a.Extra[AccountExtraWindowQuotaShared]
+	if !ok {
+		return false
+	}
+	switch value := raw.(type) {
+	case bool:
+		return value
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(value))
+		return err == nil && parsed
+	default:
+		return false
+	}
 }
 
 // BillingRateMultiplier 返回账号计费倍率。

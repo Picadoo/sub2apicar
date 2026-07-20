@@ -18,11 +18,12 @@ import (
 )
 
 type accountWindowQuotaHandlerRepo struct {
-	rows            []service.UserAccountWindowQuotaRecord
-	adminRows       []service.AdminWindowQuotaOverviewRow
-	maxConfigured   float64
-	equalizeResults []service.AccountWindowEqualizationResult
-	equalizeErr     error
+	rows             []service.UserAccountWindowQuotaRecord
+	adminRows        []service.AdminWindowQuotaOverviewRow
+	maxConfigured    float64
+	equalizeResults  []service.AccountWindowEqualizationResult
+	equalizeErr      error
+	sharedAccountIDs []int64
 }
 
 func (r *accountWindowQuotaHandlerRepo) ResetWindowForAccount(context.Context, int64, string, *time.Time) error {
@@ -46,7 +47,7 @@ func (r *accountWindowQuotaHandlerRepo) SetLimitForUserAccount(context.Context, 
 func (r *accountWindowQuotaHandlerRepo) SetDonatePoolFraction(context.Context, int64, int64, string, float64, float64) error {
 	return nil
 }
-func (r *accountWindowQuotaHandlerRepo) RecomputeWindowShares(context.Context, int64, string, float64, time.Time, *time.Time, float64) error {
+func (r *accountWindowQuotaHandlerRepo) RecomputeWindowSharesFromCheckpoint(context.Context, int64, string, float64, time.Time, time.Time, map[int64]float64, *time.Time) error {
 	return nil
 }
 func (r *accountWindowQuotaHandlerRepo) ListAllWithUser(context.Context) ([]service.AdminWindowQuotaOverviewRow, error) {
@@ -60,6 +61,9 @@ func (r *accountWindowQuotaHandlerRepo) EqualizeActiveMemberLimits(context.Conte
 }
 func (r *accountWindowQuotaHandlerRepo) SyncAccountMembers(context.Context, int64, []int64, float64, float64) ([]service.AccountWindowEqualizationResult, error) {
 	return r.equalizeResults, r.equalizeErr
+}
+func (r *accountWindowQuotaHandlerRepo) ListSharedAccountIDs(context.Context) ([]int64, error) {
+	return append([]int64(nil), r.sharedAccountIDs...), nil
 }
 
 func newAccountWindowQuotaHandlerTest(t *testing.T, repo service.UserAccountWindowQuotaRepository) (*AccountWindowQuotaHandler, *miniredis.Miniredis) {
@@ -92,10 +96,13 @@ func decodeAccountWindowQuotaResponse(t *testing.T, w *httptest.ResponseRecorder
 }
 
 func TestAccountWindowQuotaHandler_AdminOverviewIncludesSummaries(t *testing.T) {
-	repo := &accountWindowQuotaHandlerRepo{adminRows: []service.AdminWindowQuotaOverviewRow{
-		{UserID: 1, Email: "a@example.com", AccountID: 7, WindowType: service.WindowType5h, LimitPercent: 60, AttributedPercent: 15},
-		{UserID: 2, Email: "b@example.com", AccountID: 7, WindowType: service.WindowType5h, LimitPercent: 40, AttributedPercent: 10},
-	}}
+	repo := &accountWindowQuotaHandlerRepo{
+		adminRows: []service.AdminWindowQuotaOverviewRow{
+			{UserID: 1, Email: "a@example.com", AccountID: 7, WindowType: service.WindowType5h, LimitPercent: 60, AttributedPercent: 15},
+			{UserID: 2, Email: "b@example.com", AccountID: 7, WindowType: service.WindowType5h, LimitPercent: 40, AttributedPercent: 10},
+		},
+		sharedAccountIDs: []int64{7, 9},
+	}
 	h, mr := newAccountWindowQuotaHandlerTest(t, repo)
 	mr.Set("uawq:ceiling:5h", "92")
 
@@ -112,6 +119,8 @@ func TestAccountWindowQuotaHandler_AdminOverviewIncludesSummaries(t *testing.T) 
 	require.Equal(t, float64(25), summary["used_sum_percent"])
 	require.Equal(t, float64(92), summary["ceiling_percent"])
 	require.Equal(t, true, summary["overallocated"])
+	accountIDs := data["account_ids"].([]any)
+	require.Equal(t, []any{float64(7), float64(9)}, accountIDs)
 }
 
 func TestAccountWindowQuotaHandler_GetMyWindowsIncludesOnlySharedAccountMembers(t *testing.T) {
@@ -178,4 +187,37 @@ func TestAccountWindowQuotaHandler_AdminSetCeilingRejectsNewInconsistency(t *tes
 	w := performAccountWindowQuotaRequest(t, http.MethodPost, "/api/v1/admin/account-window-quotas/ceiling", `{"window_type":"5h","ceiling_percent":92}`, h.AdminSetCeiling)
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	require.Contains(t, w.Body.String(), "highest configured sum is 95.00%")
+}
+
+func TestBuildWindowItemsIncludesMinimumDonationFraction(t *testing.T) {
+	items := buildWindowItemsFromViews([]service.UserWindowQuotaView{{
+		AccountID:             7,
+		WindowType:            service.WindowType5h,
+		LimitPercent:          23,
+		DonateFraction:        1,
+		MinimumDonateFraction: 12.0 / 23.0,
+		EffectiveLimitPercent: 0,
+	}}, time.Now())
+
+	require.Len(t, items, 1)
+	require.InDelta(t, 12.0/23.0, items[0].MinimumDonateFraction, 1e-9)
+}
+
+func TestAccountWindowQuotaHandler_DonateRejectsBorrowedReclaim(t *testing.T) {
+	repo := &accountWindowQuotaHandlerRepo{rows: []service.UserAccountWindowQuotaRecord{
+		{UserID: 1, AccountID: 7, WindowType: service.WindowType5h, LimitPercent: 23, AttributedPercent: 35},
+		{UserID: 2, AccountID: 7, WindowType: service.WindowType5h, LimitPercent: 23, DonatePoolFraction: 1},
+	}}
+	h, _ := newAccountWindowQuotaHandlerTest(t, repo)
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/user/account-window-quotas/donate", strings.NewReader(`{"account_id":7,"window_type":"5h","fraction":0}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set(string(servermiddleware.ContextKeyUser), servermiddleware.AuthSubject{UserID: 2})
+
+	h.Donate(c)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), service.ErrAccountWindowDonationInUse.Error())
 }

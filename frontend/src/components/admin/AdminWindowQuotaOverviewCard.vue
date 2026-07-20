@@ -4,11 +4,17 @@
       <h3 class="text-sm font-semibold text-gray-900 dark:text-white">
         {{ t('admin.windowQuotaOverview.title') }}
       </h3>
-      <span class="text-xs text-gray-500 dark:text-gray-400">{{ t('admin.windowQuotaOverview.subtitle') }}</span>
+      <span class="text-xs text-gray-500 dark:text-gray-400">{{
+        t('admin.windowQuotaOverview.subtitle')
+      }}</span>
     </div>
 
     <div class="space-y-5">
-      <div v-for="g in groups" :key="g.accountId" class="rounded-lg border border-gray-200 p-3 dark:border-dark-700">
+      <div
+        v-for="g in groups"
+        :key="g.accountId"
+        class="rounded-lg border border-gray-200 p-3 dark:border-dark-700"
+      >
         <div class="mb-3 flex flex-wrap items-start justify-between gap-3">
           <div>
             <div class="text-xs font-semibold text-gray-700 dark:text-gray-300">
@@ -26,8 +32,10 @@
                 ]"
               >
                 <span class="font-semibold">{{ windowLabel(diagnostic.window_type) }}</span>
-                · {{ t('admin.windowQuotaOverview.configuredSum') }} {{ fmt(diagnostic.configured_sum_percent) }}%
-                · {{ t('admin.windowQuotaOverview.ceiling') }} {{ fmt(diagnostic.ceiling_percent) }}%
+                · {{ t('admin.windowQuotaOverview.configuredSum') }}
+                {{ fmt(diagnostic.configured_sum_percent) }}% ·
+                {{ t('admin.windowQuotaOverview.ceiling') }}
+                {{ fmt(diagnostic.ceiling_percent) }}%
                 <span v-if="diagnostic.overallocated" class="ml-1 font-semibold">
                   {{ t('admin.windowQuotaOverview.overallocated') }}
                 </span>
@@ -60,17 +68,35 @@
           class="mb-3 rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs text-blue-800 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-200"
           data-testid="rebalance-preview"
         >
-          <div class="font-semibold">{{ t('admin.windowQuotaOverview.previewTitle') }}</div>
-          <p class="mt-1">{{ t('admin.windowQuotaOverview.previewMembers', { count: g.users.length }) }}</p>
+          <div class="font-semibold">
+            {{ t('admin.windowQuotaOverview.previewTitle') }}
+          </div>
+          <p class="mt-1">
+            {{
+              t('admin.windowQuotaOverview.previewMembers', {
+                count: g.users.length,
+              })
+            }}
+          </p>
           <ul class="mt-2 list-inside list-disc space-y-1">
             <li v-for="diagnostic in g.diagnostics" :key="diagnostic.window_type">
               {{ windowLabel(diagnostic.window_type) }}:
-              {{ t('admin.windowQuotaOverview.previewValue', { pct: fmt(safeEqual(diagnostic, g.users.length)) }) }}
+              {{
+                t('admin.windowQuotaOverview.previewValue', {
+                  pct: fmt(safeEqual(diagnostic, g.users.length)),
+                })
+              }}
             </li>
           </ul>
-          <p class="mt-2 text-blue-700 dark:text-blue-300">{{ t('admin.windowQuotaOverview.previewHint') }}</p>
+          <p class="mt-2 text-blue-700 dark:text-blue-300">
+            {{ t('admin.windowQuotaOverview.previewHint') }}
+          </p>
           <div class="mt-3 flex gap-2">
-            <button type="button" class="btn btn-primary btn-sm" @click="confirmRebalance(g.accountId)">
+            <button
+              type="button"
+              class="btn btn-primary btn-sm"
+              @click="confirmRebalance(g.accountId)"
+            >
               {{ t('admin.windowQuotaOverview.confirmRebalance') }}
             </button>
             <button type="button" class="btn btn-secondary btn-sm" @click="previewAccountId = null">
@@ -101,7 +127,9 @@
             class="input mb-2 w-full"
             :placeholder="t('admin.windowQuotaOverview.memberSearch')"
           />
-          <div v-if="memberUsersLoading" class="py-4 text-center text-xs text-gray-500">{{ t('common.loading') }}</div>
+          <div v-if="memberUsersLoading" class="py-4 text-center text-xs text-gray-500">
+            {{ t('common.loading') }}
+          </div>
           <div v-else class="max-h-56 space-y-1 overflow-y-auto">
             <label
               v-for="user in filteredMemberUsers"
@@ -109,7 +137,9 @@
               class="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-white dark:hover:bg-dark-700"
             >
               <input v-model="selectedUserIds" type="checkbox" :value="user.id" />
-              <span class="text-gray-800 dark:text-gray-200">{{ user.username || user.email || ('#' + user.id) }}</span>
+              <span class="text-gray-800 dark:text-gray-200">{{
+                user.username || user.email || '#' + user.id
+              }}</span>
               <span v-if="user.username" class="truncate text-gray-400">{{ user.email }}</span>
             </label>
           </div>
@@ -120,7 +150,11 @@
               :disabled="memberSaving || selectedUserIds.length === 0"
               @click="saveMembers(g.accountId)"
             >
-              {{ memberSaving ? t('admin.windowQuotaOverview.savingMembers') : t('admin.windowQuotaOverview.saveMembers') }}
+              {{
+                memberSaving
+                  ? t('admin.windowQuotaOverview.savingMembers')
+                  : t('admin.windowQuotaOverview.saveMembers')
+              }}
             </button>
             <button type="button" class="btn btn-secondary btn-sm" @click="closeMemberEditor">
               {{ t('common.cancel') }}
@@ -132,9 +166,15 @@
           <table class="min-w-full text-sm">
             <thead>
               <tr class="border-b border-gray-200 text-xs text-gray-500 dark:border-dark-700">
-                <th class="px-3 py-2 text-left font-medium">{{ t('admin.windowQuotaOverview.user') }}</th>
-                <th class="px-3 py-2 text-left font-medium">{{ t('admin.windowQuotaOverview.window5h') }}</th>
-                <th class="px-3 py-2 text-left font-medium">{{ t('admin.windowQuotaOverview.window7d') }}</th>
+                <th class="px-3 py-2 text-left font-medium">
+                  {{ t('admin.windowQuotaOverview.user') }}
+                </th>
+                <th class="px-3 py-2 text-left font-medium">
+                  {{ t('admin.windowQuotaOverview.window5h') }}
+                </th>
+                <th class="px-3 py-2 text-left font-medium">
+                  {{ t('admin.windowQuotaOverview.window7d') }}
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -145,16 +185,24 @@
               >
                 <td class="px-3 py-2">
                   <div class="flex items-center gap-1.5">
-                    <span class="text-gray-900 dark:text-white">{{ u.username || u.email || ('#' + u.userId) }}</span>
+                    <span class="text-gray-900 dark:text-white">{{
+                      u.username || u.email || '#' + u.userId
+                    }}</span>
                     <span
                       v-if="donatePctOf(u) > 0"
                       class="rounded bg-blue-100 px-1 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-900/40 dark:text-blue-300"
                       :title="t('admin.windowQuotaOverview.donorTip')"
                     >
-                      {{ t('admin.windowQuotaOverview.donor', { pct: donatePctOf(u) }) }}
+                      {{
+                        t('admin.windowQuotaOverview.donor', {
+                          pct: donatePctOf(u),
+                        })
+                      }}
                     </span>
                   </div>
-                  <div v-if="u.username && u.email" class="text-[11px] text-gray-400">{{ u.email }}</div>
+                  <div v-if="u.username && u.email" class="text-[11px] text-gray-400">
+                    {{ u.email }}
+                  </div>
                 </td>
                 <td class="px-3 py-2"><WindowCell :item="u.w5h" /></td>
                 <td class="px-3 py-2"><WindowCell :item="u.w7d" /></td>
@@ -187,6 +235,7 @@ const appStore = useAppStore()
 const enabled = ref(false)
 const rows = ref<AdminWindowQuotaOverviewItem[]>([])
 const summaries = ref<AdminWindowQuotaSummary[]>([])
+const sharedAccountIds = ref<number[]>([])
 const previewAccountId = ref<number | null>(null)
 const rebalancingAccountId = ref<number | null>(null)
 const memberEditorAccountId = ref<number | null>(null)
@@ -219,21 +268,37 @@ const groups = computed<AccountGroup[]>(() => {
     }
     let u = users.get(r.user_id)
     if (!u) {
-      u = { userId: r.user_id, username: r.username || '', email: r.email || '' }
+      u = {
+        userId: r.user_id,
+        username: r.username || '',
+        email: r.email || '',
+      }
       users.set(r.user_id, u)
     }
     if (r.window_type === '5h') u.w5h = r
     else if (r.window_type === '7d') u.w7d = r
   }
-  const accountIds = new Set([...byAccount.keys(), ...summaries.value.map((item) => item.account_id)])
+  const accountIds = new Set([
+    ...sharedAccountIds.value,
+    ...byAccount.keys(),
+    ...summaries.value.map((item) => item.account_id),
+  ])
   return Array.from(accountIds)
     .sort((a, b) => a - b)
     .map((accountId) => ({
       accountId,
-      users: Array.from(byAccount.get(accountId)?.values() ?? []).sort((a, b) => a.userId - b.userId),
+      users: Array.from(byAccount.get(accountId)?.values() ?? []).sort(
+        (a, b) => a.userId - b.userId,
+      ),
       diagnostics: summaries.value
         .filter((item) => item.account_id === accountId)
-        .sort((a, b) => (a.window_type === '5h' ? -1 : b.window_type === '5h' ? 1 : a.window_type.localeCompare(b.window_type))),
+        .sort((a, b) =>
+          a.window_type === '5h'
+            ? -1
+            : b.window_type === '5h'
+              ? 1
+              : a.window_type.localeCompare(b.window_type),
+        ),
     }))
 })
 
@@ -281,7 +346,9 @@ async function loadMemberUsers() {
     const users: AdminUser[] = []
     let page = 1
     while (true) {
-      const response = await adminAPI.users.list(page, 500, { status: 'active' })
+      const response = await adminAPI.users.list(page, 500, {
+        status: 'active',
+      })
       users.push(...response.items)
       if (users.length >= response.total || response.items.length === 0) break
       page += 1
@@ -299,7 +366,9 @@ async function openMemberEditor(group: AccountGroup) {
   try {
     await loadMemberUsers()
   } catch (error: any) {
-    appStore.showError(error?.response?.data?.message || t('admin.windowQuotaOverview.loadMembersFailed'))
+    appStore.showError(
+      error?.response?.data?.message || t('admin.windowQuotaOverview.loadMembersFailed'),
+    )
   }
 }
 
@@ -311,15 +380,28 @@ function closeMemberEditor() {
 
 async function saveMembers(accountId: number) {
   if (selectedUserIds.value.length === 0) return
-  if (!window.confirm(t('admin.windowQuotaOverview.membersConfirm', { id: accountId, count: selectedUserIds.value.length }))) return
+  if (
+    !window.confirm(
+      t('admin.windowQuotaOverview.membersConfirm', {
+        id: accountId,
+        count: selectedUserIds.value.length,
+      }),
+    )
+  )
+    return
   memberSaving.value = true
   try {
-    await setAccountWindowMembers({ account_id: accountId, user_ids: selectedUserIds.value })
+    await setAccountWindowMembers({
+      account_id: accountId,
+      user_ids: selectedUserIds.value,
+    })
     closeMemberEditor()
     await load()
     appStore.showSuccess(t('admin.windowQuotaOverview.membersSaved'))
   } catch (error: any) {
-    appStore.showError(error?.response?.data?.message || t('admin.windowQuotaOverview.membersSaveFailed'))
+    appStore.showError(
+      error?.response?.data?.message || t('admin.windowQuotaOverview.membersSaveFailed'),
+    )
   } finally {
     memberSaving.value = false
   }
@@ -331,11 +413,13 @@ async function load() {
     enabled.value = data.enabled
     rows.value = data.rows ?? []
     summaries.value = data.summaries ?? []
+    sharedAccountIds.value = data.account_ids ?? []
   } catch (error) {
     console.warn('Failed to load window quota overview:', error)
     enabled.value = false
     rows.value = []
     summaries.value = []
+    sharedAccountIds.value = []
   }
 }
 
@@ -348,22 +432,38 @@ async function confirmRebalance(accountId: number) {
     await load()
     appStore.showSuccess(t('admin.windowQuotaOverview.rebalanceSuccess'))
   } catch (error: any) {
-    appStore.showError(error?.response?.data?.message || t('admin.windowQuotaOverview.rebalanceFailed'))
+    appStore.showError(
+      error?.response?.data?.message || t('admin.windowQuotaOverview.rebalanceFailed'),
+    )
   } finally {
     rebalancingAccountId.value = null
   }
 }
 
-const WindowCell: FunctionalComponent<{ item?: AdminWindowQuotaOverviewItem }> = (props) => {
+const WindowCell: FunctionalComponent<{
+  item?: AdminWindowQuotaOverviewItem
+}> = (props) => {
   const it = props.item
   if (!it) return h('span', { class: 'text-xs text-gray-400' }, '-')
-  const eff = it.effective_limit_percent && it.effective_limit_percent > 0 ? it.effective_limit_percent : it.limit_percent
+  const eff =
+    it.effective_limit_percent && it.effective_limit_percent > 0
+      ? it.effective_limit_percent
+      : it.limit_percent
   const borrowing = eff > it.limit_percent + 0.01
   const p = calcPercent(it.used_percent, eff)
   return h('div', { class: 'flex items-center gap-2' }, [
-    h('div', { class: 'h-1.5 w-12 shrink-0 overflow-hidden rounded-full bg-gray-200 dark:bg-dark-700' }, [
-      h('div', { class: ['h-full rounded-full', barClass(p)], style: { width: p + '%' } }),
-    ]),
+    h(
+      'div',
+      {
+        class: 'h-1.5 w-12 shrink-0 overflow-hidden rounded-full bg-gray-200 dark:bg-dark-700',
+      },
+      [
+        h('div', {
+          class: ['h-full rounded-full', barClass(p)],
+          style: { width: p + '%' },
+        }),
+      ],
+    ),
     h(
       'span',
       {

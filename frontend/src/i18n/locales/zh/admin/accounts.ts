@@ -84,6 +84,8 @@ export default {
       notes: '备注',
       notesPlaceholder: '请输入备注',
       notesHint: '备注可选',
+      windowQuotaShared: '这是拼车账号',
+      windowQuotaSharedHint: '开启后才会进入多人窗口额度、成员均分和限额控制；私人账号请关闭。',
       // Filter options
       allPlatforms: '全部平台',
       allTypes: '全部类型',

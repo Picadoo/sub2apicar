@@ -304,6 +304,25 @@ describe('EditAccountModal', () => {
     authIsSimpleMode.value = true
   })
 
+  it('loads and submits the shared window quota account flag', async () => {
+    const account = buildAccount()
+    account.extra = { window_quota_shared: true }
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    const toggle = wrapper.get('[data-testid="window-quota-shared-toggle"]')
+    expect((toggle.element as HTMLInputElement).checked).toBe(true)
+
+    await toggle.setValue(false)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.window_quota_shared).toBe(false)
+  })
+
   it('reopening the same account rehydrates the OpenAI whitelist from props', async () => {
     const account = buildAccount()
     updateAccountMock.mockReset()

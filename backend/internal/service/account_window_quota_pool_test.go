@@ -92,6 +92,54 @@ func TestAccountWindowPool_EqualSplitAmongNeedy(t *testing.T) {
 	}
 }
 
+func TestAccountWindowPool_SubtractsBorrowedUsageFromAvailable(t *testing.T) {
+	records := []UserAccountWindowQuotaRecord{
+		awqRec(1, WindowType5h, 23, 35, 0),
+		awqRec(2, WindowType5h, 23, 0, 1),
+	}
+	pv := buildAccountWindowPoolView(records)
+	if got := pv.pool5hAvailable(); !awqApproxEq(got, 11) {
+		t.Fatalf("available pool = %v, want 11 after 12 was borrowed", got)
+	}
+	if got := MinimumAccountWindowDonateFraction(records, 2, WindowType5h); !awqApproxEq(got, 12.0/23.0) {
+		t.Fatalf("minimum donation fraction = %v, want %v", got, 12.0/23.0)
+	}
+}
+
+// Bob 捐出 23%，Alice 已经借用其中 12%；Bob 最多只能收回未被借走的 11%，捐赠比例不得低于 12/23。
+func TestSetDonateFraction_BlocksReclaimOfBorrowedQuota(t *testing.T) {
+	repo := &stubWindowRepo{rows: []UserAccountWindowQuotaRecord{
+		awqRec(1, WindowType5h, 23, 35, 0), // Alice 已使用自己 23% + 借用 12%
+		awqRec(2, WindowType5h, 23, 0, 1),  // Bob 原先全捐 23%
+	}}
+	svc, _ := newQuotaServiceWithMiniRedis(t, repo)
+
+	err := svc.SetDonateFraction(context.Background(), 2, 1, WindowType5h, 0)
+	if !errors.Is(err, ErrAccountWindowDonationInUse) {
+		t.Fatalf("error = %v, want ErrAccountWindowDonationInUse", err)
+	}
+	if len(repo.donateCalls) != 0 {
+		t.Fatalf("donation write must be rejected, got %+v", repo.donateCalls)
+	}
+}
+
+// 已借 12/23 时，Bob 可以把全捐降到恰好覆盖已借部分，但不能继续降低。
+func TestSetDonateFraction_AllowsReclaimOnlyUnusedDonation(t *testing.T) {
+	repo := &stubWindowRepo{rows: []UserAccountWindowQuotaRecord{
+		awqRec(1, WindowType5h, 23, 35, 0),
+		awqRec(2, WindowType5h, 23, 0, 1),
+	}}
+	svc, _ := newQuotaServiceWithMiniRedis(t, repo)
+	minimum := 12.0 / 23.0
+
+	if err := svc.SetDonateFraction(context.Background(), 2, 1, WindowType5h, minimum); err != nil {
+		t.Fatalf("SetDonateFraction() error = %v", err)
+	}
+	if len(repo.donateCalls) != 1 || !awqApproxEq(repo.donateCalls[0].DonatePoolFraction, minimum) {
+		t.Fatalf("donateCalls = %+v, want fraction %.6f", repo.donateCalls, minimum)
+	}
+}
+
 // 7d 打满的用户不计入 needy、也借不到救急池。
 func TestAccountWindowPool_SevenDayBlocksBorrow(t *testing.T) {
 	recs := []UserAccountWindowQuotaRecord{
@@ -108,11 +156,22 @@ func TestAccountWindowPool_SevenDayBlocksBorrow(t *testing.T) {
 	}
 }
 
+type windowTokenRecomputeCall struct {
+	accountID       int64
+	window          string
+	officialPercent float64
+	windowStart     time.Time
+	checkpointAt    time.Time
+	baseShares      map[int64]float64
+}
+
 // stubWindowRepo 是 UserAccountWindowQuotaRepository 的最小桩，仅 ListByAccount/ListByUser 返回固定数据。
 type stubWindowRepo struct {
 	rows             []UserAccountWindowQuotaRecord
 	adminRows        []AdminWindowQuotaOverviewRow
 	setCalls         []UserAccountWindowQuotaRecord
+	donateCalls      []UserAccountWindowQuotaRecord
+	tokenCalls       []windowTokenRecomputeCall
 	maxConfigured    float64
 	maxConfiguredErr error
 	equalizeResults  []AccountWindowEqualizationResult
@@ -120,6 +179,9 @@ type stubWindowRepo struct {
 	equalizeAccount  int64
 	equalize5h       float64
 	equalize7d       float64
+	sharedAccountIDs []int64
+	peerMemberIDs    []int64
+	syncUserIDs      []int64
 }
 
 func (s *stubWindowRepo) ResetWindowForAccount(context.Context, int64, string, *time.Time) error {
@@ -146,13 +208,27 @@ func (s *stubWindowRepo) SetLimitForUserAccount(_ context.Context, userID, accou
 	})
 	return nil
 }
-func (s *stubWindowRepo) RecomputeWindowShares(context.Context, int64, string, float64, time.Time, *time.Time, float64) error {
+func (s *stubWindowRepo) RecomputeWindowSharesFromCheckpoint(_ context.Context, accountID int64, window string, officialPercent float64, windowStart, checkpointAt time.Time, baseShares map[int64]float64, _ *time.Time) error {
+	copied := make(map[int64]float64, len(baseShares))
+	for userID, share := range baseShares {
+		copied[userID] = share
+	}
+	s.tokenCalls = append(s.tokenCalls, windowTokenRecomputeCall{
+		accountID: accountID, window: window, officialPercent: officialPercent,
+		windowStart: windowStart, checkpointAt: checkpointAt, baseShares: copied,
+	})
 	return nil
 }
 func (s *stubWindowRepo) ListAllWithUser(context.Context) ([]AdminWindowQuotaOverviewRow, error) {
 	return s.adminRows, nil
 }
-func (s *stubWindowRepo) SetDonatePoolFraction(context.Context, int64, int64, string, float64, float64) error {
+func (s *stubWindowRepo) SetDonatePoolFraction(_ context.Context, userID, accountID int64, window string, fraction, _ float64) error {
+	s.donateCalls = append(s.donateCalls, UserAccountWindowQuotaRecord{
+		UserID:             userID,
+		AccountID:          accountID,
+		WindowType:         window,
+		DonatePoolFraction: fraction,
+	})
 	return nil
 }
 func (s *stubWindowRepo) GetMaxConfiguredSumForWindow(context.Context, string) (float64, error) {
@@ -164,15 +240,117 @@ func (s *stubWindowRepo) EqualizeActiveMemberLimits(_ context.Context, accountID
 	s.equalize7d = ceiling7d
 	return s.equalizeResults, s.equalizeErr
 }
-func (s *stubWindowRepo) SyncAccountMembers(_ context.Context, accountID int64, _ []int64, ceiling5h, ceiling7d float64) ([]AccountWindowEqualizationResult, error) {
+func (s *stubWindowRepo) SyncAccountMembers(_ context.Context, accountID int64, userIDs []int64, ceiling5h, ceiling7d float64) ([]AccountWindowEqualizationResult, error) {
 	s.equalizeAccount = accountID
 	s.equalize5h = ceiling5h
 	s.equalize7d = ceiling7d
+	s.syncUserIDs = append([]int64(nil), userIDs...)
 	return s.equalizeResults, s.equalizeErr
+}
+func (s *stubWindowRepo) ListSharedAccountIDs(context.Context) ([]int64, error) {
+	return append([]int64(nil), s.sharedAccountIDs...), nil
+}
+func (s *stubWindowRepo) ListPeerSharedAccountMemberUserIDs(context.Context, int64) ([]int64, error) {
+	return append([]int64(nil), s.peerMemberIDs...), nil
 }
 
 func newStubQuotaService(rows []UserAccountWindowQuotaRecord) *AccountWindowQuotaService {
 	return NewAccountWindowQuotaService(&stubWindowRepo{rows: rows}, redis.NewClient(&redis.Options{}))
+}
+
+func TestListSharedAccountIDs_IncludesAccountsWithoutQuotaRows(t *testing.T) {
+	repo := &stubWindowRepo{sharedAccountIDs: []int64{29, 31, 33}}
+	svc, _ := newQuotaServiceWithMiniRedis(t, repo)
+	ids, err := svc.ListSharedAccountIDs(context.Background())
+	if err != nil {
+		t.Fatalf("ListSharedAccountIDs() error = %v", err)
+	}
+	if len(ids) != 3 || ids[0] != 29 || ids[1] != 31 || ids[2] != 33 {
+		t.Fatalf("ids = %#v, want [29 31 33]", ids)
+	}
+}
+
+func TestBootstrapSharedAccountMembers_InheritsPeerMembersForEmptyAccount(t *testing.T) {
+	repo := &stubWindowRepo{peerMemberIDs: []int64{33, 1, 32, 31}}
+	svc, _ := newQuotaServiceWithMiniRedis(t, repo)
+	if _, err := svc.BootstrapSharedAccountMembers(context.Background(), 34); err != nil {
+		t.Fatalf("BootstrapSharedAccountMembers() error = %v", err)
+	}
+	want := []int64{1, 31, 32, 33}
+	if len(repo.syncUserIDs) != len(want) {
+		t.Fatalf("sync user ids = %#v, want %#v", repo.syncUserIDs, want)
+	}
+	for i := range want {
+		if repo.syncUserIDs[i] != want[i] {
+			t.Fatalf("sync user ids = %#v, want %#v", repo.syncUserIDs, want)
+		}
+	}
+}
+
+func TestBootstrapSharedAccountMembers_DoesNotOverwriteExistingMembers(t *testing.T) {
+	repo := &stubWindowRepo{
+		rows:          []UserAccountWindowQuotaRecord{awqRec(1, WindowType5h, 23, 0, 0)},
+		peerMemberIDs: []int64{1, 31, 32, 33},
+	}
+	svc, _ := newQuotaServiceWithMiniRedis(t, repo)
+	if _, err := svc.BootstrapSharedAccountMembers(context.Background(), 29); err != nil {
+		t.Fatalf("BootstrapSharedAccountMembers() error = %v", err)
+	}
+	if len(repo.syncUserIDs) != 0 {
+		t.Fatalf("existing members must not be overwritten, got sync ids %#v", repo.syncUserIDs)
+	}
+}
+
+func TestAttributeWindow_ReusesEqualizedCheckpointAcrossSnapshotJitter(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	repo := &stubWindowRepo{rows: []UserAccountWindowQuotaRecord{
+		awqRec(1, WindowType5h, 23, 6.5, 0),
+		awqRec(2, WindowType5h, 23, 6.5, 0),
+		awqRec(3, WindowType5h, 23, 6.5, 0),
+		awqRec(4, WindowType5h, 23, 6.5, 0),
+	}}
+	svc := NewAccountWindowQuotaService(repo, rdb)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+
+	used := 27.0
+	svc.attributeWindow(ctx, 29, WindowType5h, &used, nil, now)
+	used = 20
+	svc.attributeWindow(ctx, 29, WindowType5h, &used, nil, now.Add(time.Minute))
+	used = 27
+	svc.attributeWindow(ctx, 29, WindowType5h, &used, nil, now.Add(2*time.Minute))
+
+	if len(repo.tokenCalls) != 3 {
+		t.Fatalf("token recompute calls = %d, want 3", len(repo.tokenCalls))
+	}
+	checkpointAt := repo.tokenCalls[0].checkpointAt
+	for _, call := range repo.tokenCalls {
+		if !call.checkpointAt.Equal(checkpointAt) {
+			t.Fatalf("checkpoint changed during snapshot jitter: %#v", repo.tokenCalls)
+		}
+		if len(call.baseShares) != 4 {
+			t.Fatalf("base shares = %#v, want four members", call.baseShares)
+		}
+		for userID := int64(1); userID <= 4; userID++ {
+			if !awqApproxEq(call.baseShares[userID], 6.5) {
+				t.Fatalf("base share user %d = %v, want 6.5", userID, call.baseShares[userID])
+			}
+		}
+	}
+}
+
+func TestCheckUserAccountEligible_BlocksUnassignedSharedMember(t *testing.T) {
+	svc := newStubQuotaService([]UserAccountWindowQuotaRecord{
+		awqRec(1, WindowType5h, 23, 6.5, 0),
+		awqRec(1, WindowType7d, 23, 1, 0),
+		awqRec(2, WindowType5h, 23, 6.5, 0),
+		awqRec(2, WindowType7d, 23, 1, 0),
+	})
+	eligible, window, _ := svc.CheckUserAccountEligible(context.Background(), 99, 1)
+	if eligible || window != WindowType5h {
+		t.Fatalf("unassigned user eligible=%v window=%q, want blocked on 5h", eligible, window)
+	}
 }
 
 // 顶满自己 5h 份额、但救急池有余 → 放行（借用救急池）。

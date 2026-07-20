@@ -56,9 +56,9 @@
               </div>
               <input
                 type="range"
-                min="0"
+                :min="minDonatePct(w)"
                 max="100"
-                step="5"
+                step="0.1"
                 class="h-1.5 w-full cursor-pointer accent-blue-500"
                 :value="donatePct[dKey(w)] ?? 0"
                 :disabled="savingKey === dKey(w)"
@@ -67,11 +67,17 @@
               />
               <p class="mt-0.5 text-[10px] text-gray-500 dark:text-gray-400">
                 {{ t('dashboard.accountWindowQuota.donateHint', {
-                  donate: donatePct[dKey(w)] ?? 0,
-                  keep: 100 - (donatePct[dKey(w)] ?? 0),
+                  donate: formatPct(donatePct[dKey(w)] ?? 0),
+                  keep: formatPct(100 - (donatePct[dKey(w)] ?? 0)),
                 }) }}
                 <span v-if="savingKey === dKey(w)" class="ml-1 text-gray-400">…</span>
                 <span v-else-if="savedKey === dKey(w)" class="ml-1 text-green-600 dark:text-green-400">✓</span>
+              </p>
+              <p
+                v-if="minDonatePct(w) > 0"
+                class="mt-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+              >
+                {{ t('dashboard.accountWindowQuota.lockedDonationHint', { pct: formatPct(minDonatePct(w)) }) }}
               </p>
               <p
                 class="mt-0.5 text-[10px] leading-snug"
@@ -241,14 +247,22 @@ function formatResetTime(iso: string | null | undefined): string {
   })
 }
 
+function minDonatePct(w: AccountWindowQuotaItem): number {
+  const fraction = Number(w.minimum_donate_fraction ?? 0)
+  if (!Number.isFinite(fraction)) return 0
+  return Math.min(100, Math.max(0, fraction * 100))
+}
+
 function onDonateInput(w: AccountWindowQuotaItem, ev: Event) {
   const v = Number((ev.target as HTMLInputElement).value)
-  donatePct[dKey(w)] = Number.isFinite(v) ? v : 0
+  const normalized = Number.isFinite(v) ? v : minDonatePct(w)
+  donatePct[dKey(w)] = Math.min(100, Math.max(minDonatePct(w), normalized))
 }
 
 async function onDonateCommit(w: AccountWindowQuotaItem) {
   const key = dKey(w)
-  const pct = donatePct[key] ?? 0
+  const pct = Math.min(100, Math.max(minDonatePct(w), donatePct[key] ?? 0))
+  donatePct[key] = pct
   savingKey.value = key
   savedKey.value = null
   try {
@@ -257,6 +271,7 @@ async function onDonateCommit(w: AccountWindowQuotaItem) {
     await load()
   } catch (error) {
     console.warn('Failed to set donate fraction:', error)
+    await load()
   } finally {
     savingKey.value = null
   }
@@ -269,7 +284,10 @@ async function load() {
     windows.value = data.windows ?? []
     sharedMembers.value = data.members ?? []
     for (const w of windows.value) {
-      donatePct[dKey(w)] = Math.round((w.donate_fraction ?? 0) * 100)
+      donatePct[dKey(w)] = Math.max(
+        minDonatePct(w),
+        Math.round((w.donate_fraction ?? 0) * 100),
+      )
     }
   } catch (error) {
     console.warn('Failed to load account window quotas:', error)

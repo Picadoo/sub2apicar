@@ -103,6 +103,7 @@ type CreateAccountRequest struct {
 	Type                    string         `json:"type" binding:"required,oneof=oauth setup-token apikey upstream bedrock service_account"`
 	Credentials             map[string]any `json:"credentials" binding:"required"`
 	Extra                   map[string]any `json:"extra"`
+	WindowQuotaShared       *bool          `json:"window_quota_shared"`
 	ProxyID                 *int64         `json:"proxy_id"`
 	Concurrency             int            `json:"concurrency"`
 	Priority                int            `json:"priority"`
@@ -122,6 +123,7 @@ type UpdateAccountRequest struct {
 	Type                    string         `json:"type" binding:"omitempty,oneof=oauth setup-token apikey upstream bedrock service_account"`
 	Credentials             map[string]any `json:"credentials"`
 	Extra                   map[string]any `json:"extra"`
+	WindowQuotaShared       *bool          `json:"window_quota_shared"`
 	ProxyID                 *int64         `json:"proxy_id"`
 	Concurrency             *int           `json:"concurrency"`
 	Priority                *int           `json:"priority"`
@@ -166,6 +168,17 @@ type CheckMixedChannelRequest struct {
 	Platform  string  `json:"platform" binding:"required"`
 	GroupIDs  []int64 `json:"group_ids"`
 	AccountID *int64  `json:"account_id"`
+}
+
+func applyWindowQuotaShared(extra map[string]any, shared *bool) map[string]any {
+	if shared == nil {
+		return extra
+	}
+	if extra == nil {
+		extra = make(map[string]any)
+	}
+	extra[service.AccountExtraWindowQuotaShared] = *shared
+	return extra
 }
 
 // AccountWithConcurrency extends Account with real-time concurrency info
@@ -788,6 +801,7 @@ func (h *AccountHandler) Create(c *gin.Context) {
 		response.BadRequest(c, "rate_multiplier must be >= 0")
 		return
 	}
+	req.Extra = applyWindowQuotaShared(req.Extra, req.WindowQuotaShared)
 	// base_rpm 输入校验：负值归零，超过 10000 截断
 	sanitizeExtraBaseRPM(req.Extra)
 
@@ -872,6 +886,7 @@ func (h *AccountHandler) Update(c *gin.Context) {
 		response.BadRequest(c, "rate_multiplier must be >= 0")
 		return
 	}
+	req.Extra = applyWindowQuotaShared(req.Extra, req.WindowQuotaShared)
 	// base_rpm 输入校验：负值归零，超过 10000 截断
 	sanitizeExtraBaseRPM(req.Extra)
 

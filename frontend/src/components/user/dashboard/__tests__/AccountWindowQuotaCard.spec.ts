@@ -57,4 +57,46 @@ describe('AccountWindowQuotaCard', () => {
     expect(wrapper.text()).toContain('5h: 5% / 46%')
     expect(wrapper.text()).toContain('5h: 8% / 46%')
   })
+
+  it('locks the slider above quota already borrowed by other members', async () => {
+    apiMocks.donate.mockReset()
+    apiMocks.donate.mockResolvedValue({ success: true })
+    apiMocks.getMy.mockResolvedValue({
+      enabled: true,
+      windows: [
+        {
+          account_id: 7,
+          window_type: '5h',
+          limit_percent: 23,
+          used_percent: 0,
+          remaining_percent: 23,
+          donate_fraction: 1,
+          minimum_donate_fraction: 12 / 23,
+          effective_limit_percent: 0,
+          pool_available_percent: 11,
+          account_used_percent: 35,
+          ceiling_percent: 92,
+        },
+      ],
+      members: [],
+    })
+
+    const wrapper = mount(AccountWindowQuotaCard)
+    await flushPromises()
+
+    const slider = wrapper.get('input[type="range"]')
+    expect(Number(slider.attributes('min'))).toBeCloseTo((12 / 23) * 100)
+    expect(wrapper.text()).toContain('dashboard.accountWindowQuota.lockedDonationHint')
+    expect(wrapper.text()).toContain('"pct":"52.2"')
+
+    await slider.setValue('0')
+    await slider.trigger('change')
+    await flushPromises()
+
+    expect(apiMocks.donate).toHaveBeenLastCalledWith({
+      account_id: 7,
+      window_type: '5h',
+      fraction: 12 / 23,
+    })
+  })
 })

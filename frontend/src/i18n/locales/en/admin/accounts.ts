@@ -82,6 +82,9 @@ export default {
       notes: 'Notes',
       notesPlaceholder: 'Enter notes',
       notesHint: 'Notes are optional',
+      windowQuotaShared: 'Shared quota account',
+      windowQuotaSharedHint:
+        'Only enabled accounts participate in shared member allocation and window quota enforcement. Keep private accounts disabled.',
       allPlatforms: 'All Platforms',
       allTypes: 'All Types',
       allStatus: 'All Status',

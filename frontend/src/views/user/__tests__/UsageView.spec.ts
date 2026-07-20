@@ -48,6 +48,18 @@ const messages: Record<string, string> = {
   'admin.usage.allModels': 'All models',
   'usage.allApiKeys': 'All API Keys',
   'usage.apiKeyFilter': 'API Key',
+  'usage.selectedKeyTodayTitle': '{name} Today',
+  'usage.selectedKeyTodayDescription': 'Local timezone usage',
+  'usage.todayRequests': 'Requests Today',
+  'usage.todayTokens': 'Tokens Today',
+  'usage.todayActualCost': 'Actual Cost Today',
+  'usage.keyQuotaTitle': 'API Key Quota Usage',
+  'usage.keyQuotaTotal': 'Total Quota',
+  'usage.keyQuota5h': '5-Hour Quota',
+  'usage.keyQuota1d': 'Daily Quota',
+  'usage.keyQuota7d': '7-Day Quota',
+  'usage.keyQuotaResetsAt': 'Resets {time}',
+  'usage.noKeyQuotaConfigured': 'No key quota configured',
   'usage.model': 'Model',
   'usage.type': 'Type',
   'usage.ws': 'WS',
@@ -142,6 +154,7 @@ function mountUsageView() {
         GroupDistributionChart: chartStub,
         EndpointDistributionChart: chartStub,
         TokenUsageTrend: chartStub,
+        AccountWindowQuotaCard: chartStub,
       },
     },
   })
@@ -187,7 +200,24 @@ describe('user UsageView', () => {
       trend: [],
       groups: [],
     })
-    list.mockResolvedValue({ items: [{ id: 1, name: 'demo-key' }] })
+    list.mockResolvedValue({
+      items: [{
+        id: 1,
+        name: 'demo-key',
+        status: 'active',
+        quota: 10,
+        quota_used: 2.5,
+        rate_limit_5h: 4,
+        usage_5h: 1,
+        rate_limit_1d: 8,
+        usage_1d: 4,
+        rate_limit_7d: 20,
+        usage_7d: 5,
+        reset_5h_at: null,
+        reset_1d_at: null,
+        reset_7d_at: null,
+      }],
+    })
     getAvailable.mockResolvedValue([{ id: 1, name: 'default' }])
   })
 
@@ -205,6 +235,68 @@ describe('user UsageView', () => {
     }))
     expect(list).toHaveBeenCalledWith(1, 100)
     expect(getAvailable).toHaveBeenCalled()
+  })
+
+  it('shows selected key today usage and quota percentages', async () => {
+    const wrapper = mountUsageView()
+    await flushPromises()
+
+    ;(wrapper.vm as any).filters.api_key_id = 1
+    await (wrapper.vm as any).loadSelectedApiKeyTodayStats()
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+
+    expect(getStats).toHaveBeenCalledWith(expect.objectContaining({
+      period: 'today',
+      api_key_id: 1,
+      timezone: expect.any(String),
+    }))
+
+    const text = wrapper.text()
+    expect(text).toContain('Requests Today')
+    expect(text).toContain('Tokens Today')
+    expect(text).toContain('Actual Cost Today')
+    expect(text).toContain('$0.0800')
+    expect(text).toContain('Total Quota')
+    expect(text).toContain('Daily Quota')
+    expect(text).toContain('25%')
+    expect(text).toContain('50%')
+
+    wrapper.unmount()
+  })
+
+  it('keeps today usage visible when the selected key has no quota configured', async () => {
+    list.mockResolvedValueOnce({
+      items: [{
+        id: 2,
+        name: 'unlimited-key',
+        status: 'active',
+        quota: 0,
+        quota_used: 0,
+        rate_limit_5h: 0,
+        usage_5h: 0,
+        rate_limit_1d: 0,
+        usage_1d: 0,
+        rate_limit_7d: 0,
+        usage_7d: 0,
+        reset_5h_at: null,
+        reset_1d_at: null,
+        reset_7d_at: null,
+      }],
+    })
+    const wrapper = mountUsageView()
+    await flushPromises()
+
+    ;(wrapper.vm as any).filters.api_key_id = 2
+    await (wrapper.vm as any).loadSelectedApiKeyTodayStats()
+    await flushPromises()
+    await wrapper.vm.$nextTick()
+
+    const text = wrapper.text()
+    expect(text).toContain('$0.0800')
+    expect(text).toContain('No key quota configured')
+
+    wrapper.unmount()
   })
 
   it('exports csv with current filters and without admin-only fields', async () => {

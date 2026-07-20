@@ -1,7 +1,78 @@
 <template>
   <AppLayout>
     <div class="space-y-6">
+      <AccountWindowQuotaCard />
+
       <UsageStatsCards :stats="usageStats" :show-account-cost="false" :strike-standard-cost="true" />
+
+      <div v-if="selectedApiKey" class="card p-5">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 class="text-base font-semibold text-gray-900 dark:text-white">
+              {{ t('usage.selectedKeyTodayTitle', { name: selectedApiKey.name }) }}
+            </h2>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              {{ t('usage.selectedKeyTodayDescription') }}
+            </p>
+          </div>
+          <span class="rounded-full bg-primary-50 px-3 py-1 text-xs font-medium text-primary-700 dark:bg-primary-900/30 dark:text-primary-300">
+            {{ t('keys.status.' + selectedApiKey.status) }}
+          </span>
+        </div>
+
+        <div class="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <div class="rounded-lg bg-gray-50 p-3 dark:bg-dark-700/50">
+            <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('usage.todayRequests') }}</p>
+            <p class="mt-1 text-xl font-semibold tabular-nums text-gray-900 dark:text-white">
+              {{ selectedKeyTodayLoading ? '…' : formatNumber(selectedKeyTodayStats?.total_requests) }}
+            </p>
+          </div>
+          <div class="rounded-lg bg-gray-50 p-3 dark:bg-dark-700/50">
+            <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('usage.todayTokens') }}</p>
+            <p class="mt-1 text-xl font-semibold tabular-nums text-gray-900 dark:text-white">
+              {{ selectedKeyTodayLoading ? '…' : formatNumber(selectedKeyTodayStats?.total_tokens) }}
+            </p>
+          </div>
+          <div class="rounded-lg bg-gray-50 p-3 dark:bg-dark-700/50">
+            <p class="text-xs text-gray-500 dark:text-gray-400">{{ t('usage.todayActualCost') }}</p>
+            <p class="mt-1 text-xl font-semibold tabular-nums text-green-600 dark:text-green-400">
+              {{ selectedKeyTodayLoading ? '…' : formatUSD(selectedKeyTodayStats?.total_actual_cost) }}
+            </p>
+          </div>
+        </div>
+
+        <div v-if="selectedKeyQuotaMetrics.length > 0" class="mt-5">
+          <h3 class="mb-3 text-sm font-semibold text-gray-800 dark:text-gray-200">{{ t('usage.keyQuotaTitle') }}</h3>
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <div
+              v-for="metric in selectedKeyQuotaMetrics"
+              :key="metric.key"
+              class="rounded-lg border border-gray-200 p-3 dark:border-dark-600"
+            >
+              <div class="flex items-center justify-between gap-2 text-xs">
+                <span class="font-medium text-gray-600 dark:text-gray-300">{{ metric.label }}</span>
+                <span :class="quotaTextClass(metric.percent)" class="font-semibold tabular-nums">
+                  {{ formatPercent(metric.percent) }}%
+                </span>
+              </div>
+              <div class="mt-2 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-dark-700">
+                <div
+                  class="h-full rounded-full transition-all"
+                  :class="quotaBarClass(metric.percent)"
+                  :style="{ width: Math.min(metric.percent, 100) + '%' }"
+                />
+              </div>
+              <div class="mt-2 flex items-center justify-between gap-2 text-[11px] text-gray-500 dark:text-gray-400">
+                <span>{{ formatUSD(metric.used) }} / {{ formatUSD(metric.limit) }}</span>
+                <span v-if="metric.resetAt">{{ formatQuotaReset(metric.resetAt) }}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p v-else class="mt-4 rounded-lg bg-gray-50 px-3 py-2 text-sm text-gray-500 dark:bg-dark-700/50 dark:text-gray-400">
+          {{ t('usage.noKeyQuotaConfigured') }}
+        </p>
+      </div>
 
       <div class="space-y-4">
         <div class="card p-4">
@@ -229,6 +300,7 @@ import EndpointDistributionChart from '@/components/charts/EndpointDistributionC
 import TokenUsageTrend from '@/components/charts/TokenUsageTrend.vue'
 import Icon from '@/components/icons/Icon.vue'
 import UserErrorRequestsTable from '@/components/user/UserErrorRequestsTable.vue'
+import AccountWindowQuotaCard from '@/components/user/dashboard/AccountWindowQuotaCard.vue'
 import { getPersistedPageSize } from '@/composables/usePersistedPageSize'
 import { formatReasoningEffort } from '@/utils/format'
 import { BILLING_MODE_IMAGE, getBillingModeLabel } from '@/utils/billingMode'
@@ -395,6 +467,88 @@ const billingModeOptions = computed<SelectOption[]>(() => [
 const apiKeys = ref<ApiKey[]>([])
 const groups = ref<Group[]>([])
 const modelOptionValues = ref<string[]>([])
+const selectedKeyTodayStats = ref<UsageStatsResponse | null>(null)
+const selectedKeyTodayLoading = ref(false)
+let selectedKeyStatsReqSeq = 0
+
+type ApiKeyQuotaMetric = {
+  key: string
+  label: string
+  used: number
+  limit: number
+  percent: number
+  resetAt?: string | null
+}
+
+const selectedApiKey = computed(() => {
+  const selectedID = filters.value.api_key_id
+  if (selectedID == null) return null
+  return apiKeys.value.find((key) => key.id === Number(selectedID)) ?? null
+})
+
+const selectedKeyQuotaMetrics = computed<ApiKeyQuotaMetric[]>(() => {
+  const key = selectedApiKey.value
+  if (!key) return []
+
+  const definitions = [
+    { key: 'total', label: t('usage.keyQuotaTotal'), used: key.quota_used, limit: key.quota, resetAt: null },
+    { key: '5h', label: t('usage.keyQuota5h'), used: key.usage_5h, limit: key.rate_limit_5h, resetAt: key.reset_5h_at },
+    { key: '1d', label: t('usage.keyQuota1d'), used: key.usage_1d, limit: key.rate_limit_1d, resetAt: key.reset_1d_at },
+    { key: '7d', label: t('usage.keyQuota7d'), used: key.usage_7d, limit: key.rate_limit_7d, resetAt: key.reset_7d_at },
+  ]
+
+  return definitions
+    .filter((item) => Number(item.limit) > 0)
+    .map((item) => ({
+      ...item,
+      used: Number(item.used) || 0,
+      limit: Number(item.limit) || 0,
+      percent: item.limit > 0 ? Math.max(0, (Number(item.used) || 0) / Number(item.limit) * 100) : 0,
+    }))
+})
+
+const getBrowserTimezone = (): string => {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+  } catch {
+    return 'UTC'
+  }
+}
+
+const formatNumber = (value: number | null | undefined): string =>
+  Number(value ?? 0).toLocaleString()
+
+const formatUSD = (value: number | null | undefined): string =>
+  `$${Number(value ?? 0).toFixed(4)}`
+
+const formatPercent = (value: number): string =>
+  (Math.round((Number(value) || 0) * 10) / 10).toString()
+
+const quotaBarClass = (percent: number): string => {
+  if (percent >= 100) return 'bg-red-500'
+  if (percent >= 80) return 'bg-amber-500'
+  return 'bg-emerald-500'
+}
+
+const quotaTextClass = (percent: number): string => {
+  if (percent >= 100) return 'text-red-500'
+  if (percent >= 80) return 'text-amber-500'
+  return 'text-emerald-600 dark:text-emerald-400'
+}
+
+const formatQuotaReset = (value: string): string => {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return t('usage.keyQuotaResetsAt', {
+    time: date.toLocaleString(undefined, {
+      month: 'numeric',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }),
+  })
+}
 
 const apiKeyOptions = computed<SelectOption[]>(() => [
   { value: null, label: t('usage.allApiKeys') },
@@ -471,6 +625,34 @@ const loadStats = async () => {
   }
 }
 
+const loadSelectedApiKeyTodayStats = async () => {
+  const apiKeyID = filters.value.api_key_id
+  const seq = ++selectedKeyStatsReqSeq
+
+  if (apiKeyID == null) {
+    selectedKeyTodayStats.value = null
+    selectedKeyTodayLoading.value = false
+    return
+  }
+
+  selectedKeyTodayLoading.value = true
+  try {
+    const stats = await usageAPI.getStats({
+      period: 'today',
+      api_key_id: Number(apiKeyID),
+      timezone: getBrowserTimezone(),
+    })
+    if (seq !== selectedKeyStatsReqSeq) return
+    selectedKeyTodayStats.value = stats
+  } catch (error) {
+    if (seq !== selectedKeyStatsReqSeq) return
+    console.error('Failed to load selected API key today stats:', error)
+    selectedKeyTodayStats.value = null
+  } finally {
+    if (seq === selectedKeyStatsReqSeq) selectedKeyTodayLoading.value = false
+  }
+}
+
 const loadModelStats = async () => {
   const seq = ++modelStatsReqSeq
   modelStatsLoading.value = true
@@ -529,6 +711,7 @@ const applyFilters = () => {
   pagination.page = 1
   void loadLogs()
   void loadStats()
+  void loadSelectedApiKeyTodayStats()
   void loadModelStats()
   void loadChartData()
   resetErrorRows()
@@ -537,6 +720,7 @@ const applyFilters = () => {
 const refreshData = () => {
   void loadLogs()
   void loadStats()
+  void loadSelectedApiKeyTodayStats()
   void loadModelStats()
   void loadChartData()
   if (activeTab.value === 'errors') void loadErrors()
