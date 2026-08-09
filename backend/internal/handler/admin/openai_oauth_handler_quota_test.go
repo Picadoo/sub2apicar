@@ -28,6 +28,10 @@ func (s *openAIQuotaQueryStub) ResetCredit(_ context.Context, _ int64) (*service
 	return nil, errors.New("reset credit is not configured for this test")
 }
 
+func (s *openAIQuotaQueryStub) CacheResetCreditsSnapshot(_ context.Context, _ int64, _ *service.OpenAIRateLimitResetCredits) error {
+	return nil
+}
+
 type accountWindowQuotaSyncStub struct {
 	accountID int64
 	snapshot  *service.OpenAICodexUsageSnapshot
