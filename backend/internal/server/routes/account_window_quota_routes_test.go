@@ -21,7 +21,7 @@ func newAccountWindowQuotaRoutesTestRouter() *gin.Engine {
 		c.Next()
 	}), servermiddleware.AuditLogMiddleware(func(c *gin.Context) {
 		c.Next()
-	}), nil)
+	}), nil, nil)
 
 	admin := v1.Group("/admin")
 	admin.Use(func(c *gin.Context) {
