@@ -339,7 +339,7 @@ func (s *OpenAIGatewayService) ForwardAsChatCompletions(
 	// Extract and save Codex usage snapshot from response headers (for OAuth accounts).
 	// 排除 spark 影子:其 codex_* 仅由 QueryUsage(/wham/usage bengalfox)更新(外审第7轮 P1)。
 	if handleErr == nil && account.Type == AccountTypeOAuth && !account.IsShadow() {
-		if snapshot := ParseCodexRateLimitHeaders(resp.Header); snapshot != nil {
+		if snapshot := parseCodexRateLimitHeadersAt(resp.Header, HTTPUpstreamResponseHeadersObservedAt(resp)); snapshot != nil {
 			s.updateCodexUsageSnapshot(ctx, userIDFromGinContext(c), account.ID, snapshot)
 		}
 	}
@@ -481,13 +481,15 @@ func (s *OpenAIGatewayService) handleChatBufferedStreamingResponse(
 	c.JSON(http.StatusOK, chatResp)
 
 	return &OpenAIForwardResult{
-		RequestID:     requestID,
-		Usage:         usage,
-		Model:         originalModel,
-		BillingModel:  billingModel,
-		UpstreamModel: upstreamModel,
-		Stream:        false,
-		Duration:      time.Since(startTime),
+		RequestID:                 requestID,
+		Usage:                     usage,
+		Model:                     originalModel,
+		BillingModel:              billingModel,
+		UpstreamModel:             upstreamModel,
+		Stream:                    false,
+		Duration:                  time.Since(startTime),
+		ResponseHeaders:           resp.Header.Clone(),
+		ResponseHeadersObservedAt: HTTPUpstreamResponseHeadersObservedAt(resp),
 	}, nil
 }
 
@@ -540,14 +542,16 @@ func (s *OpenAIGatewayService) handleChatStreamingResponse(
 
 	resultWithUsage := func() *OpenAIForwardResult {
 		return &OpenAIForwardResult{
-			RequestID:     requestID,
-			Usage:         usage,
-			Model:         originalModel,
-			BillingModel:  billingModel,
-			UpstreamModel: upstreamModel,
-			Stream:        true,
-			Duration:      time.Since(startTime),
-			FirstTokenMs:  firstTokenMs,
+			RequestID:                 requestID,
+			Usage:                     usage,
+			Model:                     originalModel,
+			BillingModel:              billingModel,
+			UpstreamModel:             upstreamModel,
+			Stream:                    true,
+			Duration:                  time.Since(startTime),
+			FirstTokenMs:              firstTokenMs,
+			ResponseHeaders:           resp.Header.Clone(),
+			ResponseHeadersObservedAt: HTTPUpstreamResponseHeadersObservedAt(resp),
 		}
 	}
 

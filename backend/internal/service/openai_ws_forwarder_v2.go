@@ -225,7 +225,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		)
 		var dialErr *openAIWSDialError
 		if errors.As(err, &dialErr) && dialErr != nil && dialErr.StatusCode == http.StatusTooManyRequests {
-			s.persistOpenAIWSRateLimitSignal(ctx, account, dialErr.ResponseHeaders, nil, "rate_limit_exceeded", "rate_limit_error", strings.TrimSpace(err.Error()))
+			s.persistOpenAIWSRateLimitSignal(ctx, account, dialErr.ResponseHeaders, nil, dialErr.ObservedAt, "rate_limit_exceeded", "rate_limit_error", strings.TrimSpace(err.Error()))
 		}
 		return nil, wrapOpenAIWSFallback(classifyOpenAIWSAcquireError(err), err)
 	}
@@ -577,9 +577,9 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		}
 
 		if eventType == "error" {
-			s.handleOpenAIWSErrorEventTransientFailure(ctx, account, mappedModel, lease.HandshakeHeaders(), message)
+			s.handleOpenAIWSErrorEventTransientFailureAt(ctx, account, mappedModel, lease.HandshakeHeaders(), message, lease.HandshakeObservedAt())
 			errCodeRaw, errTypeRaw, errMsgRaw := parseOpenAIWSErrorEventFields(message)
-			s.persistOpenAIWSRateLimitSignal(ctx, account, lease.HandshakeHeaders(), message, errCodeRaw, errTypeRaw, errMsgRaw)
+			s.persistOpenAIWSRateLimitSignal(ctx, account, lease.HandshakeHeaders(), message, lease.HandshakeObservedAt(), errCodeRaw, errTypeRaw, errMsgRaw)
 			errMsg := strings.TrimSpace(errMsgRaw)
 			if errMsg == "" {
 				errMsg = "Upstream websocket error"
@@ -676,7 +676,7 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 		}
 
 		if isTerminalEvent {
-			upstreamTerminalEvent = s.handleOpenAIWSTerminalTransientFailure(ctx, account, mappedModel, lease.HandshakeHeaders(), message)
+			upstreamTerminalEvent = s.handleOpenAIWSTerminalTransientFailureAt(ctx, account, mappedModel, lease.HandshakeHeaders(), message, lease.HandshakeObservedAt())
 			// A terminal event must be the final JSON document in its WS message.
 			// Ignore any tail for the completed client turn, but never reuse the
 			// ambiguous upstream connection for another request.
@@ -748,20 +748,21 @@ func (s *OpenAIGatewayService) forwardOpenAIWSV2(
 	)
 
 	return &OpenAIForwardResult{
-		RequestID:             responseID,
-		Usage:                 *usage,
-		Model:                 originalModel,
-		UpstreamModel:         mappedModel,
-		ImageCount:            imageCounter.Count(),
-		ImageOutputSizes:      imageCounter.Sizes(),
-		ServiceTier:           extractOpenAIServiceTier(reqBody),
-		ReasoningEffort:       extractOpenAIReasoningEffort(reqBody, mappedModel, originalModel),
-		Stream:                reqStream,
-		OpenAIWSMode:          true,
-		UpstreamTerminalEvent: upstreamTerminalEvent,
-		ResponseHeaders:       lease.HandshakeHeaders(),
-		Duration:              time.Since(startTime),
-		FirstTokenMs:          firstTokenMs,
+		RequestID:                 responseID,
+		Usage:                     *usage,
+		Model:                     originalModel,
+		UpstreamModel:             mappedModel,
+		ImageCount:                imageCounter.Count(),
+		ImageOutputSizes:          imageCounter.Sizes(),
+		ServiceTier:               extractOpenAIServiceTier(reqBody),
+		ReasoningEffort:           extractOpenAIReasoningEffort(reqBody, mappedModel, originalModel),
+		Stream:                    reqStream,
+		OpenAIWSMode:              true,
+		UpstreamTerminalEvent:     upstreamTerminalEvent,
+		ResponseHeaders:           lease.HandshakeHeaders(),
+		ResponseHeadersObservedAt: lease.HandshakeObservedAt(),
+		Duration:                  time.Since(startTime),
+		FirstTokenMs:              firstTokenMs,
 	}, nil
 }
 

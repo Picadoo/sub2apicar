@@ -108,7 +108,7 @@ func (s *OpenAIGatewayService) ForwardAlphaSearch(ctx context.Context, c *gin.Co
 	}
 
 	if !account.IsShadow() {
-		s.UpdateCodexUsageSnapshotFromHeaders(ctx, userIDFromGinContext(c), account.ID, resp.Header)
+		s.UpdateCodexUsageSnapshotFromHeadersAt(ctx, userIDFromGinContext(c), account.ID, resp.Header, HTTPUpstreamResponseHeadersObservedAt(resp))
 	}
 	writeOpenAIPassthroughResponseHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
 	contentType := resp.Header.Get("Content-Type")
@@ -121,11 +121,13 @@ func (s *OpenAIGatewayService) ForwardAlphaSearch(ctx context.Context, c *gin.Co
 		return nil, nil
 	}
 	return &OpenAIForwardResult{
-		RequestID:      strings.TrimSpace(resp.Header.Get("x-request-id")),
-		Model:          requestedModel,
-		UpstreamModel:  upstreamModel,
-		Duration:       time.Since(upstreamStart),
-		WebSearchCalls: 1,
+		RequestID:                 strings.TrimSpace(resp.Header.Get("x-request-id")),
+		Model:                     requestedModel,
+		UpstreamModel:             upstreamModel,
+		Duration:                  time.Since(upstreamStart),
+		WebSearchCalls:            1,
+		ResponseHeaders:           resp.Header.Clone(),
+		ResponseHeadersObservedAt: HTTPUpstreamResponseHeadersObservedAt(resp),
 	}, nil
 }
 
@@ -193,7 +195,7 @@ func (s *OpenAIGatewayService) forwardAlphaSearchViaResponsesWebSearch(
 	}
 
 	if !account.IsShadow() {
-		s.UpdateCodexUsageSnapshotFromHeaders(ctx, userIDFromGinContext(c), account.ID, resp.Header)
+		s.UpdateCodexUsageSnapshotFromHeadersAt(ctx, userIDFromGinContext(c), account.ID, resp.Header, HTTPUpstreamResponseHeadersObservedAt(resp))
 	}
 	alphaRespBody, err := openAIAlphaSearchResponseFromResponsesSSE(respBody)
 	if err != nil {
@@ -201,13 +203,14 @@ func (s *OpenAIGatewayService) forwardAlphaSearchViaResponsesWebSearch(
 	}
 	c.Data(http.StatusOK, "application/json", alphaRespBody)
 	return &OpenAIForwardResult{
-		RequestID:        strings.TrimSpace(resp.Header.Get("x-request-id")),
-		Model:            requestedModel,
-		UpstreamModel:    upstreamModel,
-		UpstreamEndpoint: "/v1/responses",
-		ResponseHeaders:  resp.Header.Clone(),
-		Duration:         time.Since(upstreamStart),
-		WebSearchCalls:   1,
+		RequestID:                 strings.TrimSpace(resp.Header.Get("x-request-id")),
+		Model:                     requestedModel,
+		UpstreamModel:             upstreamModel,
+		UpstreamEndpoint:          "/v1/responses",
+		ResponseHeaders:           resp.Header.Clone(),
+		ResponseHeadersObservedAt: HTTPUpstreamResponseHeadersObservedAt(resp),
+		Duration:                  time.Since(upstreamStart),
+		WebSearchCalls:            1,
 	}, nil
 }
 

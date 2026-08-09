@@ -21,26 +21,67 @@
             :key="w.window_type"
             class="space-y-0.5 border-t border-gray-100 pt-2 first:border-t-0 first:pt-0 dark:border-dark-700"
           >
-            <div class="flex items-center justify-between text-xs">
-              <span class="text-gray-600 dark:text-gray-300">{{ windowLabel(w.window_type) }}</span>
-              <span class="font-mono text-gray-700 dark:text-gray-200">
-                {{ formatPct(w.used_percent) }}% / {{ formatPct(effLimit(w)) }}%
+            <div class="text-xs font-medium text-gray-600 dark:text-gray-300">
+              {{ windowLabel(w.window_type) }}
+            </div>
+
+            <div
+              class="flex items-end justify-between gap-3 rounded-md bg-gray-50 px-2.5 py-2 dark:bg-dark-700/50"
+              data-testid="current-window-availability"
+            >
+              <div>
+                <div class="text-[10px] text-gray-500 dark:text-gray-400">
+                  {{ t('dashboard.accountWindowQuota.availableNow') }}
+                </div>
+                <div class="font-mono text-xl font-semibold text-gray-900 dark:text-white">
+                  {{ formatPctValue(availableNow(w)) }}
+                </div>
+              </div>
+              <p class="max-w-[62%] text-right text-[10px] leading-snug text-gray-500 dark:text-gray-400">
+                {{ hasOfficialSnapshot(w)
+                  ? t('dashboard.accountWindowQuota.availableSharedHint')
+                  : t('dashboard.accountWindowQuota.availableEstimateHint') }}
+              </p>
+            </div>
+
+            <div
+              class="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[10px] text-gray-500 dark:text-gray-400"
+              data-testid="window-quota-metrics"
+            >
+              <span>
+                {{ t('dashboard.accountWindowQuota.officialUsed') }}
+                <strong class="font-mono font-medium text-gray-700 dark:text-gray-200">{{ formatPctValue(w.account_used_percent) }}</strong>
+              </span>
+              <span>
+                {{ t('dashboard.accountWindowQuota.accountCeiling') }}
+                <strong class="font-mono font-medium text-gray-700 dark:text-gray-200">{{ formatPctValue(w.ceiling_percent) }}</strong>
+              </span>
+              <span>
+                {{ t('dashboard.accountWindowQuota.siteAttributed') }}
+                <strong class="font-mono font-medium text-gray-700 dark:text-gray-200">{{ formatPctValue(w.used_percent) }}</strong>
+              </span>
+              <span>
+                {{ t('dashboard.accountWindowQuota.personalLimit') }}
+                <strong class="font-mono font-medium text-gray-700 dark:text-gray-200">{{ formatPctValue(effLimit(w)) }}</strong>
+                <small v-if="limitsDiffer(w)" class="ml-1 text-gray-400">
+                  {{ t('dashboard.accountWindowQuota.baseShare', { pct: formatPctValue(w.limit_percent) }) }}
+                </small>
               </span>
             </div>
             <div class="h-1.5 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-dark-700">
               <div
                 class="h-full rounded-full transition-all"
-                :class="barClass(calcPercent(w.used_percent, effLimit(w)))"
-                :style="{ width: calcPercent(w.used_percent, effLimit(w)) + '%' }"
+                :class="barClass(quotaProgress(w))"
+                :style="{ width: (quotaProgress(w) ?? 0) + '%' }"
+                data-testid="window-quota-progress"
               />
             </div>
             <!-- 借用救急池中（已用超过自己基础份额，且有人捐了） -->
             <p v-if="isBorrowing(w)" class="text-[10px] font-medium text-blue-600 dark:text-blue-400">
-              {{ t('dashboard.accountWindowQuota.borrowing', { pct: formatPct(effLimit(w) - w.limit_percent) }) }}
+              {{ t('dashboard.accountWindowQuota.borrowing', { pct: formatPct(borrowingBoost(w)) }) }}
             </p>
-            <!-- 账号该窗口合计未用余量（中性提示，便于知道整车还剩多少） -->
-            <p v-if="acctRemaining(w) !== null" class="text-[10px] text-gray-400">
-              {{ t('dashboard.accountWindowQuota.acctRemaining', { pct: formatPct(acctRemaining(w)!) }) }}
+            <p class="text-[10px] leading-snug text-gray-400" data-testid="account-attribution-breakdown">
+              {{ attributionExplanation(w) }}
             </p>
             <p v-if="w.window_reset_at" class="text-[10px] text-gray-400">
               {{ t('dashboard.accountWindowQuota.resetsAt', { time: formatResetTime(w.window_reset_at) }) }}
@@ -103,9 +144,9 @@
                 <div class="mb-1 truncate font-medium text-gray-700 dark:text-gray-200">
                   {{ member.name }}
                 </div>
-                <div class="grid grid-cols-2 gap-2 font-mono text-[10px] text-gray-500 dark:text-gray-400">
-                  <span>5h: {{ memberQuota(member.w5h) }}</span>
-                  <span>7d: {{ memberQuota(member.w7d) }}</span>
+                <div class="space-y-1 font-mono text-[10px] text-gray-500 dark:text-gray-400">
+                  <div>5h: {{ memberQuota(member.w5h) }}</div>
+                  <div>7d: {{ memberQuota(member.w7d) }}</div>
                 </div>
               </div>
             </div>
@@ -188,24 +229,89 @@ function dKey(w: AccountWindowQuotaItem): string {
   return `${w.account_id}:${w.window_type}`
 }
 
-// 有效上限：含救急池增量（后端给的 effective_limit_percent），缺失时回落到基础上限。
-// 0 是合法值（全捐且未用 → 自留上限 0），不能当成"缺失"回落到基础上限。
-function effLimit(w: AccountWindowQuotaItem): number {
-  const eff = w.effective_limit_percent
-  return typeof eff === 'number' && Number.isFinite(eff) && eff >= 0 ? eff : w.limit_percent
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 
-// 是否正在借用救急池：有效上限高于基础上限且已用已超出基础份额（5h / 7d 通用）。
+// 有效上限只展示后端明确返回的有效值；0 是合法值，缺失或非有限数显示“—”。
+function effLimit(w: AccountWindowQuotaItem): number | null {
+  const effective = finiteNumber(w.effective_limit_percent)
+  return effective !== null && effective >= 0 ? effective : null
+}
+
+function personalRemaining(w: AccountWindowQuotaItem): number | null {
+  const effective = effLimit(w)
+  const attributed = finiteNumber(w.used_percent)
+  if (effective === null || attributed === null || attributed < 0) return null
+  return Math.max(0, effective - attributed)
+}
+
+function accountHeadroom(w: AccountWindowQuotaItem): number | null {
+  const official = finiteNumber(w.account_used_percent)
+  const ceiling = finiteNumber(w.ceiling_percent)
+  if (official === null || ceiling === null || ceiling < 0) return null
+  return Math.max(0, ceiling - official)
+}
+
+function hasOfficialSnapshot(w: AccountWindowQuotaItem): boolean {
+  return accountHeadroom(w) !== null
+}
+
+// 当前真实上限同时受个人额度和账号官方安全余量约束。
+// 账号余量属于全体成员及外部使用共享，不再展示误导性的个人“剩余 24%”。
+function availableNow(w: AccountWindowQuotaItem): number | null {
+  const personal = personalRemaining(w)
+  if (personal === null) return null
+  const account = accountHeadroom(w)
+  return account === null ? personal : Math.min(personal, account)
+}
+
+function limitsDiffer(w: AccountWindowQuotaItem): boolean {
+  const effective = effLimit(w)
+  const base = finiteNumber(w.limit_percent)
+  return effective !== null && base !== null && Math.abs(effective - base) > 0.01
+}
+
+function attributionExplanation(w: AccountWindowQuotaItem): string {
+  // force 模式：官方用量几乎全部来自站外，成员归因恒为 0，给出区别于普通未归因的明确提示。
+  if (w.force_unattributed) {
+    const official = finiteNumber(w.account_used_percent)
+    return official !== null && official > 0.01
+      ? t('dashboard.accountWindowQuota.forceUnattributedNotice', { pct: formatPctValue(official) })
+      : t('dashboard.accountWindowQuota.forceUnattributedIdle')
+  }
+  const unattributed = finiteNumber(w.account_unattributed_percent)
+  if (unattributed !== null && unattributed > 0.01) {
+    return t('dashboard.accountWindowQuota.unattributedNotice', {
+      pct: formatPctValue(unattributed),
+    })
+  }
+  if (!hasOfficialSnapshot(w)) {
+    return t('dashboard.accountWindowQuota.snapshotMissing')
+  }
+  return t('dashboard.accountWindowQuota.attributionSynced', {
+    pct: formatPctValue(w.account_attributed_percent),
+  })
+}
+
+// 是否正在借用救急池：有效上限高于基础上限且归因已用已超出基础份额（5h / 7d 通用）。
 function isBorrowing(w: AccountWindowQuotaItem): boolean {
-  return effLimit(w) > w.limit_percent + 0.01 && w.used_percent > w.limit_percent - 0.01
+  const effective = effLimit(w)
+  const base = finiteNumber(w.limit_percent)
+  const attributed = finiteNumber(w.used_percent)
+  return (
+    effective !== null &&
+    base !== null &&
+    attributed !== null &&
+    effective > base + 0.01 &&
+    attributed > base - 0.01
+  )
 }
 
-// 账号该窗口合计未用余量 = ceiling − 全员已用；无 ceiling 数据时返回 null（不显示）。
-function acctRemaining(w: AccountWindowQuotaItem): number | null {
-  const ceiling = w.ceiling_percent ?? 0
-  if (!ceiling || ceiling <= 0) return null
-  const used = w.account_used_percent ?? 0
-  return Math.max(0, ceiling - used)
+function borrowingBoost(w: AccountWindowQuotaItem): number {
+  const effective = effLimit(w)
+  const base = finiteNumber(w.limit_percent)
+  return effective !== null && base !== null ? Math.max(0, effective - base) : 0
 }
 
 function windowLabel(wt: string): string {
@@ -214,25 +320,41 @@ function windowLabel(wt: string): string {
   return wt
 }
 
-function calcPercent(used: number, limit: number): number {
-  if (!limit || limit <= 0) return 0
-  return Math.min(100, Math.max(0, Math.round((used / limit) * 100)))
+function quotaProgress(w: AccountWindowQuotaItem): number | null {
+  // 进度条只表达账号官方压力（official/ceiling）；官方快照缺失时不退化为个人口径，
+  // 返回 null 显示灰色，与「--」占位文案保持语义一致，避免误导。
+  const official = finiteNumber(w.account_used_percent)
+  const ceiling = finiteNumber(w.ceiling_percent)
+  if (official === null || ceiling === null || ceiling <= 0) return null
+  return Math.min(100, Math.max(0, Math.round((official / ceiling) * 100)))
 }
 
-function barClass(p: number): string {
+function barClass(p: number | null): string {
+  if (p === null) return 'bg-gray-400 dark:bg-gray-500'
   if (p >= 95) return 'bg-red-500'
   if (p >= 75) return 'bg-amber-500'
   return 'bg-green-500'
 }
 
-function formatPct(n: number): string {
-  if (!Number.isFinite(n)) return '0'
-  return (Math.round(n * 10) / 10).toString()
+function formatPct(n: unknown): string {
+  const value = finiteNumber(n)
+  if (value === null) return '--'
+  return (Math.round(value * 10) / 10).toString()
+}
+
+function formatPctValue(n: unknown): string {
+  const value = formatPct(n)
+  return value === '--' ? value : `${value}%`
 }
 
 function memberQuota(item?: AdminWindowQuotaOverviewItem): string {
-  if (!item) return '-'
-  return `${formatPct(item.used_percent)}% / ${formatPct(item.limit_percent)}%`
+  const effective = finiteNumber(item?.effective_limit_percent)
+  const base = finiteNumber(item?.limit_percent)
+  const personalLimit = effective !== null && effective >= 0 ? effective : base
+  return [
+    `${t('dashboard.accountWindowQuota.siteAttributed')} ${formatPctValue(item?.used_percent)}`,
+    `${t('dashboard.accountWindowQuota.personalLimit')} ${formatPctValue(personalLimit)}`,
+  ].join(' / ')
 }
 
 function formatResetTime(iso: string | null | undefined): string {

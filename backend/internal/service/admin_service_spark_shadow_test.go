@@ -380,6 +380,10 @@ func (r *updateExtraSpyRepo) UpdateExtra(_ context.Context, _ int64, _ map[strin
 	return nil
 }
 
+func (r *updateExtraSpyRepo) UpdateCodexUsageSnapshotIfNewer(ctx context.Context, accountID int64, _ time.Time, updates map[string]any) (bool, error) {
+	return true, r.UpdateExtra(ctx, accountID, updates)
+}
+
 // TestPersistOpenAICodexSnapshot_SkipsShadow 验证外审第7轮 P1:影子 codex_* 仅由 QueryUsage
 // (/wham/usage bengalfox)更新,不能被 429 路径的 x-codex-* 全局头快照污染。
 func TestPersistOpenAICodexSnapshot_SkipsShadow(t *testing.T) {

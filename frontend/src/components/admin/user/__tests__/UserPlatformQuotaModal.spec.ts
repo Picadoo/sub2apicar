@@ -6,6 +6,8 @@ const apiMocks = vi.hoisted(() => ({
   getPlatformQuotas: vi.fn(),
   updatePlatformQuotas: vi.fn(),
   resetPlatformQuotaWindow: vi.fn(),
+  getUserAccountWindowQuotas: vi.fn(),
+  setAccountWindowLimit: vi.fn(),
 }))
 
 vi.mock('@/api/admin', () => ({
@@ -18,11 +20,10 @@ vi.mock('@/api/admin', () => ({
   },
 }))
 
-// 窗口百分比配额区块的 API：本测试只关注平台配额，mock 成空数据以隔离。
 vi.mock('@/api/accountWindowQuota', () => ({
-  getUserAccountWindowQuotas: vi.fn().mockResolvedValue({ enabled: false, windows: [] }),
+  getUserAccountWindowQuotas: apiMocks.getUserAccountWindowQuotas,
   getAccountWindowCeilings: vi.fn().mockResolvedValue({ enabled: false, ceilings: [] }),
-  setAccountWindowLimit: vi.fn().mockResolvedValue(undefined),
+  setAccountWindowLimit: apiMocks.setAccountWindowLimit,
   setAccountWindowCeiling: vi.fn().mockResolvedValue(undefined),
 }))
 
@@ -79,12 +80,76 @@ beforeEach(() => {
   apiMocks.getPlatformQuotas.mockResolvedValue({ platform_quotas: [] })
   apiMocks.updatePlatformQuotas.mockResolvedValue({ platform_quotas: [] })
   apiMocks.resetPlatformQuotaWindow.mockResolvedValue({ platform_quotas: [] })
+  apiMocks.getUserAccountWindowQuotas.mockResolvedValue({ enabled: false, windows: [] })
+  apiMocks.setAccountWindowLimit.mockResolvedValue(undefined)
 })
 
 describe('UserPlatformQuotaModal', () => {
   it('挂载并 show=true 时调用 getPlatformQuotas', async () => {
     await mountAndOpen()
     expect(apiMocks.getPlatformQuotas).toHaveBeenCalledWith(99)
+  })
+
+  it('窗口配额明确展示归因、有效上限、剩余、官方和未归因', async () => {
+    apiMocks.getUserAccountWindowQuotas.mockResolvedValueOnce({
+      enabled: true,
+      windows: [
+        {
+          account_id: 7,
+          window_type: '5h',
+          limit_percent: 23,
+          used_percent: 12,
+          remaining_percent: 18,
+          donate_fraction: 0,
+          effective_limit_percent: 30,
+          pool_available_percent: 0,
+          account_used_percent: 20,
+          account_attributed_percent: 18,
+          account_unattributed_percent: 2,
+        },
+      ],
+    })
+
+    const w = await mountAndOpen()
+    const table = w.get('[data-testid="window-quota-table"]')
+
+    expect(table.text()).toContain('admin.users.windowQuota.columns.attributed')
+    expect(table.text()).toContain('admin.users.windowQuota.columns.effectiveLimit')
+    expect(table.text()).toContain('admin.users.windowQuota.columns.remaining')
+    expect(table.text()).toContain('admin.users.windowQuota.columns.officialAttribution')
+    expect(table.text()).toContain('12%')
+    expect(table.text()).toContain('30%')
+    expect(table.text()).toContain('18%')
+    expect(table.text()).toContain('admin.users.windowQuota.official 20%')
+    expect(table.text()).toContain('admin.users.windowQuota.unattributed 2%')
+  })
+
+  it('窗口配额无效数值显示破折号，真实 0 仍显示为 0', async () => {
+    apiMocks.getUserAccountWindowQuotas.mockResolvedValueOnce({
+      enabled: true,
+      windows: [
+        {
+          account_id: 7,
+          window_type: '5h',
+          limit_percent: 23,
+          used_percent: Number.NaN,
+          remaining_percent: Number.POSITIVE_INFINITY,
+          donate_fraction: 0,
+          effective_limit_percent: Number.NEGATIVE_INFINITY,
+          pool_available_percent: 0,
+          account_used_percent: 0,
+          account_attributed_percent: 0,
+          account_unattributed_percent: 0,
+        },
+      ],
+    })
+
+    const w = await mountAndOpen()
+    const table = w.get('[data-testid="window-quota-table"]')
+
+    expect(table.text()).toContain('—')
+    expect(table.text()).toContain('admin.users.windowQuota.official 0%')
+    expect(table.text()).toContain('admin.users.windowQuota.unattributed 0%')
   })
 
   it('空数据渲染 5 个 platform 行', async () => {

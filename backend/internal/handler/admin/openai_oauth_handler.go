@@ -1,6 +1,8 @@
 package admin
 
 import (
+	"context"
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
@@ -13,11 +15,21 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+type openAIQuotaQuerier interface {
+	QueryUsage(ctx context.Context, accountID int64) (*service.OpenAIQuotaUsage, error)
+	ResetCredit(ctx context.Context, accountID int64) (*service.OpenAIQuotaResetResult, error)
+}
+
+type accountWindowQuotaSynchronizer interface {
+	SyncOfficialSnapshot(ctx context.Context, accountID int64, snapshot *service.OpenAICodexUsageSnapshot) error
+}
+
 // OpenAIOAuthHandler handles OpenAI OAuth-related operations
 type OpenAIOAuthHandler struct {
 	openaiOAuthService *service.OpenAIOAuthService
 	adminService       service.AdminService
-	quotaService       *service.OpenAIQuotaService
+	quotaService       openAIQuotaQuerier
+	windowQuota        accountWindowQuotaSynchronizer
 }
 
 func oauthPlatformFromPath(c *gin.Context) string {
@@ -29,11 +41,13 @@ func NewOpenAIOAuthHandler(
 	openaiOAuthService *service.OpenAIOAuthService,
 	adminService service.AdminService,
 	quotaService *service.OpenAIQuotaService,
+	windowQuota *service.AccountWindowQuotaService,
 ) *OpenAIOAuthHandler {
 	return &OpenAIOAuthHandler{
 		openaiOAuthService: openaiOAuthService,
 		adminService:       adminService,
 		quotaService:       quotaService,
+		windowQuota:        windowQuota,
 	}
 }
 
@@ -426,6 +440,18 @@ func (h *OpenAIOAuthHandler) QueryQuota(c *gin.Context) {
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
+	}
+	snapshot := usage.WindowQuotaSnapshot
+	if snapshot == nil {
+		// Compatibility for older test stubs that only populate the raw payload.
+		snapshot = service.CodexUsageSnapshotFromQuotaUsage(usage)
+	}
+	if snapshot != nil && h.windowQuota != nil {
+		if err := h.windowQuota.SyncOfficialSnapshot(c.Request.Context(), accountID, snapshot); err != nil {
+			// 成员归因失败不能污染或遮挡 OpenAI 官方账号总量。
+			// 管理端仍返回刚读取到的上游 usage，并记录错误供后续修复。
+			slog.Error("openai_quota_window_sync_failed", "account_id", accountID, "error", err)
+		}
 	}
 	response.Success(c, usage)
 }

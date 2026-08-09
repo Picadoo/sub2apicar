@@ -307,9 +307,9 @@ func (s *OpenAIGatewayService) readUpstreamErrorBody(resp *http.Response) []byte
 
 func (s *OpenAIGatewayService) handleFailoverSideEffects(ctx context.Context, resp *http.Response, account *Account, responseBody []byte, canonicalModel ...string) bool {
 	if len(canonicalModel) > 0 {
-		return s.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, responseBody, canonicalModel[0])
+		return s.handleOpenAIAccountUpstreamErrorAt(ctx, account, resp.StatusCode, resp.Header, responseBody, HTTPUpstreamResponseHeadersObservedAt(resp), canonicalModel[0])
 	}
-	return s.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, responseBody)
+	return s.handleOpenAIAccountUpstreamErrorAt(ctx, account, resp.StatusCode, resp.Header, responseBody, HTTPUpstreamResponseHeadersObservedAt(resp))
 }
 
 func (s *OpenAIGatewayService) handleErrorResponse(
@@ -381,7 +381,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 			Message:            upstreamMsg,
 			Detail:             upstreamDetail,
 		})
-		s.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, body, requestedModel...)
+		s.handleOpenAIAccountUpstreamErrorAt(ctx, account, resp.StatusCode, resp.Header, body, HTTPUpstreamResponseHeadersObservedAt(resp), requestedModel...)
 		return nil, newOpenAIUpstreamFailoverError(
 			resp.StatusCode,
 			resp.Header,
@@ -450,7 +450,7 @@ func (s *OpenAIGatewayService) handleErrorResponse(
 		reqModel, _, _ = extractOpenAIRequestMetaFromBody(requestBody)
 		reqModel = canonicalOpenAIAccountSchedulingModel(account, reqModel)
 	}
-	shouldDisable := s.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, body, reqModel)
+	shouldDisable := s.handleOpenAIAccountUpstreamErrorAt(ctx, account, resp.StatusCode, resp.Header, body, HTTPUpstreamResponseHeadersObservedAt(resp), reqModel)
 	kind := "http_error"
 	if shouldDisable {
 		kind = "failover"
@@ -618,8 +618,8 @@ func (s *OpenAIGatewayService) handleCompatErrorResponse(
 	if len(requestedModel) > 0 {
 		modelForCooldown = requestedModel[0]
 	}
-	shouldDisable := s.handleOpenAIAccountUpstreamError(
-		c.Request.Context(), account, resp.StatusCode, resp.Header, body, modelForCooldown,
+	shouldDisable := s.handleOpenAIAccountUpstreamErrorAt(
+		c.Request.Context(), account, resp.StatusCode, resp.Header, body, HTTPUpstreamResponseHeadersObservedAt(resp), modelForCooldown,
 	)
 	kind := "http_error"
 	if shouldDisable {

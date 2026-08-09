@@ -297,6 +297,7 @@ type AccountUsageService struct {
 	grokQuotaFetcher        *GrokQuotaFetcher
 	grokQuotaService        *GrokQuotaService
 	openAIQuotaService      *OpenAIQuotaService
+	accountWindowQuota      *AccountWindowQuotaService
 	cache                   *UsageCache
 	identityCache           IdentityCache
 	tlsFPProfileService     *TLSFingerprintProfileService
@@ -592,19 +593,34 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 			// Extra keys and immediately reflected in the returned UsageInfo.
 			if s.openAIQuotaService != nil {
 				if quotaUsage, err := s.openAIQuotaService.QueryUsage(ctx, account.ID); err == nil {
-					if updates := buildCodexSparkWindowExtraUpdates(quotaUsage, now); len(updates) > 0 {
+					observedAt := quotaUsage.ObservedAt
+					if observedAt.IsZero() {
+						observedAt = time.Now()
+					}
+					snapshot := quotaUsage.WindowQuotaSnapshot
+					if snapshot == nil {
+						// Compatibility for older test stubs that only populate the raw payload.
+						snapshot = codexSparkUsageSnapshotFromQuotaUsageAt(quotaUsage, observedAt)
+					}
+					if updates := buildCodexWindowExtraUpdates(snapshot, observedAt); len(updates) > 0 {
 						mergeAccountExtra(account, updates)
 						s.persistOpenAICodexProbeSnapshot(account.ID, updates)
-						if usage.UpdatedAt == nil {
-							usage.UpdatedAt = &now
+						if account.IsWindowQuotaShared() {
+							s.syncOpenAICodexOfficialSnapshot(ctx, account.ID, snapshot)
 						}
-						applyExtraToUsage(usage, account.Extra, now)
+						if usage.UpdatedAt == nil {
+							usage.UpdatedAt = &observedAt
+						}
+						applyExtraToUsage(usage, account.Extra, observedAt)
 					}
 				}
 			}
 		} else {
-			if updates, err := s.probeOpenAICodexSnapshot(ctx, account); err == nil && len(updates) > 0 {
+			if updates, snapshot, err := s.probeOpenAICodexSnapshot(ctx, account); err == nil && len(updates) > 0 {
 				mergeAccountExtra(account, updates)
+				if account.IsWindowQuotaShared() {
+					s.syncOpenAICodexOfficialSnapshot(ctx, account.ID, snapshot)
+				}
 				if usage.UpdatedAt == nil {
 					usage.UpdatedAt = &now
 				}
@@ -632,6 +648,21 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 	}
 
 	return usage, nil
+}
+
+func (s *AccountUsageService) syncOpenAICodexOfficialSnapshot(ctx context.Context, accountID int64, snapshot *OpenAICodexUsageSnapshot) {
+	if s == nil || s.accountWindowQuota == nil || !s.accountWindowQuota.Enabled() || accountID <= 0 || snapshot == nil {
+		return
+	}
+	base := context.Background()
+	if ctx != nil {
+		base = context.WithoutCancel(ctx)
+	}
+	syncCtx, cancel := context.WithTimeout(base, 5*time.Second)
+	defer cancel()
+	if err := s.accountWindowQuota.SyncOfficialSnapshot(syncCtx, accountID, snapshot); err != nil {
+		slog.Warn("sync_openai_codex_official_snapshot_failed", "account_id", accountID, "error", err)
+	}
 }
 
 func shouldRefreshOpenAICodexSnapshot(account *Account, usage *UsageInfo, now time.Time) bool {
@@ -691,36 +722,36 @@ func (s *AccountUsageService) shouldProbeOpenAICodexSnapshot(accountID int64, no
 	return true
 }
 
-func (s *AccountUsageService) probeOpenAICodexSnapshot(ctx context.Context, account *Account) (map[string]any, error) {
+func (s *AccountUsageService) probeOpenAICodexSnapshot(ctx context.Context, account *Account) (map[string]any, *OpenAICodexUsageSnapshot, error) {
 	if account == nil || !account.IsOAuth() {
-		return nil, nil
+		return nil, nil, nil
 	}
 	accessToken := ""
 	if !account.IsOpenAIAgentIdentity() {
 		accessToken = account.GetOpenAIAccessToken()
 	}
 	if accessToken == "" && !account.IsOpenAIAgentIdentity() {
-		return nil, fmt.Errorf("no access token available")
+		return nil, nil, fmt.Errorf("no access token available")
 	}
 	modelID := openaipkg.DefaultTestModel
 	payload := createOpenAITestPayload(modelID, true)
 	payloadBytes, err := json.Marshal(payload)
 	if err != nil {
-		return nil, fmt.Errorf("marshal openai probe payload: %w", err)
+		return nil, nil, fmt.Errorf("marshal openai probe payload: %w", err)
 	}
 
 	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, chatgptCodexURL, bytes.NewReader(payloadBytes))
 	if err != nil {
-		return nil, fmt.Errorf("create openai probe request: %w", err)
+		return nil, nil, fmt.Errorf("create openai probe request: %w", err)
 	}
 	req.Host = "chatgpt.com"
 	req.Header.Set("Content-Type", "application/json")
 	if account.IsOpenAIAgentIdentity() {
 		authHeaders, authErr := buildAgentIdentityAuthenticationHeaders(ctx, s.accountRepo, s.agentIdentityWS, &s.agentIdentityTaskMu, account)
 		if authErr != nil {
-			return nil, fmt.Errorf("build Agent Identity authentication: %w", authErr)
+			return nil, nil, fmt.Errorf("build Agent Identity authentication: %w", authErr)
 		}
 		for key, values := range authHeaders {
 			for _, value := range values {
@@ -755,23 +786,24 @@ func (s *AccountUsageService) probeOpenAICodexSnapshot(ctx context.Context, acco
 		ResponseHeaderTimeout: 10 * time.Second,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("build openai probe client: %w", err)
+		return nil, nil, fmt.Errorf("build openai probe client: %w", err)
 	}
 	resp, err := client.Do(req)
+	observedAt := time.Now()
 	if err != nil {
-		return nil, fmt.Errorf("openai codex probe request failed: %w", err)
+		return nil, nil, fmt.Errorf("openai codex probe request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	updates, err := extractOpenAICodexProbeUpdates(resp)
+	updates, snapshot, err := extractOpenAICodexProbeUpdatesAt(resp, observedAt)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(updates) > 0 {
 		s.persistOpenAICodexProbeSnapshot(account.ID, updates)
-		return updates, nil
+		return updates, snapshot, nil
 	}
-	return nil, nil
+	return nil, nil, nil
 }
 
 func (s *AccountUsageService) persistOpenAICodexProbeSnapshot(accountID int64, updates map[string]any) {
@@ -782,24 +814,42 @@ func (s *AccountUsageService) persistOpenAICodexProbeSnapshot(accountID int64, u
 		return
 	}
 
+	writer, ok := s.accountRepo.(codexUsageSnapshotWriter)
+	if !ok {
+		return
+	}
+	observedAtRaw, ok := updates["codex_usage_updated_at"].(string)
+	if !ok {
+		return
+	}
+	observedAt, err := time.Parse(time.RFC3339Nano, observedAtRaw)
+	if err != nil {
+		return
+	}
+
 	go func() {
 		updateCtx, updateCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer updateCancel()
-		_ = s.accountRepo.UpdateExtra(updateCtx, accountID, updates)
+		_, _ = writer.UpdateCodexUsageSnapshotIfNewer(updateCtx, accountID, observedAt, updates)
 	}()
 }
 
 func extractOpenAICodexProbeUpdates(resp *http.Response) (map[string]any, error) {
+	updates, _, err := extractOpenAICodexProbeUpdatesAt(resp, time.Now())
+	return updates, err
+}
+
+func extractOpenAICodexProbeUpdatesAt(resp *http.Response, observedAt time.Time) (map[string]any, *OpenAICodexUsageSnapshot, error) {
 	if resp == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
-	if snapshot := ParseCodexRateLimitHeaders(resp.Header); snapshot != nil {
-		return buildCodexUsageExtraUpdates(snapshot, time.Now()), nil
+	if snapshot := parseCodexRateLimitHeadersAt(resp.Header, observedAt); snapshot != nil {
+		return buildCodexUsageExtraUpdates(snapshot, observedAt), snapshot, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("openai codex probe returned status %d", resp.StatusCode)
+		return nil, nil, fmt.Errorf("openai codex probe returned status %d", resp.StatusCode)
 	}
-	return nil, nil
+	return nil, nil, nil
 }
 
 func mergeAccountExtra(account *Account, updates map[string]any) {

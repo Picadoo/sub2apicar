@@ -33,9 +33,15 @@
               >
                 <span class="font-semibold">{{ windowLabel(diagnostic.window_type) }}</span>
                 · {{ t('admin.windowQuotaOverview.configuredSum') }}
-                {{ fmt(diagnostic.configured_sum_percent) }}% ·
+                {{ fmtPct(diagnostic.configured_sum_percent) }} ·
                 {{ t('admin.windowQuotaOverview.ceiling') }}
-                {{ fmt(diagnostic.ceiling_percent) }}%
+                {{ fmtPct(diagnostic.ceiling_percent) }} ·
+                {{ t('admin.windowQuotaOverview.official') }}
+                {{ fmtPct(diagnostic.used_sum_percent) }} ·
+                {{ t('admin.windowQuotaOverview.attributedSum') }}
+                {{ fmtPct(diagnostic.attributed_sum_percent) }} ·
+                {{ t('admin.windowQuotaOverview.unattributed') }}
+                {{ fmtPct(diagnostic.unattributed_percent) }}
                 <span v-if="diagnostic.overallocated" class="ml-1 font-semibold">
                   {{ t('admin.windowQuotaOverview.overallocated') }}
                 </span>
@@ -312,18 +318,29 @@ const filteredMemberUsers = computed(() => {
   )
 })
 
-function calcPercent(used: number, limit: number): number {
-  if (!limit || limit <= 0) return 0
-  return Math.min(100, Math.max(0, Math.round((used / limit) * 100)))
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
-function barClass(p: number): string {
+function calcPercent(attributed: unknown, limit: unknown): number | null {
+  const safeAttributed = finiteNumber(attributed)
+  const safeLimit = finiteNumber(limit)
+  if (safeAttributed === null || safeLimit === null || safeLimit <= 0) return null
+  return Math.min(100, Math.max(0, Math.round((safeAttributed / safeLimit) * 100)))
+}
+function barClass(p: number | null): string {
+  if (p === null) return 'bg-gray-400 dark:bg-gray-500'
   if (p >= 95) return 'bg-red-500'
   if (p >= 75) return 'bg-amber-500'
   return 'bg-green-500'
 }
-function fmt(n: number | undefined): string {
-  if (n == null || !Number.isFinite(n)) return '0'
-  return (Math.round(n * 10) / 10).toString()
+function fmt(n: unknown): string {
+  const value = finiteNumber(n)
+  if (value === null) return '—'
+  return (Math.round(value * 10) / 10).toString()
+}
+function fmtPct(n: unknown): string {
+  const value = fmt(n)
+  return value === '—' ? value : `${value}%`
 }
 function windowLabel(windowType: string): string {
   if (windowType === '5h') return t('admin.windowQuotaOverview.window5h')
@@ -455,37 +472,42 @@ const WindowCell: FunctionalComponent<{
   item?: AdminWindowQuotaOverviewItem
 }> = (props) => {
   const it = props.item
-  if (!it) return h('span', { class: 'text-xs text-gray-400' }, '-')
-  // 0 是合法有效上限（全捐且未用的捐赠者），不能回落到基础上限。
-  const effRaw = it.effective_limit_percent
-  const eff =
-    typeof effRaw === 'number' && Number.isFinite(effRaw) && effRaw >= 0
-      ? effRaw
-      : it.limit_percent
-  const borrowing = eff > it.limit_percent + 0.01
-  const p = calcPercent(it.used_percent, eff)
-  return h('div', { class: 'flex items-center gap-2' }, [
+  if (!it) return h('span', { class: 'text-xs text-gray-400' }, '—')
+  const base = finiteNumber(it.limit_percent)
+  // 0 是合法有效上限；缺失或非有限数保持未知，不能回落成基础上限。
+  const effRaw = finiteNumber(it.effective_limit_percent)
+  const effective = effRaw !== null && effRaw >= 0 ? effRaw : null
+  const attributed = finiteNumber(it.used_percent)
+  const borrowing = effective !== null && base !== null && effective > base + 0.01
+  const p = calcPercent(attributed, effective)
+  return h('div', { class: 'space-y-1' }, [
     h(
       'div',
       {
-        class: 'h-1.5 w-12 shrink-0 overflow-hidden rounded-full bg-gray-200 dark:bg-dark-700',
+        class: 'h-1.5 w-20 overflow-hidden rounded-full bg-gray-200 dark:bg-dark-700',
       },
       [
         h('div', {
           class: ['h-full rounded-full', barClass(p)],
-          style: { width: p + '%' },
+          style: { width: (p ?? 0) + '%' },
+          'data-testid': 'admin-window-quota-progress',
         }),
       ],
     ),
     h(
-      'span',
+      'div',
       {
         class: [
-          'whitespace-nowrap font-mono text-xs',
+          'flex flex-wrap gap-x-2 gap-y-0.5 whitespace-nowrap font-mono text-[10px]',
           borrowing ? 'text-blue-600 dark:text-blue-400' : 'text-gray-600 dark:text-gray-300',
         ],
       },
-      `${fmt(it.used_percent)}% / ${fmt(eff)}%`,
+      [
+        h('span', `${t('admin.windowQuotaOverview.attributed')} ${fmtPct(it.used_percent)}`),
+        h('span', `${t('admin.windowQuotaOverview.baseLimit')} ${fmtPct(it.limit_percent)}`),
+        h('span', `${t('admin.windowQuotaOverview.effectiveLimit')} ${fmtPct(effective)}`),
+        h('span', `${t('admin.windowQuotaOverview.remaining')} ${fmtPct(it.remaining_percent)}`),
+      ],
     ),
   ])
 }

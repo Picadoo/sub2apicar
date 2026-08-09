@@ -352,16 +352,18 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 	}
 
 	return &OpenAIForwardResult{
-		RequestID:       requestID,
-		Usage:           usage,
-		Model:           originalModel,
-		BillingModel:    billingModel,
-		UpstreamModel:   upstreamModel,
-		ReasoningEffort: reasoningEffort,
-		ServiceTier:     serviceTier,
-		Stream:          true,
-		Duration:        time.Since(startTime),
-		FirstTokenMs:    firstTokenMs,
+		RequestID:                 requestID,
+		Usage:                     usage,
+		Model:                     originalModel,
+		BillingModel:              billingModel,
+		UpstreamModel:             upstreamModel,
+		ReasoningEffort:           reasoningEffort,
+		ServiceTier:               serviceTier,
+		Stream:                    true,
+		Duration:                  time.Since(startTime),
+		FirstTokenMs:              firstTokenMs,
+		ResponseHeaders:           resp.Header.Clone(),
+		ResponseHeadersObservedAt: HTTPUpstreamResponseHeadersObservedAt(resp),
 	}, nil
 }
 
@@ -439,15 +441,17 @@ func (s *OpenAIGatewayService) bufferRawChatCompletions(
 	_, _ = c.Writer.Write(respBody)
 
 	return &OpenAIForwardResult{
-		RequestID:       requestID,
-		Usage:           usage,
-		Model:           originalModel,
-		BillingModel:    billingModel,
-		UpstreamModel:   upstreamModel,
-		ReasoningEffort: reasoningEffort,
-		ServiceTier:     serviceTier,
-		Stream:          false,
-		Duration:        time.Since(startTime),
+		RequestID:                 requestID,
+		Usage:                     usage,
+		Model:                     originalModel,
+		BillingModel:              billingModel,
+		UpstreamModel:             upstreamModel,
+		ReasoningEffort:           reasoningEffort,
+		ServiceTier:               serviceTier,
+		Stream:                    false,
+		Duration:                  time.Since(startTime),
+		ResponseHeaders:           resp.Header.Clone(),
+		ResponseHeadersObservedAt: HTTPUpstreamResponseHeadersObservedAt(resp),
 	}, nil
 }
 

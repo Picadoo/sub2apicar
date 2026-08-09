@@ -48,6 +48,13 @@ func isOpenAIAccount(account *Account) bool {
 // handleOpenAIAccountUpstreamError expects canonicalModel to be the model used
 // for scheduling after applying account mapping exactly once.
 func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, responseBody []byte, canonicalModel ...string) bool {
+	return s.handleOpenAIAccountUpstreamErrorAt(ctx, account, statusCode, headers, responseBody, time.Now(), canonicalModel...)
+}
+
+func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamErrorAt(ctx context.Context, account *Account, statusCode int, headers http.Header, responseBody []byte, observedAt time.Time, canonicalModel ...string) bool {
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
 	stateCtx, cancel := openAIAccountStateContext(ctx)
 	defer cancel()
 
@@ -77,12 +84,12 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 		return true
 	}
 	if statusCode == http.StatusTooManyRequests {
-		s.markOpenAIOAuth429RateLimited(stateCtx, account, headers, responseBody)
+		s.markOpenAIOAuth429RateLimitedAt(stateCtx, account, headers, responseBody, observedAt)
 	}
 	if s.rateLimitService == nil {
 		return false
 	}
-	shouldDisable := s.rateLimitService.HandleUpstreamError(stateCtx, account, statusCode, headers, responseBody)
+	shouldDisable := s.rateLimitService.HandleUpstreamErrorAt(stateCtx, account, statusCode, headers, responseBody, observedAt)
 	modelTempMatched := statusCode != http.StatusUnauthorized && tempUnschedulableModel(stateCtx, nil) != "" &&
 		len(matchTempUnschedulableRules(account, statusCode, responseBody)) > 0
 	if shouldDisable && !modelTempMatched {
@@ -93,7 +100,7 @@ func (s *OpenAIGatewayService) handleOpenAIAccountUpstreamError(ctx context.Cont
 		if len(canonicalModel) > 0 {
 			model = canonicalModel[0]
 		}
-		decision := s.recordOpenAIAccountModelTransientFailure(account, model, time.Now())
+		decision := s.recordOpenAIAccountModelTransientFailure(account, model, observedAt)
 		if decision.FailureStreak > 0 {
 			slog.Warn("openai_model_transient_state",
 				"account_id", account.ID,
@@ -119,6 +126,10 @@ func shouldCooldownOpenAITransientUpstreamError(statusCode int, responseBody []b
 }
 
 func (s *OpenAIGatewayService) markOpenAIOAuth429RateLimited(ctx context.Context, account *Account, headers http.Header, responseBody []byte) {
+	s.markOpenAIOAuth429RateLimitedAt(ctx, account, headers, responseBody, time.Now())
+}
+
+func (s *OpenAIGatewayService) markOpenAIOAuth429RateLimitedAt(ctx context.Context, account *Account, headers http.Header, responseBody []byte, observedAt time.Time) {
 	if s == nil || !isOpenAIOAuthAccount(account) {
 		return
 	}
@@ -127,19 +138,25 @@ func (s *OpenAIGatewayService) markOpenAIOAuth429RateLimited(ctx context.Context
 	if account.IsShadow() {
 		return
 	}
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
 	s.recordOpenAIOAuth429()
 
-	cooldownUntil := time.Now().Add(openAIOAuth429FallbackCooldown)
+	processingNow := time.Now()
+	cooldownUntil := observedAt.Add(openAIOAuth429FallbackCooldown)
 	if s.rateLimitService != nil {
-		if resetAt := s.rateLimitService.calculateOpenAI429ResetTime(headers); resetAt != nil && resetAt.After(time.Now()) {
+		if resetAt := s.rateLimitService.calculateOpenAI429ResetTimeAt(headers, observedAt); resetAt != nil {
 			cooldownUntil = *resetAt
 		} else if resetUnix := parseOpenAIRateLimitResetTime(responseBody); resetUnix != nil {
-			if resetAt := time.Unix(*resetUnix, 0); resetAt.After(time.Now()) {
-				cooldownUntil = resetAt
-			}
+			cooldownUntil = time.Unix(*resetUnix, 0)
 		} else if cooldown, ok := s.rateLimitService.get429FallbackCooldown(ctx, account); ok && cooldown > 0 {
-			cooldownUntil = time.Now().Add(cooldown)
+			cooldownUntil = observedAt.Add(cooldown)
 		}
+	}
+	// 延迟送达且其官方重置点已经过去的 429 只能更新条件快照，不能重新封禁账号。
+	if !cooldownUntil.After(processingNow) {
+		return
 	}
 	s.BlockAccountScheduling(account, cooldownUntil, "429")
 }

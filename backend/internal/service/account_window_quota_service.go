@@ -19,6 +19,15 @@ const (
 	WindowType5h = "5h"
 	WindowType7d = "7d"
 
+	// AccountWindowForceUnattributedExtraKey 标记账号官方额度还会被中转站外部来源消耗。
+	// 启用后，官方增量全部记为未归因，绝不使用中转站 usage log 将其分配给成员。
+	AccountWindowForceUnattributedExtraKey = "window_quota_force_unattributed"
+
+	// v4 checkpoint 持久化官方窗口、前向 usage_log 游标和待结算美元 basis。
+	// 成员历史 attributed_percent 只增量推进，刷新或迟到日志不得触发整窗重分。
+	accountWindowAttributionBasis = "usage_log_incremental_v4"
+	accountWindowAttributionMode  = "official_delta_cost_basis"
+
 	// DefaultAccountWindowLimitPercent 是单用户在某账号某窗口可占用的官方利用率百分点默认上限。
 	// 4 人共享：4×23%=92%，留 ~8% 安全缓冲，避免占满官方窗口触发风控。
 	DefaultAccountWindowLimitPercent = 23.0
@@ -103,7 +112,9 @@ type AdminWindowQuotaSummary struct {
 	WindowType           string
 	MemberCount          int
 	ConfiguredSumPercent float64
-	UsedSumPercent       float64
+	AttributedSumPercent float64
+	OfficialUsedPercent  *float64 // OpenAI 官方账号窗口快照；缺失时为 nil，绝不从成员归因反推
+	UnattributedPercent  *float64 // 官方总量减当前成员已归因；缺失官方快照时为 nil
 	CeilingPercent       float64
 	Overallocated        bool
 }
@@ -126,7 +137,9 @@ type AccountWindowReset struct {
 type UserAccountWindowQuotaRepository interface {
 	// ResetWindowForAccount 把某账号某窗口下所有活跃用户的 attributed_percent 清零，并刷新 window_reset_at。
 	// 仅 5h 重置清零 donate_pool_fraction（5h 逐窗口重新决定）；7d 捐赠永久保留，绝不自动清。
-	ResetWindowForAccount(ctx context.Context, accountID int64, window string, newResetAt *time.Time) error
+	// ResetWindowForAccountIfDue clears a window only if its persisted reset boundary
+	// is still due at dueAt; false means a newer official window superseded the scan.
+	ResetWindowForAccountIfDue(ctx context.Context, accountID int64, window string, dueAt time.Time) (bool, error)
 	// GetByUserAccountWindow 查询单条配额；未找到返回 (nil, nil)。
 	GetByUserAccountWindow(ctx context.Context, userID, accountID int64, window string) (*UserAccountWindowQuotaRecord, error)
 	// ListByUser 返回用户在所有账号所有窗口的活跃配额。
@@ -140,15 +153,16 @@ type UserAccountWindowQuotaRepository interface {
 	// SetDonatePoolFraction 设置（或新建）某 (user, account, window) 的救急池捐赠比例（∈[0,1]）。
 	// 新建行时 limit_percent 取 defaultLimit（人均默认 = ceiling/seats）。
 	SetDonatePoolFraction(ctx context.Context, userID, accountID int64, window string, fraction, defaultLimit float64) error
-	// RecomputeWindowSharesFromCheckpoint 使用成员均分检查点和检查点后的实际 Token 占比确定性重算。
-	RecomputeWindowSharesFromCheckpoint(ctx context.Context, accountID int64, window string, officialPercent float64, windowStart, checkpointAt time.Time, baseShares map[int64]float64, resetAt *time.Time) error
+	// ApplyWindowSharesFromCheckpoint 在同一数据库事务内选出持久化 checkpoint 胜者，
+	// 并按账号归因模式结算官方增量；外部使用账号的增量必须全部保持未归因。
+	ApplyWindowSharesFromCheckpoint(ctx context.Context, accountID int64, window string, candidate AccountWindowAttributionCheckpoint, resetAt *time.Time) (AccountWindowAttributionCheckpoint, bool, error)
 	// ListAllWithUser 返回所有活跃配额行（带用户邮箱/用户名），供管理端总览。
 	ListAllWithUser(ctx context.Context) ([]AdminWindowQuotaOverviewRow, error)
 	// GetMaxConfiguredSumForWindow 返回指定窗口中各账号 configured sum 的最大值。
 	GetMaxConfiguredSumForWindow(ctx context.Context, window string) (float64, error)
 	// EqualizeActiveMemberLimits 在单个事务中把指定账号 5h/7d 的 limit 分别均分给各窗口活跃成员。
 	EqualizeActiveMemberLimits(ctx context.Context, accountID int64, ceiling5h, ceiling7d float64) ([]AccountWindowEqualizationResult, error)
-	// SyncAccountMembers 显式同步账号成员；新成员即使从未使用也会创建 5h/7d 配额并参与均分。
+	// SyncAccountMembers 只同步账号成员；保留 retained 状态，并在同一账号行锁事务内冻结成员变更前的增量成本边界。
 	SyncAccountMembers(ctx context.Context, accountID int64, userIDs []int64, ceiling5h, ceiling7d float64) ([]AccountWindowEqualizationResult, error)
 }
 
@@ -162,12 +176,50 @@ type peerSharedAccountMemberReader interface {
 	ListPeerSharedAccountMemberUserIDs(ctx context.Context, accountID int64) ([]int64, error)
 }
 
-// accountWindowAttributionCheckpoint 固化“成员均分完成时”的历史基数。
-// 后续官方增量完全按 checkpoint_at 之后的 Token 占比重算，与哪次请求碰巧读到快照无关。
-type accountWindowAttributionCheckpoint struct {
-	At         time.Time         `json:"at"`
-	BaseShares map[int64]float64 `json:"base_shares"`
+// accountWindowOfficialUsageReader 只读取已由 OpenAI 上游快照持久化的账号窗口百分比。
+// 它不能从 usage_logs、Token 或成员 attributed_percent 反推账号总量。
+type accountWindowOfficialUsageReader interface {
+	GetAccountOfficialWindowPercent(ctx context.Context, accountID int64, window string) (float64, bool, error)
 }
+
+// accountWindowForceUnattributedReader 读取账号是否处于「官方用量强制未归因」模式。
+// 可选能力：测试桩可实现它返回 true 以覆盖 force 场景；生产仓储实现。
+type accountWindowForceUnattributedReader interface {
+	IsAccountWindowForceUnattributed(ctx context.Context, accountID int64) (bool, error)
+}
+
+// AccountWindowUsageLogRef 描述一次已经持久化的 usage_log。
+// Inserted 用于区分真正迟到的新日志与幂等重试命中的既有日志。
+type AccountWindowUsageLogRef struct {
+	ID        int64     `json:"-"`
+	CreatedAt time.Time `json:"-"`
+	UserID    int64     `json:"-"`
+	CostUSD   float64   `json:"-"`
+	Inserted  bool      `json:"-"`
+	RequestID string    `json:"-"`
+	APIKeyID  int64     `json:"-"`
+}
+
+// AccountWindowAttributionCheckpoint 是账号窗口增量归因的持久化状态。
+// 官方总量只来自上游；pending basis 仅决定后续官方增量如何分配。
+type AccountWindowAttributionCheckpoint struct {
+	Basis                       string                    `json:"basis"`
+	AttributionMode             string                    `json:"attribution_mode"`
+	At                          time.Time                 `json:"at"`
+	WindowStart                 time.Time                 `json:"window_start"`
+	ResetAt                     *time.Time                `json:"reset_at,omitempty"`
+	LatestOfficialPercent       float64                   `json:"latest_official_percent"`
+	LatestObservedAt            time.Time                 `json:"latest_observed_at"`
+	SeenThroughCreatedAt        time.Time                 `json:"seen_through_created_at,omitempty"`
+	SeenThroughUsageLogID       int64                     `json:"seen_through_usage_log_id,omitempty"`
+	PendingBasisByUser          map[int64]float64         `json:"pending_basis_by_user,omitempty"`
+	PendingUnattributedBasisUSD float64                   `json:"pending_unattributed_basis_usd,omitempty"`
+	UnattributedPercent         float64                   `json:"unattributed_percent,omitempty"`
+	UsageLog                    *AccountWindowUsageLogRef `json:"-"`
+	CandidateExpired            bool                      `json:"-"`
+}
+
+type accountWindowAttributionCheckpoint = AccountWindowAttributionCheckpoint
 
 // AccountWindowQuotaService 负责把账号级官方利用率增量分摊到发起请求的用户，
 // 并提供 23% 配额校验与窗口重置能力。
@@ -183,11 +235,59 @@ func NewAccountWindowQuotaService(repo UserAccountWindowQuotaRepository, rdb *re
 
 // Enabled 报告服务是否具备分摊/校验所需依赖。
 func (s *AccountWindowQuotaService) Enabled() bool {
-	return s != nil && s.repo != nil && s.rdb != nil
+	return s != nil && s.repo != nil
 }
 
 func accountWindowCheckpointKey(accountID int64, window string) string {
 	return "uawq:checkpoint:" + strconv.FormatInt(accountID, 10) + ":" + window
+}
+
+func AccountWindowAttributionCheckpointExtraKey(window string) string {
+	if window == WindowType7d {
+		return "window_quota_attribution_checkpoint_7d"
+	}
+	return "window_quota_attribution_checkpoint_5h"
+}
+
+func accountWindowAttributionLockKey(accountID int64, window string) string {
+	return "uawq:attribution-lock:" + strconv.FormatInt(accountID, 10) + ":" + window
+}
+
+// acquireAttributionLock serializes checkpoint selection, member-share recomputation,
+// member resync recomputation, and scheduled reset for one account window across instances.
+// Without this lock, an older snapshot can win Redis first, pause in SQL, and overwrite the
+// database after a newer snapshot has already committed.
+func (s *AccountWindowQuotaService) acquireAttributionLock(ctx context.Context, accountID int64, window string) (func(), error) {
+	if s == nil || s.rdb == nil {
+		return func() {}, nil
+	}
+	key := accountWindowAttributionLockKey(accountID, window)
+	token := fmt.Sprintf("%d:%p", time.Now().UnixNano(), s)
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		locked, err := s.rdb.SetNX(ctx, key, token, 2*time.Minute).Result()
+		if err != nil {
+			// PostgreSQL 账号行锁和成员行锁才是持久一致性栅栏；Redis 失败时降级为无锁缓存模式。
+			slog.Warn("account_window_quota.lock_unavailable_fallback_to_db", "account_id", accountID, "window", window, "error", err)
+			return func() {}, nil
+		}
+		if locked {
+			return func() {
+				unlockCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				const releaseIfOwner = `if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end`
+				if err := s.rdb.Eval(unlockCtx, releaseIfOwner, []string{key}, token).Err(); err != nil {
+					slog.Warn("account_window_quota.unlock_failed", "account_id", accountID, "window", window, "error", err)
+				}
+			}, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func windowLengthSeconds(window string) int {
@@ -206,111 +306,229 @@ func accountWindowSeatsKey() string {
 	return "uawq:seats"
 }
 
-// Attribute 使用成员均分检查点和检查点后的实际 Token 占比确定性归因。
-// 结果只由 Token 账本决定，与哪次请求碰巧读到官方快照无关。
+// Attribute 保留旧调用接口；没有当前 usage_log 定位信息时走后台快照同步语义。
 func (s *AccountWindowQuotaService) Attribute(ctx context.Context, userID, accountID int64, snapshot *OpenAICodexUsageSnapshot) {
-	if !s.Enabled() || userID <= 0 || accountID <= 0 || snapshot == nil {
+	s.AttributeRecordedUsage(ctx, userID, accountID, snapshot, nil)
+}
+
+// AttributeRecordedUsage 在 usage_log 已确认持久化后推进增量归因。
+func (s *AccountWindowQuotaService) AttributeRecordedUsage(ctx context.Context, userID, accountID int64, snapshot *OpenAICodexUsageSnapshot, usageLog *AccountWindowUsageLogRef) {
+	if userID <= 0 {
 		return
+	}
+	if usageLog != nil && usageLog.UserID <= 0 {
+		usageLog.UserID = userID
+	}
+	if err := s.syncOfficialSnapshot(ctx, accountID, snapshot, usageLog); err != nil {
+		slog.Warn("account_window_quota.sync_official_snapshot_failed", "account_id", accountID, "error", err)
+	}
+}
+
+// SyncOfficialSnapshot 同步后台/admin 获取的官方快照；没有请求态 usage_log 上界。
+func (s *AccountWindowQuotaService) SyncOfficialSnapshot(ctx context.Context, accountID int64, snapshot *OpenAICodexUsageSnapshot) error {
+	return s.syncOfficialSnapshot(ctx, accountID, snapshot, nil)
+}
+
+func (s *AccountWindowQuotaService) syncOfficialSnapshot(ctx context.Context, accountID int64, snapshot *OpenAICodexUsageSnapshot, usageLog *AccountWindowUsageLogRef) error {
+	if !s.Enabled() || accountID <= 0 || snapshot == nil {
+		return nil
 	}
 	norm := snapshot.Normalize()
 	if norm == nil {
-		return
+		return nil
 	}
-	now := time.Now()
-	s.attributeWindow(ctx, accountID, WindowType5h, norm.Used5hPercent, norm.Reset5hSeconds, now)
-	s.attributeWindow(ctx, accountID, WindowType7d, norm.Used7dPercent, norm.Reset7dSeconds, now)
+
+	processingNow := time.Now()
+	observedAt := codexSnapshotBaseTime(snapshot, processingNow)
+	var firstErr error
+	for _, item := range []struct {
+		window       string
+		usedPercent  *float64
+		resetSeconds *int
+	}{
+		{window: WindowType5h, usedPercent: norm.Used5hPercent, resetSeconds: norm.Reset5hSeconds},
+		{window: WindowType7d, usedPercent: norm.Used7dPercent, resetSeconds: norm.Reset7dSeconds},
+	} {
+		expired := accountWindowSnapshotExpired(observedAt, processingNow, item.resetSeconds)
+		if expired {
+			continue
+		}
+		if err := s.attributeWindowWithUsage(ctx, accountID, item.window, item.usedPercent, item.resetSeconds, observedAt, usageLog, expired); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("sync %s window: %w", item.window, err)
+		}
+	}
+	return firstErr
 }
 
-func (s *AccountWindowQuotaService) attributeWindow(ctx context.Context, accountID int64, window string, usedPercent *float64, resetSeconds *int, now time.Time) {
+func accountWindowSnapshotExpired(observedAt, processingNow time.Time, resetSeconds *int) bool {
+	if resetSeconds == nil || *resetSeconds < 0 || observedAt.IsZero() || processingNow.IsZero() {
+		return false
+	}
+	return !observedAt.Add(time.Duration(*resetSeconds) * time.Second).After(processingNow)
+}
+
+func (s *AccountWindowQuotaService) attributeWindow(ctx context.Context, accountID int64, window string, usedPercent *float64, resetSeconds *int, observedAt time.Time) error {
+	return s.attributeWindowWithUsage(ctx, accountID, window, usedPercent, resetSeconds, observedAt, nil, false)
+}
+
+func (s *AccountWindowQuotaService) attributeWindowWithUsage(ctx context.Context, accountID int64, window string, usedPercent *float64, resetSeconds *int, observedAt time.Time, usageLog *AccountWindowUsageLogRef, candidateExpired bool) error {
 	if usedPercent == nil {
-		return
+		return nil
 	}
-	officialPercent := *usedPercent
-	if officialPercent < 0 {
-		officialPercent = 0
+	officialPercent := normalizeAccountWindowPercent(*usedPercent)
+	releaseLock, err := s.acquireAttributionLock(ctx, accountID, window)
+	if err != nil {
+		return err
 	}
+	defer releaseLock()
 
 	var resetAt *time.Time
-	windowStart := now.Add(-time.Duration(windowLengthSeconds(window)) * time.Second)
+	windowStart := observedAt.Add(-time.Duration(windowLengthSeconds(window)) * time.Second)
 	if resetSeconds != nil && *resetSeconds >= 0 {
-		t := now.Add(time.Duration(*resetSeconds) * time.Second)
+		t := observedAt.Add(time.Duration(*resetSeconds) * time.Second)
 		resetAt = &t
 		windowStart = t.Add(-time.Duration(windowLengthSeconds(window)) * time.Second)
 	}
 
-	checkpoint, err := s.getOrCreateAttributionCheckpoint(ctx, accountID, window, now)
-	if err != nil {
-		slog.Warn("account_window_quota.checkpoint_failed", "account_id", accountID, "window", window, "error", err)
-		return
+	candidate := newAccountWindowCostCheckpoint(officialPercent, windowStart, observedAt)
+	if resetAt != nil {
+		value := *resetAt
+		candidate.ResetAt = &value
 	}
-	if err := s.repo.RecomputeWindowSharesFromCheckpoint(
-		ctx,
-		accountID,
-		window,
-		officialPercent,
-		windowStart,
-		checkpoint.At,
-		checkpoint.BaseShares,
-		resetAt,
-	); err != nil {
-		slog.Warn("account_window_quota.token_recompute_failed", "account_id", accountID, "window", window, "official_percent", officialPercent, "error", err)
+	candidate.UsageLog = usageLog
+	candidate.CandidateExpired = candidateExpired
+	winner, applied, err := s.repo.ApplyWindowSharesFromCheckpoint(ctx, accountID, window, candidate, resetAt)
+	if err != nil {
+		return fmt.Errorf("apply durable incremental cost attribution: %w", err)
+	}
+	if !applied {
+		return nil
+	}
+	if err := s.saveAttributionCheckpointCache(ctx, accountID, window, winner); err != nil {
+		slog.Warn("account_window_quota.checkpoint_cache_failed", "account_id", accountID, "window", window, "error", err)
+	}
+	return nil
+}
+
+func normalizeAccountWindowPercent(value float64) float64 {
+	if math.IsNaN(value) || math.IsInf(value, 0) || value < 0 {
+		return 0
+	}
+	return math.Round(value*10000) / 10000
+}
+
+func sameAccountWindowBoundary(a, b time.Time) bool {
+	if a.IsZero() || b.IsZero() {
+		return false
+	}
+	// reset_after_seconds 的精度是秒，网络与处理延迟会让两次观测产生
+	// 少量偏差；一分钟以内仍视为同一个官方窗口。
+	return math.Abs(a.Sub(b).Seconds()) <= time.Minute.Seconds()
+}
+
+func accountWindowBoundaryIsNewer(candidate, current time.Time) bool {
+	if candidate.IsZero() || current.IsZero() {
+		return false
+	}
+	return candidate.After(current.Add(time.Minute))
+}
+
+func validAccountWindowCostCheckpoint(checkpoint *accountWindowAttributionCheckpoint) bool {
+	return IsValidAccountWindowAttributionCheckpoint(checkpoint)
+}
+
+func IsValidAccountWindowAttributionCheckpoint(checkpoint *AccountWindowAttributionCheckpoint) bool {
+	return checkpoint != nil && checkpoint.Basis == accountWindowAttributionBasis &&
+		checkpoint.AttributionMode == accountWindowAttributionMode &&
+		!checkpoint.At.IsZero() && !checkpoint.WindowStart.IsZero() &&
+		!math.IsNaN(checkpoint.LatestOfficialPercent) && !math.IsInf(checkpoint.LatestOfficialPercent, 0) &&
+		checkpoint.LatestOfficialPercent >= 0 &&
+		!math.IsNaN(checkpoint.UnattributedPercent) && !math.IsInf(checkpoint.UnattributedPercent, 0) &&
+		checkpoint.UnattributedPercent >= 0
+}
+
+func CloneAccountWindowAttributionCheckpoint(checkpoint AccountWindowAttributionCheckpoint) AccountWindowAttributionCheckpoint {
+	cloned := checkpoint
+	if checkpoint.ResetAt != nil {
+		value := *checkpoint.ResetAt
+		cloned.ResetAt = &value
+	}
+	if checkpoint.PendingBasisByUser == nil {
+		cloned.PendingBasisByUser = make(map[int64]float64)
+	} else {
+		cloned.PendingBasisByUser = make(map[int64]float64, len(checkpoint.PendingBasisByUser))
+		for userID, cost := range checkpoint.PendingBasisByUser {
+			cloned.PendingBasisByUser[userID] = cost
+		}
+	}
+	if checkpoint.UsageLog != nil {
+		value := *checkpoint.UsageLog
+		cloned.UsageLog = &value
+	}
+	return cloned
+}
+
+// SelectAccountWindowAttributionCheckpoint chooses the durable winner for one
+// account window. Same-window official totals are monotonic; stale observations
+// and stale boundaries are rejected without mutating pending attribution state.
+func SelectAccountWindowAttributionCheckpoint(existing *AccountWindowAttributionCheckpoint, candidate AccountWindowAttributionCheckpoint, candidateBoundaryKnown bool) (AccountWindowAttributionCheckpoint, bool) {
+	if !IsValidAccountWindowAttributionCheckpoint(existing) {
+		return CloneAccountWindowAttributionCheckpoint(candidate), true
+	}
+	current := CloneAccountWindowAttributionCheckpoint(*existing)
+	if candidateBoundaryKnown && accountWindowBoundaryIsNewer(current.WindowStart, candidate.WindowStart) {
+		return current, false
+	}
+	if !candidateBoundaryKnown || sameAccountWindowBoundary(current.WindowStart, candidate.WindowStart) {
+		if !current.LatestObservedAt.IsZero() && candidate.LatestObservedAt.Before(current.LatestObservedAt) {
+			return current, false
+		}
+		winner := current
+		if candidate.LatestOfficialPercent > current.LatestOfficialPercent+windowQuotaEpsilon {
+			winner.LatestOfficialPercent = normalizeAccountWindowPercent(candidate.LatestOfficialPercent)
+		}
+		if candidate.LatestObservedAt.After(current.LatestObservedAt) {
+			winner.LatestObservedAt = candidate.LatestObservedAt
+		}
+		if candidate.ResetAt != nil {
+			value := *candidate.ResetAt
+			winner.ResetAt = &value
+		}
+		return winner, true
+	}
+	return CloneAccountWindowAttributionCheckpoint(candidate), true
+}
+
+func NewAccountWindowAttributionCheckpoint(officialPercent float64, windowStart, observedAt time.Time, resetAt *time.Time) AccountWindowAttributionCheckpoint {
+	checkpoint := newAccountWindowCostCheckpoint(officialPercent, windowStart, observedAt)
+	if resetAt != nil {
+		value := *resetAt
+		checkpoint.ResetAt = &value
+	}
+	return checkpoint
+}
+
+func newAccountWindowCostCheckpoint(officialPercent float64, windowStart, observedAt time.Time) accountWindowAttributionCheckpoint {
+	return accountWindowAttributionCheckpoint{
+		Basis:                 accountWindowAttributionBasis,
+		AttributionMode:       accountWindowAttributionMode,
+		At:                    windowStart,
+		WindowStart:           windowStart,
+		LatestOfficialPercent: normalizeAccountWindowPercent(officialPercent),
+		LatestObservedAt:      observedAt,
+		PendingBasisByUser:    make(map[int64]float64),
 	}
 }
 
-func (s *AccountWindowQuotaService) getOrCreateAttributionCheckpoint(ctx context.Context, accountID int64, window string, now time.Time) (*accountWindowAttributionCheckpoint, error) {
-	key := accountWindowCheckpointKey(accountID, window)
-	if raw, err := s.rdb.Get(ctx, key).Bytes(); err == nil {
-		var checkpoint accountWindowAttributionCheckpoint
-		if json.Unmarshal(raw, &checkpoint) == nil && !checkpoint.At.IsZero() && len(checkpoint.BaseShares) > 0 {
-			return &checkpoint, nil
-		}
-	} else if err != redis.Nil {
-		return nil, err
-	}
-
-	records, err := s.repo.ListByAccount(ctx, accountID)
-	if err != nil {
-		return nil, err
-	}
-	checkpoint := accountWindowAttributionCheckpoint{At: now, BaseShares: map[int64]float64{}}
-	for _, record := range records {
-		if record.WindowType == window {
-			checkpoint.BaseShares[record.UserID] = record.AttributedPercent
-		}
-	}
-	if len(checkpoint.BaseShares) == 0 {
-		return &checkpoint, nil
+func (s *AccountWindowQuotaService) saveAttributionCheckpointCache(ctx context.Context, accountID int64, window string, checkpoint AccountWindowAttributionCheckpoint) error {
+	if s == nil || s.rdb == nil {
+		return nil
 	}
 	encoded, err := json.Marshal(checkpoint)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	created, err := s.rdb.SetNX(ctx, key, encoded, time.Duration(accountWindowCheckpointTTLSeconds)*time.Second).Result()
-	if err != nil {
-		return nil, err
-	}
-	if created {
-		return &checkpoint, nil
-	}
-	raw, err := s.rdb.Get(ctx, key).Bytes()
-	if err != nil {
-		return nil, err
-	}
-	var winner accountWindowAttributionCheckpoint
-	if err := json.Unmarshal(raw, &winner); err != nil {
-		return nil, err
-	}
-	return &winner, nil
-}
-
-func (s *AccountWindowQuotaService) invalidateAttributionCheckpoints(ctx context.Context, accountID int64) {
-	keys := []string{
-		accountWindowCheckpointKey(accountID, WindowType5h),
-		accountWindowCheckpointKey(accountID, WindowType7d),
-	}
-	if err := s.rdb.Del(ctx, keys...).Err(); err != nil {
-		slog.Warn("account_window_quota.checkpoint_invalidate_failed", "account_id", accountID, "error", err)
-	}
+	return s.rdb.Set(ctx, accountWindowCheckpointKey(accountID, window), encoded, time.Duration(accountWindowCheckpointTTLSeconds)*time.Second).Err()
 }
 
 // windowQuotaEpsilon 是浮点比较容差，避免 decimal→float 误差在边界处导致放行/拦截抖动。
@@ -528,6 +746,25 @@ func (pv *accountWindowPoolView) memberCount(window string) int {
 }
 
 // sumConfigured 返回某窗口下账号全员配置上限之和。
+func (pv *accountWindowPoolView) clearExpiredUsage(now time.Time) {
+	if pv == nil || now.IsZero() {
+		return
+	}
+	for userID, resetAt := range pv.reset5h {
+		if resetAt != nil && !resetAt.After(now) {
+			pv.used5h[userID] = 0
+			pv.frac5h[userID] = 0
+			delete(pv.reset5h, userID)
+		}
+	}
+	for userID, resetAt := range pv.reset7d {
+		if resetAt != nil && !resetAt.After(now) {
+			pv.used7d[userID] = 0
+			delete(pv.reset7d, userID)
+		}
+	}
+}
+
 func (pv *accountWindowPoolView) sumConfigured(window string) float64 {
 	m := pv.base5h
 	if window == WindowType7d {
@@ -540,17 +777,39 @@ func (pv *accountWindowPoolView) sumConfigured(window string) float64 {
 	return sum
 }
 
-// sumUsed 返回某窗口下账号全员已用百分点之和（账号级官方利用率）。
-func (pv *accountWindowPoolView) sumUsed(window string) float64 {
+func (pv *accountWindowPoolView) sumAttributed(window string) float64 {
 	m := pv.used5h
 	if window == WindowType7d {
 		m = pv.used7d
 	}
 	sum := 0.0
-	for _, v := range m {
-		sum += v
+	for _, value := range m {
+		if value > 0 && !math.IsNaN(value) && !math.IsInf(value, 0) {
+			sum += value
+		}
 	}
-	return sum
+	return normalizeAccountWindowPercent(sum)
+}
+
+// resolveAccountWindowOfficialPercent 只从 PostgreSQL 中持久化的 OpenAI 官方快照链读取账号总量。
+// Redis checkpoint 只是提交后的兼容缓存，不能参与 eligibility 或展示等正确性路径。
+func (s *AccountWindowQuotaService) resolveAccountWindowOfficialPercent(ctx context.Context, accountID int64, window string) (float64, bool) {
+	if s == nil || s.repo == nil {
+		return 0, false
+	}
+	reader, ok := s.repo.(accountWindowOfficialUsageReader)
+	if !ok {
+		return 0, false
+	}
+	value, found, err := reader.GetAccountOfficialWindowPercent(ctx, accountID, window)
+	if err != nil {
+		slog.Warn("account_window_quota.official_extra_read_failed", "account_id", accountID, "window", window, "error", err)
+		return 0, false
+	}
+	if !found {
+		return 0, false
+	}
+	return normalizeAccountWindowPercent(value), true
 }
 
 // donor7dKeepCap 返回 7d 捐赠者的自留有效上限 = max(已用, 基础上限×(1-捐赠比例))。
@@ -634,6 +893,26 @@ func (pv *accountWindowPoolView) effective7dLimit(userID int64) float64 {
 	return base + allowance
 }
 
+func effectiveWindowQuotaRecordAt(record UserAccountWindowQuotaRecord, now time.Time) UserAccountWindowQuotaRecord {
+	if record.WindowResetAt == nil || record.WindowResetAt.After(now) {
+		return record
+	}
+	record.AttributedPercent = 0
+	record.WindowResetAt = nil
+	if record.WindowType == WindowType5h {
+		record.DonatePoolFraction = 0
+	}
+	return record
+}
+
+func effectiveWindowQuotaRecordsAt(records []UserAccountWindowQuotaRecord, now time.Time) []UserAccountWindowQuotaRecord {
+	effective := make([]UserAccountWindowQuotaRecord, len(records))
+	for i, record := range records {
+		effective[i] = effectiveWindowQuotaRecordAt(record, now)
+	}
+	return effective
+}
+
 // CheckUserAccountEligible 校验用户在某账号上是否仍可发起请求。
 // 规则：5h、7d 都在自己份额之上可借各自的「自愿救急池」（只用别人主动捐出的部分；无人捐则纯硬上限）。
 // 返回 eligible=false 时附带被打满的窗口与其重置时间，供调用方生成 429。
@@ -648,6 +927,7 @@ func (s *AccountWindowQuotaService) CheckUserAccountEligible(ctx context.Context
 		return true, "", nil
 	}
 	pv := buildAccountWindowPoolView(records)
+	pv.clearExpiredUsage(time.Now())
 	ceiling7d := s.GetTotalCeiling(ctx, WindowType7d)
 	ceiling5h := s.GetTotalCeiling(ctx, WindowType5h)
 
@@ -658,13 +938,12 @@ func (s *AccountWindowQuotaService) CheckUserAccountEligible(ctx context.Context
 		return false, WindowType5h, nil
 	}
 
-	// 0) 账号级硬闸（与人数无关的最终安全网，只"封顶"不"转移份额"，非强制分配）：
-	//    某窗口全员已用之和达到官方安全水位 → 全员拦截，无论个人是否还有余量。
-	//    这是 3/5/8 人车也成立的护栏，哪怕 per-user 配额配错也绝不会把账号推过 ceiling 触发风控。
-	if pv.sumUsed(WindowType7d)+windowQuotaEpsilon >= ceiling7d {
+	// 0) 账号级硬闸只读取 OpenAI 官方账号窗口百分比。成员归因之和、
+	// usage_logs.total_cost 和 Token 都不能充当账号总量来源；官方快照暂缺时 fail-open。
+	if official7d, found := s.resolveAccountWindowOfficialPercent(ctx, accountID, WindowType7d); found && official7d+windowQuotaEpsilon >= ceiling7d {
 		return false, WindowType7d, pv.reset7d[userID]
 	}
-	if pv.sumUsed(WindowType5h)+windowQuotaEpsilon >= ceiling5h {
+	if official5h, found := s.resolveAccountWindowOfficialPercent(ctx, accountID, WindowType5h); found && official5h+windowQuotaEpsilon >= ceiling5h {
 		return false, WindowType5h, pv.reset5h[userID]
 	}
 
@@ -692,19 +971,34 @@ func (s *AccountWindowQuotaService) ResetDueWindows(ctx context.Context) {
 	if !s.Enabled() {
 		return
 	}
-	due, err := s.repo.ListDueResets(ctx, time.Now())
+	dueAt := time.Now()
+	due, err := s.repo.ListDueResets(ctx, dueAt)
 	if err != nil {
 		slog.Warn("account_window_quota.list_due_resets_failed", "error", err)
 		return
 	}
 	for _, d := range due {
-		if err := s.repo.ResetWindowForAccount(ctx, d.AccountID, d.WindowType, nil); err != nil {
+		releaseLock, lockErr := s.acquireAttributionLock(ctx, d.AccountID, d.WindowType)
+		if lockErr != nil {
+			slog.Warn("account_window_quota.timed_reset_lock_failed", "account_id", d.AccountID, "window", d.WindowType, "error", lockErr)
+			continue
+		}
+		reset, err := s.repo.ResetWindowForAccountIfDue(ctx, d.AccountID, d.WindowType, dueAt)
+		if err != nil {
+			releaseLock()
 			slog.Warn("account_window_quota.timed_reset_failed", "account_id", d.AccountID, "window", d.WindowType, "error", err)
 			continue
 		}
-		if err := s.rdb.Del(ctx, accountWindowCheckpointKey(d.AccountID, d.WindowType)).Err(); err != nil {
-			slog.Warn("account_window_quota.checkpoint_reset_failed", "account_id", d.AccountID, "window", d.WindowType, "error", err)
+		if !reset {
+			releaseLock()
+			continue
 		}
+		if s.rdb != nil {
+			if err := s.rdb.Del(ctx, accountWindowCheckpointKey(d.AccountID, d.WindowType)).Err(); err != nil {
+				slog.Warn("account_window_quota.checkpoint_reset_failed", "account_id", d.AccountID, "window", d.WindowType, "error", err)
+			}
+		}
+		releaseLock()
 	}
 }
 
@@ -713,7 +1007,11 @@ func (s *AccountWindowQuotaService) ListUserWindows(ctx context.Context, userID 
 	if s == nil || s.repo == nil {
 		return nil, nil
 	}
-	return s.repo.ListByUser(ctx, userID)
+	records, err := s.repo.ListByUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return effectiveWindowQuotaRecordsAt(records, time.Now()), nil
 }
 
 // ListSharedAccountIDs 返回所有启用拼车额度的账号 ID，包括尚未创建成员额度行的账号。
@@ -737,6 +1035,21 @@ func (s *AccountWindowQuotaService) ListAllForAdmin(ctx context.Context) ([]Admi
 	rows, err := s.repo.ListAllWithUser(ctx)
 	if err != nil {
 		return nil, nil, err
+	}
+	now := time.Now()
+	for i := range rows {
+		effective := effectiveWindowQuotaRecordAt(UserAccountWindowQuotaRecord{
+			UserID:             rows[i].UserID,
+			AccountID:          rows[i].AccountID,
+			WindowType:         rows[i].WindowType,
+			LimitPercent:       rows[i].LimitPercent,
+			AttributedPercent:  rows[i].AttributedPercent,
+			WindowResetAt:      rows[i].WindowResetAt,
+			DonatePoolFraction: rows[i].DonatePoolFraction,
+		}, now)
+		rows[i].AttributedPercent = effective.AttributedPercent
+		rows[i].WindowResetAt = effective.WindowResetAt
+		rows[i].DonatePoolFraction = effective.DonatePoolFraction
 	}
 	// 按账号汇总成池视图。
 	byAccount := map[int64][]UserAccountWindowQuotaRecord{}
@@ -790,13 +1103,24 @@ func (s *AccountWindowQuotaService) ListAllForAdmin(ctx context.Context) ([]Admi
 			continue
 		}
 		configured := pv.sumConfigured(row.WindowType)
+		attributed := pv.sumAttributed(row.WindowType)
 		ceiling := ceilings[row.WindowType]
+		var officialUsedPtr *float64
+		var unattributedPtr *float64
+		if officialUsed, found := s.resolveAccountWindowOfficialPercent(ctx, row.AccountID, row.WindowType); found {
+			value := officialUsed
+			officialUsedPtr = &value
+			unattributed := normalizeAccountWindowPercent(math.Max(0, officialUsed-attributed))
+			unattributedPtr = &unattributed
+		}
 		summaries = append(summaries, AdminWindowQuotaSummary{
 			AccountID:            row.AccountID,
 			WindowType:           row.WindowType,
 			MemberCount:          pv.memberCount(row.WindowType),
 			ConfiguredSumPercent: configured,
-			UsedSumPercent:       pv.sumUsed(row.WindowType),
+			AttributedSumPercent: attributed,
+			OfficialUsedPercent:  officialUsedPtr,
+			UnattributedPercent:  unattributedPtr,
 			CeilingPercent:       ceiling,
 			Overallocated:        configured > ceiling+windowQuotaEpsilon,
 		})
@@ -907,18 +1231,17 @@ func (s *AccountWindowQuotaService) SetSeats(ctx context.Context, seats int) err
 	return s.rdb.Set(ctx, accountWindowSeatsKey(), strconv.Itoa(seats), 0).Err()
 }
 
-// defaultUserLimitPercent 返回人均默认上限 = ceiling/seats（自动适配 3/5/8 人车）。
-// 仅用于"自动建行"时的默认 limit_percent；管理端显式设过的 limit 不受影响。
-// 任何异常回落到 DefaultAccountWindowLimitPercent（23），叠加账号级硬闸兜底，绝不超 ceiling。
-func (s *AccountWindowQuotaService) defaultUserLimitPercent(ctx context.Context) float64 {
-	if s == nil || s.rdb == nil {
+// defaultUserLimitPercent 返回指定窗口的人均默认上限 = ceiling/seats。
+// 仅用于自动建行；管理端显式设置的 limit 不受影响。
+func (s *AccountWindowQuotaService) defaultUserLimitPercent(ctx context.Context, window string) float64 {
+	if s == nil || s.rdb == nil || !IsValidWindowType(window) {
 		return DefaultAccountWindowLimitPercent
 	}
 	seats := s.GetSeats(ctx)
 	if seats <= 0 {
 		return DefaultAccountWindowLimitPercent
 	}
-	dl := s.GetTotalCeiling(ctx, WindowType5h) / float64(seats)
+	dl := s.GetTotalCeiling(ctx, window) / float64(seats)
 	if dl <= 0 || dl > 100 {
 		return DefaultAccountWindowLimitPercent
 	}
@@ -1015,7 +1338,7 @@ func (s *AccountWindowQuotaService) BootstrapSharedAccountMembers(ctx context.Co
 	return s.SetAccountMembers(ctx, accountID, userIDs)
 }
 
-// SetAccountMembers 以管理员显式选择的用户列表作为拼车成员，新用户无需先产生用量即可参与均分。
+// SetAccountMembers 以管理员显式选择的用户列表同步拼车成员；保留 retained 成员状态，新成员只获得受剩余 ceiling 约束的安全默认额度。
 func (s *AccountWindowQuotaService) SetAccountMembers(ctx context.Context, accountID int64, userIDs []int64) ([]AccountWindowEqualizationResult, error) {
 	if s == nil || s.repo == nil || s.rdb == nil {
 		return nil, errors.New("account window quota service unavailable")
@@ -1036,17 +1359,13 @@ func (s *AccountWindowQuotaService) SetAccountMembers(ctx context.Context, accou
 		normalized = append(normalized, userID)
 	}
 	sort.Slice(normalized, func(i, j int) bool { return normalized[i] < normalized[j] })
-	// 前后各失效一次，避免并发请求在成员事务期间复用旧检查点。
-	s.invalidateAttributionCheckpoints(ctx, accountID)
-	results, err := s.repo.SyncAccountMembers(
+	return s.repo.SyncAccountMembers(
 		ctx,
 		accountID,
 		normalized,
 		s.GetTotalCeiling(ctx, WindowType5h),
 		s.GetTotalCeiling(ctx, WindowType7d),
 	)
-	s.invalidateAttributionCheckpoints(ctx, accountID)
-	return results, err
 }
 
 // SetDonateFraction 设置用户在某账号某窗口（5h/7d）的救急池捐赠比例（占自己该窗口上限，∈[0,1]）。
@@ -1066,25 +1385,29 @@ func (s *AccountWindowQuotaService) SetDonateFraction(ctx context.Context, userI
 	if err != nil {
 		return fmt.Errorf("list account window quotas before donation update: %w", err)
 	}
+	records = effectiveWindowQuotaRecordsAt(records, time.Now())
 	if err := ValidateAccountWindowDonateFraction(records, userID, window, fraction); err != nil {
 		return err
 	}
-	return s.repo.SetDonatePoolFraction(ctx, userID, accountID, window, fraction, s.defaultUserLimitPercent(ctx))
+	return s.repo.SetDonatePoolFraction(ctx, userID, accountID, window, fraction, s.defaultUserLimitPercent(ctx, window))
 }
 
 // UserWindowQuotaView 是用户侧展示用的窗口配额（含救急池信息）。
 type UserWindowQuotaView struct {
-	AccountID             int64
-	WindowType            string
-	LimitPercent          float64 // 基础上限（本人 limit_percent）
-	AttributedPercent     float64 // 已用百分点
-	WindowResetAt         *time.Time
-	DonateFraction        float64 // 本窗口救急池捐赠比例（5h/7d 各自独立）
-	MinimumDonateFraction float64 // 已借出额度锁定后的最低捐赠比例；窗口重置后回落为 0
-	EffectiveLimitPercent float64 // 当前实际可用上限：自留 /(基础 + 救急增量)
-	PoolAvailablePercent  float64 // 该账号该窗口救急池当前可借总额
-	AccountUsedPercent    float64 // 该账号该窗口全员已用之和（账号级利用率）
-	CeilingPercent        float64 // 该窗口账号总额上限（官方安全水位）
+	AccountID                  int64
+	WindowType                 string
+	LimitPercent               float64 // 基础上限（本人 limit_percent）
+	AttributedPercent          float64 // 已用百分点
+	WindowResetAt              *time.Time
+	DonateFraction             float64  // 本窗口救急池捐赠比例（5h/7d 各自独立）
+	MinimumDonateFraction      float64  // 已借出额度锁定后的最低捐赠比例；窗口重置后回落为 0
+	EffectiveLimitPercent      float64  // 当前实际可用上限：自留 /(基础 + 救急增量)
+	PoolAvailablePercent       float64  // 该账号该窗口救急池当前可借总额
+	AccountUsedPercent         *float64 // OpenAI 官方账号窗口已用百分比；缺失时为 nil，绝不从成员归因反推
+	AccountAttributedPercent   *float64 // 当前活跃成员已归因之和
+	AccountUnattributedPercent *float64 // 官方总量减成员已归因
+	CeilingPercent             float64  // 该窗口账号总额上限（官方安全水位）
+	ForceUnattributed          bool     // 账号处于「官方用量强制未归因」模式：成员归因恒为 0，官方用量主要来自站外
 }
 
 // ListUserWindowsWithPool 返回用户全部窗口配额并附带救急池信息（捐赠比例、有效上限、池剩余）。
@@ -1096,11 +1419,33 @@ func (s *AccountWindowQuotaService) ListUserWindowsWithPool(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
+	now := time.Now()
+	records = effectiveWindowQuotaRecordsAt(records, now)
 	ceiling := map[string]float64{
 		WindowType5h: s.GetTotalCeiling(ctx, WindowType5h),
 		WindowType7d: s.GetTotalCeiling(ctx, WindowType7d),
 	}
 	pvCache := map[int64]*accountWindowPoolView{}
+	officialCache := map[string]struct {
+		percent float64
+		found   bool
+	}{}
+	forceCache := map[int64]bool{}
+	resolveForce := func(accountID int64) bool {
+		if force, ok := forceCache[accountID]; ok {
+			return force
+		}
+		force := false
+		if reader, ok := s.repo.(accountWindowForceUnattributedReader); ok {
+			if value, err := reader.IsAccountWindowForceUnattributed(ctx, accountID); err == nil {
+				force = value
+			} else {
+				slog.Warn("account_window_quota.read_force_unattributed_failed", "account_id", accountID, "error", err)
+			}
+		}
+		forceCache[accountID] = force
+		return force
+	}
 	views := make([]UserWindowQuotaView, 0, len(records))
 	for _, r := range records {
 		pv, ok := pvCache[r.AccountID]
@@ -1109,7 +1454,7 @@ func (s *AccountWindowQuotaService) ListUserWindowsWithPool(ctx context.Context,
 				slog.Warn("account_window_quota.list_account_failed", "account_id", r.AccountID, "error", aerr)
 				pv = nil // 退化：救急池/账号级信息不可用时按基础上限展示
 			} else {
-				pv = buildAccountWindowPoolView(accRecords)
+				pv = buildAccountWindowPoolView(effectiveWindowQuotaRecordsAt(accRecords, now))
 			}
 			pvCache[r.AccountID] = pv
 		}
@@ -1121,9 +1466,19 @@ func (s *AccountWindowQuotaService) ListUserWindowsWithPool(ctx context.Context,
 			WindowResetAt:         r.WindowResetAt,
 			EffectiveLimitPercent: r.LimitPercent,
 			CeilingPercent:        ceiling[r.WindowType],
+			ForceUnattributed:     resolveForce(r.AccountID),
+		}
+		officialKey := strconv.FormatInt(r.AccountID, 10) + ":" + r.WindowType
+		official, cached := officialCache[officialKey]
+		if !cached {
+			official.percent, official.found = s.resolveAccountWindowOfficialPercent(ctx, r.AccountID, r.WindowType)
+			officialCache[officialKey] = official
+		}
+		if official.found {
+			value := official.percent
+			v.AccountUsedPercent = &value
 		}
 		if pv != nil {
-			v.AccountUsedPercent = pv.sumUsed(r.WindowType)
 			switch r.WindowType {
 			case WindowType5h:
 				if pv.base5h[userID] > 0 {
@@ -1139,6 +1494,12 @@ func (s *AccountWindowQuotaService) ListUserWindowsWithPool(ctx context.Context,
 					v.EffectiveLimitPercent = pv.effective7dLimit(userID)
 					v.PoolAvailablePercent = pv.pool7dAvailable()
 				}
+			}
+			attributed := pv.sumAttributed(r.WindowType)
+			v.AccountAttributedPercent = &attributed
+			if official.found {
+				unattributed := normalizeAccountWindowPercent(math.Max(0, official.percent-attributed))
+				v.AccountUnattributedPercent = &unattributed
 			}
 		}
 		views = append(views, v)

@@ -35,7 +35,7 @@ func userIDFromGinContext(c *gin.Context) int64 {
 // 命中上限时直接写 429（含被打满窗口、重置时间与 Retry-After）并返回 true（调用方应中止转发）。
 // fail-open：服务未启用、无用户身份或底层异常时返回 false（放行）。
 func (s *OpenAIGatewayService) enforceAccountWindowQuota(ctx context.Context, c *gin.Context, account *Account) bool {
-	if c == nil || account == nil || s.accountWindowQuota == nil || !s.accountWindowQuota.Enabled() {
+	if c == nil || account == nil || !account.IsWindowQuotaShared() || s.accountWindowQuota == nil || !s.accountWindowQuota.Enabled() {
 		return false
 	}
 	userID := userIDFromGinContext(c)

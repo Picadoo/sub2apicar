@@ -7,8 +7,8 @@ import (
 )
 
 // AccountWindowQuotaResetService 周期性扫描已到期的官方窗口并清零用户分摊台账。
-// 这是兜底机制：正常情况下官方利用率回落会在 Attribute 中被 Lua 基线脚本即时识别并触发重置；
-// 但当某账号在窗口刷新时刻恰好无流量（无法观测到回落）时，靠本服务按 window_reset_at 定时清零。
+// 这是兜底机制：正常情况下新的官方快照会在 Attribute 中即时推进窗口；
+// 但当某账号在窗口刷新时刻恰好无流量（无法观测到新快照）时，靠本服务按 window_reset_at 定时清零。
 type AccountWindowQuotaResetService struct {
 	quota    *AccountWindowQuotaService
 	interval time.Duration

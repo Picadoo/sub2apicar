@@ -40,6 +40,7 @@ type openAIWSDialError struct {
 	StatusCode      int
 	ResponseHeaders http.Header
 	ResponseBody    []byte
+	ObservedAt      time.Time
 	Err             error
 }
 
@@ -136,6 +137,13 @@ func (l *openAIWSConnLease) HandshakeHeaders() http.Header {
 		return nil
 	}
 	return cloneHeader(l.conn.handshakeHeaders)
+}
+
+func (l *openAIWSConnLease) HandshakeObservedAt() time.Time {
+	if l == nil || l.conn == nil {
+		return time.Time{}
+	}
+	return l.conn.createdAt()
 }
 
 func (l *openAIWSConnLease) IsPrewarmed() bool {
@@ -256,8 +264,11 @@ type openAIWSConn struct {
 	prewarmed     atomic.Bool
 }
 
-func newOpenAIWSConn(id string, _ int64, ws openAIWSClientConn, handshakeHeaders http.Header) *openAIWSConn {
+func newOpenAIWSConn(id string, _ int64, ws openAIWSClientConn, handshakeHeaders http.Header, observedAt ...time.Time) *openAIWSConn {
 	now := time.Now()
+	if len(observedAt) > 0 && !observedAt[0].IsZero() {
+		now = observedAt[0]
+	}
 	conn := &openAIWSConn{
 		id:               id,
 		ws:               ws,
@@ -1654,6 +1665,7 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 		}
 	}
 	conn, status, handshakeHeaders, err := p.clientDialer.Dial(ctx, req.WSURL, headers, req.ProxyURL)
+	handshakeObservedAt := time.Now()
 	if err != nil {
 		var handshakeErr *openAIWSHandshakeError
 		var responseBody []byte
@@ -1664,6 +1676,7 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 			StatusCode:      status,
 			ResponseHeaders: cloneHeader(handshakeHeaders),
 			ResponseBody:    responseBody,
+			ObservedAt:      handshakeObservedAt,
 			Err:             err,
 		}
 	}
@@ -1671,11 +1684,12 @@ func (p *openAIWSConnPool) dialConn(ctx context.Context, req openAIWSAcquireRequ
 		return nil, &openAIWSDialError{
 			StatusCode:      status,
 			ResponseHeaders: cloneHeader(handshakeHeaders),
+			ObservedAt:      handshakeObservedAt,
 			Err:             errors.New("openai ws dialer returned nil connection"),
 		}
 	}
 	id := p.nextConnID(req.Account.ID)
-	pooledConn := newOpenAIWSConn(id, req.Account.ID, conn, handshakeHeaders)
+	pooledConn := newOpenAIWSConn(id, req.Account.ID, conn, handshakeHeaders, handshakeObservedAt)
 	pooledConn.betaFeatures = normalizeOpenAIWSBetaFeatures(req.Headers)
 	return pooledConn, nil
 }

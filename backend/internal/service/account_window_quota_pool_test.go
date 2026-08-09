@@ -2,12 +2,16 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
+	"github.com/stretchr/testify/require"
 )
 
 func awqRec(userID int64, window string, limit, used, frac float64) UserAccountWindowQuotaRecord {
@@ -196,13 +200,12 @@ func TestAccountWindowPool_SevenDayBlocksBorrow(t *testing.T) {
 	}
 }
 
-type windowTokenRecomputeCall struct {
+type windowCostRecomputeCall struct {
 	accountID       int64
 	window          string
 	officialPercent float64
 	windowStart     time.Time
-	checkpointAt    time.Time
-	baseShares      map[int64]float64
+	resetAt         *time.Time
 }
 
 // stubWindowRepo 是 UserAccountWindowQuotaRepository 的最小桩，仅 ListByAccount/ListByUser 返回固定数据。
@@ -211,7 +214,9 @@ type stubWindowRepo struct {
 	adminRows        []AdminWindowQuotaOverviewRow
 	setCalls         []UserAccountWindowQuotaRecord
 	donateCalls      []UserAccountWindowQuotaRecord
-	tokenCalls       []windowTokenRecomputeCall
+	costCalls        []windowCostRecomputeCall
+	costRecomputeErr error
+	recomputeHook    func()
 	maxConfigured    float64
 	maxConfiguredErr error
 	equalizeResults  []AccountWindowEqualizationResult
@@ -222,10 +227,58 @@ type stubWindowRepo struct {
 	sharedAccountIDs []int64
 	peerMemberIDs    []int64
 	syncUserIDs      []int64
+	official5h       *float64
+	official7d       *float64
+	checkpoints      map[string]AccountWindowAttributionCheckpoint
 }
 
-func (s *stubWindowRepo) ResetWindowForAccount(context.Context, int64, string, *time.Time) error {
-	return nil
+type conditionalResetWindowRepo struct {
+	stubWindowRepo
+	due        []AccountWindowReset
+	reset      bool
+	resetCalls int
+}
+
+func (r *conditionalResetWindowRepo) ListDueResets(context.Context, time.Time) ([]AccountWindowReset, error) {
+	return r.due, nil
+}
+
+func (r *conditionalResetWindowRepo) ResetWindowForAccountIfDue(context.Context, int64, string, time.Time) (bool, error) {
+	r.resetCalls++
+	return r.reset, nil
+}
+
+type blockingWindowRepo struct {
+	stubWindowRepo
+	mu           sync.Mutex
+	calls        []windowCostRecomputeCall
+	firstEntered chan struct{}
+	releaseFirst chan struct{}
+	firstOnce    sync.Once
+}
+
+func (r *blockingWindowRepo) ApplyWindowSharesFromCheckpoint(_ context.Context, accountID int64, window string, candidate AccountWindowAttributionCheckpoint, resetAt *time.Time) (AccountWindowAttributionCheckpoint, bool, error) {
+	officialPercent, windowStart := candidate.LatestOfficialPercent, candidate.WindowStart
+	if officialPercent == 10 {
+		r.firstOnce.Do(func() { close(r.firstEntered) })
+		<-r.releaseFirst
+	}
+	var copiedResetAt *time.Time
+	if resetAt != nil {
+		value := *resetAt
+		copiedResetAt = &value
+	}
+	r.mu.Lock()
+	r.calls = append(r.calls, windowCostRecomputeCall{
+		accountID: accountID, window: window, officialPercent: officialPercent,
+		windowStart: windowStart, resetAt: copiedResetAt,
+	})
+	r.mu.Unlock()
+	return candidate, true, nil
+}
+
+func (s *stubWindowRepo) ResetWindowForAccountIfDue(context.Context, int64, string, time.Time) (bool, error) {
+	return true, nil
 }
 func (s *stubWindowRepo) GetByUserAccountWindow(context.Context, int64, int64, string) (*UserAccountWindowQuotaRecord, error) {
 	return nil, nil
@@ -248,17 +301,40 @@ func (s *stubWindowRepo) SetLimitForUserAccount(_ context.Context, userID, accou
 	})
 	return nil
 }
-func (s *stubWindowRepo) RecomputeWindowSharesFromCheckpoint(_ context.Context, accountID int64, window string, officialPercent float64, windowStart, checkpointAt time.Time, baseShares map[int64]float64, _ *time.Time) error {
-	copied := make(map[int64]float64, len(baseShares))
-	for userID, share := range baseShares {
-		copied[userID] = share
+func (s *stubWindowRepo) ApplyWindowSharesFromCheckpoint(_ context.Context, accountID int64, window string, candidate AccountWindowAttributionCheckpoint, resetAt *time.Time) (AccountWindowAttributionCheckpoint, bool, error) {
+	candidate.ResetAt = resetAt
+	if s.checkpoints == nil {
+		s.checkpoints = make(map[string]AccountWindowAttributionCheckpoint)
 	}
-	s.tokenCalls = append(s.tokenCalls, windowTokenRecomputeCall{
-		accountID: accountID, window: window, officialPercent: officialPercent,
-		windowStart: windowStart, checkpointAt: checkpointAt, baseShares: copied,
+	key := fmt.Sprintf("%d:%s", accountID, window)
+	var existing *AccountWindowAttributionCheckpoint
+	if stored, ok := s.checkpoints[key]; ok {
+		copy := stored
+		existing = &copy
+	}
+	winner, accepted := SelectAccountWindowAttributionCheckpoint(existing, candidate, resetAt != nil)
+	if !accepted {
+		return winner, false, nil
+	}
+	if s.recomputeHook != nil {
+		s.recomputeHook()
+	}
+	var copiedResetAt *time.Time
+	if winner.ResetAt != nil {
+		value := *winner.ResetAt
+		copiedResetAt = &value
+	}
+	s.costCalls = append(s.costCalls, windowCostRecomputeCall{
+		accountID: accountID, window: window, officialPercent: winner.LatestOfficialPercent,
+		windowStart: winner.WindowStart, resetAt: copiedResetAt,
 	})
-	return nil
+	if s.costRecomputeErr != nil {
+		return AccountWindowAttributionCheckpoint{}, false, s.costRecomputeErr
+	}
+	s.checkpoints[key] = winner
+	return winner, true, nil
 }
+
 func (s *stubWindowRepo) ListAllWithUser(context.Context) ([]AdminWindowQuotaOverviewRow, error) {
 	return s.adminRows, nil
 }
@@ -285,6 +361,23 @@ func (s *stubWindowRepo) SyncAccountMembers(_ context.Context, accountID int64, 
 	s.equalize5h = ceiling5h
 	s.equalize7d = ceiling7d
 	s.syncUserIDs = append([]int64(nil), userIDs...)
+	for _, window := range accountWindowTypes {
+		checkpoint, ok := s.checkpoints[fmt.Sprintf("%d:%s", accountID, window)]
+		if !ok || !validAccountWindowCostCheckpoint(&checkpoint) {
+			continue
+		}
+		resetAt := checkpoint.ResetAt
+		if resetAt == nil {
+			fallback := checkpoint.WindowStart.Add(time.Duration(windowLengthSeconds(window)) * time.Second)
+			resetAt = &fallback
+		}
+		if resetAt.After(time.Now()) {
+			s.costCalls = append(s.costCalls, windowCostRecomputeCall{
+				accountID: accountID, window: window, officialPercent: checkpoint.LatestOfficialPercent,
+				windowStart: checkpoint.WindowStart, resetAt: resetAt,
+			})
+		}
+	}
 	return s.equalizeResults, s.equalizeErr
 }
 func (s *stubWindowRepo) ListSharedAccountIDs(context.Context) ([]int64, error) {
@@ -293,9 +386,21 @@ func (s *stubWindowRepo) ListSharedAccountIDs(context.Context) ([]int64, error) 
 func (s *stubWindowRepo) ListPeerSharedAccountMemberUserIDs(context.Context, int64) ([]int64, error) {
 	return append([]int64(nil), s.peerMemberIDs...), nil
 }
+func (s *stubWindowRepo) GetAccountOfficialWindowPercent(_ context.Context, _ int64, window string) (float64, bool, error) {
+	value := s.official5h
+	if window == WindowType7d {
+		value = s.official7d
+	}
+	if value == nil {
+		return 0, false, nil
+	}
+	return *value, true, nil
+}
 
-func newStubQuotaService(rows []UserAccountWindowQuotaRecord) *AccountWindowQuotaService {
-	return NewAccountWindowQuotaService(&stubWindowRepo{rows: rows}, redis.NewClient(&redis.Options{}))
+func newStubQuotaService(t *testing.T, rows []UserAccountWindowQuotaRecord) *AccountWindowQuotaService {
+	t.Helper()
+	svc, _ := newQuotaServiceWithMiniRedis(t, &stubWindowRepo{rows: rows})
+	return svc
 }
 
 func TestListSharedAccountIDs_IncludesAccountsWithoutQuotaRows(t *testing.T) {
@@ -341,47 +446,167 @@ func TestBootstrapSharedAccountMembers_DoesNotOverwriteExistingMembers(t *testin
 	}
 }
 
-func TestAttributeWindow_ReusesEqualizedCheckpointAcrossSnapshotJitter(t *testing.T) {
+func TestSetAccountMembers_RecomputesFromOfficialCheckpointUsingDollarPath(t *testing.T) {
+	repo := &stubWindowRepo{}
+	svc, mr := newQuotaServiceWithMiniRedis(t, repo)
+	now := time.Now().UTC().Truncate(time.Second)
+	windowStart := now.Add(-time.Hour)
+	checkpoint := newAccountWindowCostCheckpoint(31.5, windowStart, now)
+	repo.checkpoints = map[string]AccountWindowAttributionCheckpoint{
+		fmt.Sprintf("%d:%s", int64(29), WindowType5h): checkpoint,
+	}
+	encoded, err := json.Marshal(checkpoint)
+	require.NoError(t, err)
+	mr.Set(accountWindowCheckpointKey(29, WindowType5h), string(encoded))
+
+	_, err = svc.SetAccountMembers(context.Background(), 29, []int64{31, 1})
+	require.NoError(t, err)
+	require.Equal(t, []int64{1, 31}, repo.syncUserIDs)
+	require.Len(t, repo.costCalls, 1)
+	require.Equal(t, int64(29), repo.costCalls[0].accountID)
+	require.Equal(t, WindowType5h, repo.costCalls[0].window)
+	require.InDelta(t, 31.5, repo.costCalls[0].officialPercent, 1e-9)
+	require.WithinDuration(t, windowStart, repo.costCalls[0].windowStart, time.Second)
+}
+
+func TestAttributeWindow_KeepsOfficialPercentMonotonicAcrossSnapshotJitter(t *testing.T) {
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	repo := &stubWindowRepo{rows: []UserAccountWindowQuotaRecord{
-		awqRec(1, WindowType5h, 23, 6.5, 0),
-		awqRec(2, WindowType5h, 23, 6.5, 0),
-		awqRec(3, WindowType5h, 23, 6.5, 0),
-		awqRec(4, WindowType5h, 23, 6.5, 0),
-	}}
+	repo := &stubWindowRepo{}
 	svc := NewAccountWindowQuotaService(repo, rdb)
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
 
 	used := 27.0
-	svc.attributeWindow(ctx, 29, WindowType5h, &used, nil, now)
+	require.NoError(t, svc.attributeWindow(ctx, 29, WindowType5h, &used, nil, now))
 	used = 20
-	svc.attributeWindow(ctx, 29, WindowType5h, &used, nil, now.Add(time.Minute))
+	require.NoError(t, svc.attributeWindow(ctx, 29, WindowType5h, &used, nil, now.Add(time.Minute)))
 	used = 27
-	svc.attributeWindow(ctx, 29, WindowType5h, &used, nil, now.Add(2*time.Minute))
+	require.NoError(t, svc.attributeWindow(ctx, 29, WindowType5h, &used, nil, now.Add(2*time.Minute)))
 
-	if len(repo.tokenCalls) != 3 {
-		t.Fatalf("token recompute calls = %d, want 3", len(repo.tokenCalls))
+	require.Len(t, repo.costCalls, 3)
+	windowStart := repo.costCalls[0].windowStart
+	for _, call := range repo.costCalls {
+		require.WithinDuration(t, windowStart, call.windowStart, time.Second)
+		require.InDelta(t, 27, call.officialPercent, 1e-9)
 	}
-	checkpointAt := repo.tokenCalls[0].checkpointAt
-	for _, call := range repo.tokenCalls {
-		if !call.checkpointAt.Equal(checkpointAt) {
-			t.Fatalf("checkpoint changed during snapshot jitter: %#v", repo.tokenCalls)
-		}
-		if len(call.baseShares) != 4 {
-			t.Fatalf("base shares = %#v, want four members", call.baseShares)
-		}
-		for userID := int64(1); userID <= 4; userID++ {
-			if !awqApproxEq(call.baseShares[userID], 6.5) {
-				t.Fatalf("base share user %d = %v, want 6.5", userID, call.baseShares[userID])
+}
+
+func TestAttributeWindow_LateOlderHigherSnapshotCannotOverwriteNewerObservation(t *testing.T) {
+	repo := &stubWindowRepo{}
+	svc, mr := newQuotaServiceWithMiniRedis(t, repo)
+	ctx := context.Background()
+	oldObservedAt := time.Date(2026, time.August, 2, 10, 0, 0, 0, time.UTC)
+	newObservedAt := oldObservedAt.Add(5 * time.Minute)
+	oldResetAfter := 60 * 60
+	newResetAfter := 55 * 60
+	lateOldResetAfter := 59 * 60
+
+	oldUsed := 10.0
+	require.NoError(t, svc.attributeWindow(ctx, 29, WindowType5h, &oldUsed, &oldResetAfter, oldObservedAt))
+	newUsed := 20.0
+	require.NoError(t, svc.attributeWindow(ctx, 29, WindowType5h, &newUsed, &newResetAfter, newObservedAt))
+	lateOlderHigh := 30.0
+	require.NoError(t, svc.attributeWindow(ctx, 29, WindowType5h, &lateOlderHigh, &lateOldResetAfter, oldObservedAt.Add(time.Minute)))
+
+	require.Len(t, repo.costCalls, 2)
+	require.InDelta(t, 10, repo.costCalls[0].officialPercent, 1e-9)
+	require.InDelta(t, 20, repo.costCalls[1].officialPercent, 1e-9)
+	stored, err := mr.Get(accountWindowCheckpointKey(29, WindowType5h))
+	require.NoError(t, err)
+	var checkpoint accountWindowAttributionCheckpoint
+	require.NoError(t, json.Unmarshal([]byte(stored), &checkpoint))
+	require.InDelta(t, 20, checkpoint.LatestOfficialPercent, 1e-9)
+	require.WithinDuration(t, newObservedAt, checkpoint.LatestObservedAt, time.Second)
+}
+
+func TestAttributeWindow_SerializesCheckpointWinnerAndDatabaseRecompute(t *testing.T) {
+	repo := &blockingWindowRepo{
+		firstEntered: make(chan struct{}),
+		releaseFirst: make(chan struct{}),
+	}
+	svc, mr := newQuotaServiceWithMiniRedis(t, repo)
+	ctx := context.Background()
+	oldObservedAt := time.Date(2026, time.August, 2, 10, 0, 0, 0, time.UTC)
+	newObservedAt := oldObservedAt.Add(5 * time.Minute)
+	oldResetAfter := 60 * 60
+	newResetAfter := 55 * 60
+	oldUsed := 10.0
+	newUsed := 20.0
+
+	oldDone := make(chan error, 1)
+	go func() {
+		oldDone <- svc.attributeWindow(ctx, 29, WindowType5h, &oldUsed, &oldResetAfter, oldObservedAt)
+	}()
+	select {
+	case <-repo.firstEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("older snapshot did not enter database recompute")
+	}
+
+	newDone := make(chan error, 1)
+	go func() {
+		newDone <- svc.attributeWindow(ctx, 29, WindowType5h, &newUsed, &newResetAfter, newObservedAt)
+	}()
+	select {
+	case err := <-newDone:
+		t.Fatalf("newer snapshot bypassed account-window lock: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(repo.releaseFirst)
+	require.NoError(t, <-oldDone)
+	require.NoError(t, <-newDone)
+
+	repo.mu.Lock()
+	calls := append([]windowCostRecomputeCall(nil), repo.calls...)
+	repo.mu.Unlock()
+	require.Len(t, calls, 2)
+	require.InDelta(t, 10, calls[0].officialPercent, 1e-9)
+	require.InDelta(t, 20, calls[1].officialPercent, 1e-9)
+
+	stored, err := mr.Get(accountWindowCheckpointKey(29, WindowType5h))
+	require.NoError(t, err)
+	var checkpoint accountWindowAttributionCheckpoint
+	require.NoError(t, json.Unmarshal([]byte(stored), &checkpoint))
+	require.InDelta(t, 20, checkpoint.LatestOfficialPercent, 1e-9)
+	require.WithinDuration(t, newObservedAt, checkpoint.LatestObservedAt, time.Second)
+}
+
+func TestResetDueWindowsDeletesCheckpointOnlyWhenDatabaseWindowIsStillDue(t *testing.T) {
+	tests := []struct {
+		name           string
+		reset          bool
+		wantCheckpoint bool
+	}{
+		{name: "new official window superseded scan", reset: false, wantCheckpoint: true},
+		{name: "persisted window remains due", reset: true, wantCheckpoint: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &conditionalResetWindowRepo{
+				due:   []AccountWindowReset{{AccountID: 29, WindowType: WindowType5h}},
+				reset: tt.reset,
 			}
-		}
+			svc, mr := newQuotaServiceWithMiniRedis(t, repo)
+			key := accountWindowCheckpointKey(29, WindowType5h)
+			mr.Set(key, `{"basis":"full_window_total_cost_v3"}`)
+
+			svc.ResetDueWindows(context.Background())
+
+			require.Equal(t, 1, repo.resetCalls)
+			_, err := mr.Get(key)
+			if tt.wantCheckpoint {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+			}
+		})
 	}
 }
 
 func TestCheckUserAccountEligible_BlocksUnassignedSharedMember(t *testing.T) {
-	svc := newStubQuotaService([]UserAccountWindowQuotaRecord{
+	svc := newStubQuotaService(t, []UserAccountWindowQuotaRecord{
 		awqRec(1, WindowType5h, 23, 6.5, 0),
 		awqRec(1, WindowType7d, 23, 1, 0),
 		awqRec(2, WindowType5h, 23, 6.5, 0),
@@ -395,7 +620,7 @@ func TestCheckUserAccountEligible_BlocksUnassignedSharedMember(t *testing.T) {
 
 // 顶满自己 5h 份额、但救急池有余 → 放行（借用救急池）。
 func TestCheckUserAccountEligible_PoolAllowsBorrow(t *testing.T) {
-	svc := newStubQuotaService([]UserAccountWindowQuotaRecord{
+	svc := newStubQuotaService(t, []UserAccountWindowQuotaRecord{
 		awqRec(1, WindowType5h, 23, 23, 0),
 		awqRec(2, WindowType5h, 23, 0, 1),
 	})
@@ -405,9 +630,23 @@ func TestCheckUserAccountEligible_PoolAllowsBorrow(t *testing.T) {
 	}
 }
 
+func TestCheckUserAccountEligible_ExpiredWindowDoesNotBlockBeforeResetWorker(t *testing.T) {
+	past := time.Now().UTC().Add(-time.Minute)
+	member := awqRec(1, WindowType5h, 23, 23, 0)
+	member.WindowResetAt = &past
+	other := awqRec(2, WindowType5h, 23, 10, 0)
+	other.WindowResetAt = &past
+
+	svc := newStubQuotaService(t, []UserAccountWindowQuotaRecord{member, other})
+	eligible, window, resetAt := svc.CheckUserAccountEligible(context.Background(), 1, 1)
+	require.True(t, eligible)
+	require.Empty(t, window)
+	require.Nil(t, resetAt)
+}
+
 // 7d 周配额打满 → 即使 5h 救急池有余也拦截（铁底线）。
 func TestCheckUserAccountEligible_SevenDayHardBlock(t *testing.T) {
-	svc := newStubQuotaService([]UserAccountWindowQuotaRecord{
+	svc := newStubQuotaService(t, []UserAccountWindowQuotaRecord{
 		awqRec(1, WindowType5h, 23, 0, 0),
 		awqRec(1, WindowType7d, 23, 23, 0),
 		awqRec(2, WindowType5h, 23, 0, 1),
@@ -420,7 +659,7 @@ func TestCheckUserAccountEligible_SevenDayHardBlock(t *testing.T) {
 
 // 无人捐赠（池为空）→ 顶满自己份额即拦截（退化为原硬性上限行为）。
 func TestCheckUserAccountEligible_NoPoolBlocksAtBase(t *testing.T) {
-	svc := newStubQuotaService([]UserAccountWindowQuotaRecord{
+	svc := newStubQuotaService(t, []UserAccountWindowQuotaRecord{
 		awqRec(1, WindowType5h, 23, 23, 0),
 		awqRec(2, WindowType5h, 23, 10, 0),
 	})
@@ -432,7 +671,7 @@ func TestCheckUserAccountEligible_NoPoolBlocksAtBase(t *testing.T) {
 
 // 自愿 7d 救急池：user2 自愿全捐 7d（pool=23），user1 7d 打满且非捐赠者 → 借到救急池放行。
 func TestCheckEligible_7dVoluntaryDonationAllowsBorrow(t *testing.T) {
-	svc := newStubQuotaService([]UserAccountWindowQuotaRecord{
+	svc := newStubQuotaService(t, []UserAccountWindowQuotaRecord{
 		awqRec(1, WindowType5h, 23, 0, 0),
 		awqRec(1, WindowType7d, 23, 23, 0), // user1 顶满自己 7d，未捐
 		awqRec(2, WindowType7d, 23, 0, 1),  // user2 自愿全捐 7d → pool=23
@@ -445,7 +684,7 @@ func TestCheckEligible_7dVoluntaryDonationAllowsBorrow(t *testing.T) {
 
 // 无人捐 7d：打满即拦（纯铁底线，谁也动不了你没捐的份额）。
 func TestCheckEligible_7dHardCapWhenNoDonation(t *testing.T) {
-	svc := newStubQuotaService([]UserAccountWindowQuotaRecord{
+	svc := newStubQuotaService(t, []UserAccountWindowQuotaRecord{
 		awqRec(1, WindowType5h, 23, 0, 0),
 		awqRec(1, WindowType7d, 23, 23, 0),
 		awqRec(2, WindowType7d, 23, 0, 0), // 没人捐 → pool=0
@@ -469,15 +708,53 @@ func TestAccountWindowPool_7dDonorKeepAndPool(t *testing.T) {
 	}
 }
 
-// 账号级硬闸：某窗口全员已用之和达到 ceiling → 即使个人远未到自己上限也全员拦截（人数无关的安全网）。
-func TestCheckEligible_AccountCeilingHardStop(t *testing.T) {
-	svc := newStubQuotaService([]UserAccountWindowQuotaRecord{
-		awqRec(1, WindowType5h, 50, 10, 0), // user1 远未到自己 50 的上限
-		awqRec(2, WindowType5h, 50, 85, 0), // Σ5h=95 ≥ 92 ceiling
+// 账号级硬闸只认 OpenAI 官方窗口快照；成员归因之和不能充当账号总量。
+func TestCheckEligible_AccountCeilingIgnoresAttributedMemberSum(t *testing.T) {
+	official := 50.0
+	svc, _ := newQuotaServiceWithMiniRedis(t, &stubWindowRepo{
+		rows: []UserAccountWindowQuotaRecord{
+			awqRec(1, WindowType5h, 50, 10, 0),
+			awqRec(2, WindowType5h, 50, 85, 0), // 成员之和 95，但官方仅 50
+		},
+		official5h: &official,
+	})
+	eligible, window, _ := svc.CheckUserAccountEligible(context.Background(), 1, 1)
+	if !eligible || window != "" {
+		t.Fatalf("member attribution sum must not hard-stop account, got eligible=%v window=%q", eligible, window)
+	}
+}
+
+// 官方窗口达到 ceiling 时，即使当前成员远未到个人上限也必须全员拦截。
+func TestCheckEligible_DoesNotUseRedisCheckpointAsOfficialTruth(t *testing.T) {
+	svc, mr := newQuotaServiceWithMiniRedis(t, &stubWindowRepo{
+		rows: []UserAccountWindowQuotaRecord{
+			awqRec(1, WindowType5h, 50, 10, 0),
+		},
+	})
+	now := time.Now()
+	resetAt := now.Add(2 * time.Hour)
+	checkpoint := NewAccountWindowAttributionCheckpoint(95, resetAt.Add(-5*time.Hour), now, &resetAt)
+	encoded, err := json.Marshal(checkpoint)
+	require.NoError(t, err)
+	mr.Set(accountWindowCheckpointKey(1, WindowType5h), string(encoded))
+
+	eligible, window, _ := svc.CheckUserAccountEligible(context.Background(), 1, 1)
+	require.True(t, eligible)
+	require.Empty(t, window)
+}
+
+func TestCheckEligible_AccountCeilingHardStopFromOfficialSnapshot(t *testing.T) {
+	official := 95.0
+	svc, _ := newQuotaServiceWithMiniRedis(t, &stubWindowRepo{
+		rows: []UserAccountWindowQuotaRecord{
+			awqRec(1, WindowType5h, 50, 10, 0),
+			awqRec(2, WindowType5h, 50, 20, 0),
+		},
+		official5h: &official,
 	})
 	eligible, window, _ := svc.CheckUserAccountEligible(context.Background(), 1, 1)
 	if eligible || window != WindowType5h {
-		t.Fatalf("should hard-stop at account ceiling, got eligible=%v window=%q", eligible, window)
+		t.Fatalf("official snapshot should hard-stop at account ceiling, got eligible=%v window=%q", eligible, window)
 	}
 }
 
@@ -487,6 +764,159 @@ func newQuotaServiceWithMiniRedis(t *testing.T, repo UserAccountWindowQuotaRepos
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = rdb.Close() })
 	return NewAccountWindowQuotaService(repo, rdb), mr
+}
+
+func TestSyncOfficialSnapshot_RecomputesBothWindows(t *testing.T) {
+	repo := &stubWindowRepo{rows: []UserAccountWindowQuotaRecord{
+		{UserID: 1, AccountID: 29, WindowType: WindowType5h, AttributedPercent: 10},
+		{UserID: 2, AccountID: 29, WindowType: WindowType5h, AttributedPercent: 10},
+		{UserID: 1, AccountID: 29, WindowType: WindowType7d, AttributedPercent: 5},
+		{UserID: 2, AccountID: 29, WindowType: WindowType7d, AttributedPercent: 5},
+	}}
+	svc, _ := newQuotaServiceWithMiniRedis(t, repo)
+	used5h, reset5h, minutes5h := 42.0, 3600, 300
+	used7d, reset7d, minutes7d := 18.0, 86400, 10080
+	snapshot := &OpenAICodexUsageSnapshot{
+		PrimaryUsedPercent:         &used5h,
+		PrimaryResetAfterSeconds:   &reset5h,
+		PrimaryWindowMinutes:       &minutes5h,
+		SecondaryUsedPercent:       &used7d,
+		SecondaryResetAfterSeconds: &reset7d,
+		SecondaryWindowMinutes:     &minutes7d,
+	}
+
+	require.NoError(t, svc.SyncOfficialSnapshot(context.Background(), 29, snapshot))
+	require.Len(t, repo.costCalls, 2)
+	calls := map[string]windowCostRecomputeCall{}
+	for _, call := range repo.costCalls {
+		calls[call.window] = call
+	}
+	require.InDelta(t, 42.0, calls[WindowType5h].officialPercent, 1e-9)
+	require.InDelta(t, 18.0, calls[WindowType7d].officialPercent, 1e-9)
+	require.Equal(t, int64(29), calls[WindowType5h].accountID)
+	require.Equal(t, int64(29), calls[WindowType7d].accountID)
+}
+
+func TestSyncOfficialSnapshot_PropagatesRecomputeError(t *testing.T) {
+	repo := &stubWindowRepo{
+		rows:             []UserAccountWindowQuotaRecord{{UserID: 1, AccountID: 29, WindowType: WindowType5h}},
+		costRecomputeErr: errors.New("database unavailable"),
+	}
+	svc, _ := newQuotaServiceWithMiniRedis(t, repo)
+	used5h, reset5h, minutes5h := 42.0, 3600, 300
+	snapshot := &OpenAICodexUsageSnapshot{
+		PrimaryUsedPercent:       &used5h,
+		PrimaryResetAfterSeconds: &reset5h,
+		PrimaryWindowMinutes:     &minutes5h,
+	}
+
+	err := svc.SyncOfficialSnapshot(context.Background(), 29, snapshot)
+	require.ErrorContains(t, err, "sync 5h window")
+	require.Len(t, repo.costCalls, 1)
+}
+
+func TestSyncOfficialSnapshot_EmptySnapshotIsNoOp(t *testing.T) {
+	repo := &stubWindowRepo{rows: []UserAccountWindowQuotaRecord{{UserID: 1, AccountID: 29, WindowType: WindowType5h}}}
+	svc, _ := newQuotaServiceWithMiniRedis(t, repo)
+
+	require.NoError(t, svc.SyncOfficialSnapshot(context.Background(), 29, &OpenAICodexUsageSnapshot{}))
+	require.Empty(t, repo.costCalls)
+}
+
+func TestSyncOfficialSnapshot_NewWindowDiscardsStaleSharesAndUsesWindowStart(t *testing.T) {
+	oldReset := time.Now().Add(-7 * 24 * time.Hour)
+	repo := &stubWindowRepo{rows: []UserAccountWindowQuotaRecord{
+		{UserID: 1, AccountID: 29, WindowType: WindowType7d, AttributedPercent: 20.75, WindowResetAt: &oldReset},
+		{UserID: 31, AccountID: 29, WindowType: WindowType7d, AttributedPercent: 20.75, WindowResetAt: &oldReset},
+		{UserID: 32, AccountID: 29, WindowType: WindowType7d, AttributedPercent: 20.75, WindowResetAt: &oldReset},
+		{UserID: 33, AccountID: 29, WindowType: WindowType7d, AttributedPercent: 20.75, WindowResetAt: &oldReset},
+	}}
+	svc, _ := newQuotaServiceWithMiniRedis(t, repo)
+	used7d, reset7d, minutes7d := 4.0, 6*24*60*60, 10080
+	snapshot := &OpenAICodexUsageSnapshot{
+		SecondaryUsedPercent:       &used7d,
+		SecondaryResetAfterSeconds: &reset7d,
+		SecondaryWindowMinutes:     &minutes7d,
+	}
+
+	require.NoError(t, svc.SyncOfficialSnapshot(context.Background(), 29, snapshot))
+	require.Len(t, repo.costCalls, 1)
+	call := repo.costCalls[0]
+	require.Equal(t, WindowType7d, call.window)
+	require.NotNil(t, call.resetAt)
+	require.WithinDuration(t, call.windowStart.Add(7*24*time.Hour), *call.resetAt, time.Second)
+}
+
+func TestSyncOfficialSnapshot_LegacyCheckpointRebuildsFromWindowStartWithCostBasis(t *testing.T) {
+	now := time.Now().UTC()
+	resetAt := now.Add(6 * 24 * time.Hour)
+	repo := &stubWindowRepo{rows: []UserAccountWindowQuotaRecord{
+		{UserID: 1, AccountID: 29, WindowType: WindowType7d, AttributedPercent: 20, WindowResetAt: &resetAt},
+		{UserID: 31, AccountID: 29, WindowType: WindowType7d, AttributedPercent: 10, WindowResetAt: &resetAt},
+	}}
+	svc, mr := newQuotaServiceWithMiniRedis(t, repo)
+	legacy := struct {
+		At          time.Time         `json:"at"`
+		WindowStart time.Time         `json:"window_start"`
+		BaseShares  map[int64]float64 `json:"base_shares"`
+	}{
+		At:          now.Add(-10 * time.Minute),
+		WindowStart: now.Add(-24 * time.Hour),
+		BaseShares:  map[int64]float64{1: 20, 31: 10},
+	}
+	encoded, err := json.Marshal(legacy)
+	require.NoError(t, err)
+	mr.Set(accountWindowCheckpointKey(29, WindowType7d), string(encoded))
+
+	used7d, reset7d, minutes7d := 42.0, 6*24*60*60, 10080
+	snapshot := &OpenAICodexUsageSnapshot{
+		SecondaryUsedPercent:       &used7d,
+		SecondaryResetAfterSeconds: &reset7d,
+		SecondaryWindowMinutes:     &minutes7d,
+	}
+	require.NoError(t, svc.SyncOfficialSnapshot(context.Background(), 29, snapshot))
+	require.Len(t, repo.costCalls, 1)
+	call := repo.costCalls[0]
+	require.Equal(t, WindowType7d, call.window)
+	require.NotNil(t, call.resetAt)
+	require.WithinDuration(t, call.windowStart.Add(7*24*time.Hour), *call.resetAt, time.Second)
+
+	stored, err := mr.Get(accountWindowCheckpointKey(29, WindowType7d))
+	require.NoError(t, err)
+	var checkpoint accountWindowAttributionCheckpoint
+	require.NoError(t, json.Unmarshal([]byte(stored), &checkpoint))
+	require.Equal(t, accountWindowAttributionBasis, checkpoint.Basis)
+	require.Equal(t, accountWindowAttributionMode, checkpoint.AttributionMode)
+	require.WithinDuration(t, checkpoint.WindowStart, checkpoint.At, time.Second)
+	require.InDelta(t, 42, checkpoint.LatestOfficialPercent, 1e-9)
+}
+
+func TestAttributeWindow_NewWindowAllowsDropAndLateOldSnapshotCannotOverwrite(t *testing.T) {
+	repo := &stubWindowRepo{}
+	svc, mr := newQuotaServiceWithMiniRedis(t, repo)
+	ctx := context.Background()
+	oldObservedAt := time.Date(2026, time.July, 26, 4, 10, 0, 0, time.UTC)
+	newObservedAt := time.Date(2026, time.August, 2, 4, 10, 0, 0, time.UTC)
+	resetAfter := 6 * 24 * 60 * 60
+
+	oldUsed := 76.0
+	require.NoError(t, svc.attributeWindow(ctx, 29, WindowType7d, &oldUsed, &resetAfter, oldObservedAt))
+	newUsed := 4.0
+	require.NoError(t, svc.attributeWindow(ctx, 29, WindowType7d, &newUsed, &resetAfter, newObservedAt))
+	lateOldUsed := 80.0
+	require.NoError(t, svc.attributeWindow(ctx, 29, WindowType7d, &lateOldUsed, &resetAfter, oldObservedAt.Add(time.Minute)))
+
+	require.Len(t, repo.costCalls, 2)
+	require.InDelta(t, 76, repo.costCalls[0].officialPercent, 1e-9)
+	require.InDelta(t, 4, repo.costCalls[1].officialPercent, 1e-9)
+	require.True(t, repo.costCalls[1].windowStart.After(repo.costCalls[0].windowStart))
+
+	stored, err := mr.Get(accountWindowCheckpointKey(29, WindowType7d))
+	require.NoError(t, err)
+	var checkpoint accountWindowAttributionCheckpoint
+	require.NoError(t, json.Unmarshal([]byte(stored), &checkpoint))
+	require.InDelta(t, 4, checkpoint.LatestOfficialPercent, 1e-9)
+	require.WithinDuration(t, repo.costCalls[1].windowStart, checkpoint.WindowStart, time.Second)
 }
 
 func TestSetLimitForUserAccount_OverallocatedAllowsNonIncreasingChanges(t *testing.T) {
@@ -539,12 +969,18 @@ func TestSetTotalCeiling_RejectsBelowExistingConfiguredSum(t *testing.T) {
 }
 
 func TestListAllForAdmin_ReturnsPerAccountWindowSummaries(t *testing.T) {
-	repo := &stubWindowRepo{adminRows: []AdminWindowQuotaOverviewRow{
-		{UserID: 1, AccountID: 7, WindowType: WindowType5h, LimitPercent: 30, AttributedPercent: 10},
-		{UserID: 2, AccountID: 7, WindowType: WindowType5h, LimitPercent: 30, AttributedPercent: 5},
-		{UserID: 1, AccountID: 7, WindowType: WindowType7d, LimitPercent: 40, AttributedPercent: 20},
-		{UserID: 2, AccountID: 7, WindowType: WindowType7d, LimitPercent: 30, AttributedPercent: 15},
-	}}
+	official5h := 12.5
+	official7d := 34.5
+	repo := &stubWindowRepo{
+		adminRows: []AdminWindowQuotaOverviewRow{
+			{UserID: 1, AccountID: 7, WindowType: WindowType5h, LimitPercent: 30, AttributedPercent: 10},
+			{UserID: 2, AccountID: 7, WindowType: WindowType5h, LimitPercent: 30, AttributedPercent: 5},
+			{UserID: 1, AccountID: 7, WindowType: WindowType7d, LimitPercent: 40, AttributedPercent: 20},
+			{UserID: 2, AccountID: 7, WindowType: WindowType7d, LimitPercent: 30, AttributedPercent: 15},
+		},
+		official5h: &official5h,
+		official7d: &official7d,
+	}
 	svc, mr := newQuotaServiceWithMiniRedis(t, repo)
 	mr.Set(accountWindowCeilingKey(WindowType5h), "50")
 	mr.Set(accountWindowCeilingKey(WindowType7d), "80")
@@ -557,15 +993,41 @@ func TestListAllForAdmin_ReturnsPerAccountWindowSummaries(t *testing.T) {
 		t.Fatalf("summaries len = %d, want 2", len(summaries))
 	}
 	if got := summaries[0]; got.AccountID != 7 || got.WindowType != WindowType5h || got.MemberCount != 2 ||
-		!awqApproxEq(got.ConfiguredSumPercent, 60) || !awqApproxEq(got.UsedSumPercent, 15) ||
+		!awqApproxEq(got.ConfiguredSumPercent, 60) || got.OfficialUsedPercent == nil || !awqApproxEq(*got.OfficialUsedPercent, official5h) ||
 		!awqApproxEq(got.CeilingPercent, 50) || !got.Overallocated {
 		t.Fatalf("5h summary = %+v", got)
 	}
 	if got := summaries[1]; got.AccountID != 7 || got.WindowType != WindowType7d || got.MemberCount != 2 ||
-		!awqApproxEq(got.ConfiguredSumPercent, 70) || !awqApproxEq(got.UsedSumPercent, 35) ||
+		!awqApproxEq(got.ConfiguredSumPercent, 70) || got.OfficialUsedPercent == nil || !awqApproxEq(*got.OfficialUsedPercent, official7d) ||
 		!awqApproxEq(got.CeilingPercent, 80) || got.Overallocated {
 		t.Fatalf("7d summary = %+v", got)
 	}
+}
+
+func TestListUserWindowsWithPool_UsesOnlyOfficialAccountUsage(t *testing.T) {
+	official5h := 40.0
+	repo := &stubWindowRepo{
+		rows:       []UserAccountWindowQuotaRecord{awqRec(1, WindowType5h, 50, 10, 0)},
+		official5h: &official5h,
+	}
+	svc, _ := newQuotaServiceWithMiniRedis(t, repo)
+
+	views, err := svc.ListUserWindowsWithPool(context.Background(), 1)
+	require.NoError(t, err)
+	require.Len(t, views, 1)
+	require.NotNil(t, views[0].AccountUsedPercent)
+	require.InDelta(t, official5h, *views[0].AccountUsedPercent, 1e-9)
+	require.NotEqual(t, views[0].AttributedPercent, *views[0].AccountUsedPercent, "成员归因不能冒充账号总量")
+}
+
+func TestListUserWindowsWithPool_OmitsAccountUsageWithoutOfficialSnapshot(t *testing.T) {
+	repo := &stubWindowRepo{rows: []UserAccountWindowQuotaRecord{awqRec(1, WindowType5h, 50, 10, 0)}}
+	svc, _ := newQuotaServiceWithMiniRedis(t, repo)
+
+	views, err := svc.ListUserWindowsWithPool(context.Background(), 1)
+	require.NoError(t, err)
+	require.Len(t, views, 1)
+	require.Nil(t, views[0].AccountUsedPercent)
 }
 
 func TestEqualizeAccountActiveMemberLimits_UsesCurrentCeilings(t *testing.T) {

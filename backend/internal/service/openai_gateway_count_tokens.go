@@ -145,7 +145,7 @@ func (s *OpenAIGatewayService) ForwardCountTokensAsAnthropic(
 		}
 
 		if s.rateLimitService != nil {
-			s.rateLimitService.HandleUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+			s.rateLimitService.HandleUpstreamErrorAt(ctx, account, resp.StatusCode, resp.Header, respBody, HTTPUpstreamResponseHeadersObservedAt(resp))
 		}
 
 		if isOpenAIInputTokensUnsupported(resp.StatusCode, respBody) {

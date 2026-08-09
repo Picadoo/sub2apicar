@@ -483,7 +483,7 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	// Extract and save Codex usage snapshot from response headers (for OAuth accounts).
 	// 排除 spark 影子:其 codex_* 仅由 QueryUsage(/wham/usage bengalfox)更新(外审第7轮 P1)。
 	if handleErr == nil && account.Type == AccountTypeOAuth && !account.IsShadow() && account.Platform != PlatformGrok {
-		if snapshot := ParseCodexRateLimitHeaders(resp.Header); snapshot != nil {
+		if snapshot := parseCodexRateLimitHeadersAt(resp.Header, HTTPUpstreamResponseHeadersObservedAt(resp)); snapshot != nil {
 			s.updateCodexUsageSnapshot(ctx, userIDFromGinContext(c), account.ID, snapshot)
 		}
 	}
@@ -594,14 +594,16 @@ func (s *OpenAIGatewayService) handleAnthropicBufferedStreamingResponse(
 	c.JSON(http.StatusOK, anthropicResp)
 
 	return &OpenAIForwardResult{
-		RequestID:     requestID,
-		ResponseID:    finalResponse.ID,
-		Usage:         usage,
-		Model:         originalModel,
-		BillingModel:  billingModel,
-		UpstreamModel: upstreamModel,
-		Stream:        false,
-		Duration:      time.Since(startTime),
+		RequestID:                 requestID,
+		ResponseID:                finalResponse.ID,
+		Usage:                     usage,
+		Model:                     originalModel,
+		BillingModel:              billingModel,
+		UpstreamModel:             upstreamModel,
+		Stream:                    false,
+		Duration:                  time.Since(startTime),
+		ResponseHeaders:           resp.Header.Clone(),
+		ResponseHeadersObservedAt: HTTPUpstreamResponseHeadersObservedAt(resp),
 	}, nil
 }
 
@@ -842,16 +844,18 @@ func (s *OpenAIGatewayService) handleAnthropicStreamingResponse(
 	// resultWithUsage builds the final result snapshot.
 	resultWithUsage := func() *OpenAIForwardResult {
 		return &OpenAIForwardResult{
-			RequestID:        requestID,
-			ResponseID:       responseID,
-			Usage:            usage,
-			Model:            originalModel,
-			BillingModel:     billingModel,
-			UpstreamModel:    upstreamModel,
-			Stream:           true,
-			Duration:         time.Since(startTime),
-			FirstTokenMs:     firstTokenMs,
-			ClientDisconnect: clientDisconnected,
+			RequestID:                 requestID,
+			ResponseID:                responseID,
+			Usage:                     usage,
+			Model:                     originalModel,
+			BillingModel:              billingModel,
+			UpstreamModel:             upstreamModel,
+			Stream:                    true,
+			Duration:                  time.Since(startTime),
+			FirstTokenMs:              firstTokenMs,
+			ClientDisconnect:          clientDisconnected,
+			ResponseHeaders:           resp.Header.Clone(),
+			ResponseHeadersObservedAt: HTTPUpstreamResponseHeadersObservedAt(resp),
 		}
 	}
 

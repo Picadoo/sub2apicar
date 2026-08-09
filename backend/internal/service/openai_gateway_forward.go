@@ -929,7 +929,7 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		// Extract and save Codex usage snapshot from response headers (for OAuth accounts).
 		// 排除 spark 影子:其 codex_* 仅由 QueryUsage(/wham/usage bengalfox)更新(外审第7轮 P1)。
 		if account.Type == AccountTypeOAuth && !account.IsShadow() {
-			if snapshot := ParseCodexRateLimitHeaders(resp.Header); snapshot != nil {
+			if snapshot := parseCodexRateLimitHeadersAt(resp.Header, HTTPUpstreamResponseHeadersObservedAt(resp)); snapshot != nil {
 				s.updateCodexUsageSnapshot(ctx, userIDFromGinContext(c), account.ID, snapshot)
 			}
 		}
@@ -939,18 +939,20 @@ func (s *OpenAIGatewayService) Forward(ctx context.Context, c *gin.Context, acco
 		}
 
 		forwardResult := &OpenAIForwardResult{
-			RequestID:       resp.Header.Get("x-request-id"),
-			ResponseID:      responseID,
-			Usage:           *usage,
-			Model:           originalModel,
-			BillingModel:    billingModel,
-			UpstreamModel:   upstreamModel,
-			ServiceTier:     serviceTier,
-			ReasoningEffort: reasoningEffort,
-			Stream:          reqStream,
-			OpenAIWSMode:    false,
-			Duration:        time.Since(startTime),
-			FirstTokenMs:    firstTokenMs,
+			RequestID:                 resp.Header.Get("x-request-id"),
+			ResponseID:                responseID,
+			Usage:                     *usage,
+			Model:                     originalModel,
+			BillingModel:              billingModel,
+			UpstreamModel:             upstreamModel,
+			ServiceTier:               serviceTier,
+			ReasoningEffort:           reasoningEffort,
+			Stream:                    reqStream,
+			OpenAIWSMode:              false,
+			Duration:                  time.Since(startTime),
+			FirstTokenMs:              firstTokenMs,
+			ResponseHeaders:           resp.Header.Clone(),
+			ResponseHeadersObservedAt: HTTPUpstreamResponseHeadersObservedAt(resp),
 		}
 		if imageCount > 0 {
 			forwardResult.ImageCount = imageCount

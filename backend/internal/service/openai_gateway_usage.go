@@ -348,8 +348,16 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 		)
 	}
 
+	sharedWindowQuota := account.Type == AccountTypeOAuth && !account.IsShadow() && account.IsWindowQuotaShared()
 	if s.cfg != nil && s.cfg.RunMode == config.RunModeSimple {
-		writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.openai_gateway")
+		if sharedWindowQuota {
+			writeState := writeUsageLogWithState(ctx, s.usageLogRepo, usageLog, "service.openai_gateway")
+			if writeState.Persisted {
+				s.attributeCodexUsageSnapshotAfterLog(ctx, user.ID, account.ID, result.ResponseHeaders, result.ResponseHeadersObservedAt, usageLog, writeState.Inserted)
+			}
+		} else {
+			_ = writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.openai_gateway")
+		}
 		logger.LegacyPrintf("service.openai_gateway", "[SIMPLE MODE] Usage recorded (not billed): user=%d, tokens=%d", usageLog.UserID, usageLog.TotalTokens())
 		s.deferredService.ScheduleLastUsedUpdate(account.ID)
 		return nil
@@ -381,7 +389,14 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	if billingErr != nil {
 		return billingErr
 	}
-	writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.openai_gateway")
+	if sharedWindowQuota {
+		writeState := writeUsageLogWithState(ctx, s.usageLogRepo, usageLog, "service.openai_gateway")
+		if writeState.Persisted {
+			s.attributeCodexUsageSnapshotAfterLog(ctx, user.ID, account.ID, result.ResponseHeaders, result.ResponseHeadersObservedAt, usageLog, writeState.Inserted)
+		}
+	} else {
+		_ = writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.openai_gateway")
+	}
 
 	return nil
 }
@@ -649,6 +664,13 @@ func (s *OpenAIGatewayService) resolveOpenAIChannelPricing(ctx context.Context, 
 // ParseCodexRateLimitHeaders extracts Codex usage limits from response headers.
 // Exported for use in ratelimit_service when handling OpenAI 429 responses.
 func ParseCodexRateLimitHeaders(headers http.Header) *OpenAICodexUsageSnapshot {
+	return parseCodexRateLimitHeadersAt(headers, time.Now())
+}
+
+func parseCodexRateLimitHeadersAt(headers http.Header, observedAt time.Time) *OpenAICodexUsageSnapshot {
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
 	snapshot := &OpenAICodexUsageSnapshot{}
 	hasData := false
 
@@ -710,7 +732,7 @@ func ParseCodexRateLimitHeaders(headers http.Header) *OpenAICodexUsageSnapshot {
 		return nil
 	}
 
-	snapshot.UpdatedAt = time.Now().Format(time.RFC3339)
+	snapshot.UpdatedAt = observedAt.UTC().Format(time.RFC3339Nano)
 	return snapshot
 }
 
@@ -770,7 +792,7 @@ func buildCodexUsageExtraUpdates(snapshot *OpenAICodexUsageSnapshot, fallbackNow
 	if snapshot.PrimaryOverSecondaryPercent != nil {
 		updates["codex_primary_over_secondary_percent"] = *snapshot.PrimaryOverSecondaryPercent
 	}
-	updates["codex_usage_updated_at"] = baseTime.Format(time.RFC3339)
+	updates["codex_usage_updated_at"] = baseTime.UTC().Format(time.RFC3339Nano)
 
 	// 归一化到 5h/7d 规范字段
 	if normalized := snapshot.Normalize(); normalized != nil {
@@ -803,12 +825,15 @@ func buildCodexUsageExtraUpdates(snapshot *OpenAICodexUsageSnapshot, fallbackNow
 	return updates
 }
 
-// updateCodexUsageSnapshot saves the Codex usage snapshot to account's Extra field
+type codexUsageSnapshotWriter interface {
+	UpdateCodexUsageSnapshotIfNewer(ctx context.Context, accountID int64, observedAt time.Time, updates map[string]any) (bool, error)
+}
+
+// updateCodexUsageSnapshot saves the Codex usage snapshot to account's Extra field.
 // updateCodexUsageSnapshot 把 /responses 的 x-codex-* 全局头快照写入账号 codex_* Extra。
 // ⚠️ 调用方必须排除 spark 影子账号(account.IsShadow()):影子的 codex_* 仅由 QueryUsage
 // (/wham/usage bengalfox 道)更新,不能被全局头口径污染(外审第7轮 P1)。本函数仅持 accountID,
-// 无法在此自检影子,故守卫前置到各调用点。
-// 并把账号级官方利用率增量分摊给发起请求的用户（userID<=0 时跳过分摊）。
+// 无法在此自检影子,故守卫前置到各调用点。成员美元归因必须等 usage_log 落库后执行。
 func (s *OpenAIGatewayService) updateCodexUsageSnapshot(ctx context.Context, userID, accountID int64, snapshot *OpenAICodexUsageSnapshot) {
 	if snapshot == nil {
 		return
@@ -817,37 +842,66 @@ func (s *OpenAIGatewayService) updateCodexUsageSnapshot(ctx context.Context, use
 		return
 	}
 
-	// 用户配额分摊：不受快照持久化节流影响，确保每次响应都精确归属到对应用户。
-	// 后台 goroutine + 独立超时，避免阻塞响应主流程，并在请求 ctx 取消后仍能完成写入。
-	if s.accountWindowQuota != nil && s.accountWindowQuota.Enabled() && userID > 0 && accountID > 0 {
-		go func() {
-			attrCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			s.accountWindowQuota.Attribute(attrCtx, userID, accountID, snapshot)
-		}()
+	processingNow := time.Now()
+	observedAt := processingNow
+	if parsed, err := time.Parse(time.RFC3339Nano, snapshot.UpdatedAt); err == nil {
+		observedAt = parsed
 	}
-
-	now := time.Now()
-	updates := buildCodexUsageExtraUpdates(snapshot, now)
+	updates := buildCodexUsageExtraUpdates(snapshot, observedAt)
 	if len(updates) == 0 {
 		return
 	}
-	if !s.getCodexSnapshotThrottle().Allow(accountID, now) {
+	if !s.getCodexSnapshotThrottle().Allow(accountID, processingNow) {
 		return
 	}
-
+	writer, ok := s.accountRepo.(codexUsageSnapshotWriter)
+	if !ok {
+		return
+	}
 	go func() {
 		updateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = s.accountRepo.UpdateExtra(updateCtx, accountID, updates)
+		_, _ = writer.UpdateCodexUsageSnapshotIfNewer(updateCtx, accountID, observedAt, updates)
 	}()
 }
 
 func (s *OpenAIGatewayService) UpdateCodexUsageSnapshotFromHeaders(ctx context.Context, userID, accountID int64, headers http.Header) {
+	s.UpdateCodexUsageSnapshotFromHeadersAt(ctx, userID, accountID, headers, time.Now())
+}
+
+func (s *OpenAIGatewayService) UpdateCodexUsageSnapshotFromHeadersAt(ctx context.Context, userID, accountID int64, headers http.Header, observedAt time.Time) {
 	if accountID <= 0 || headers == nil {
 		return
 	}
-	if snapshot := ParseCodexRateLimitHeaders(headers); snapshot != nil {
+	if snapshot := parseCodexRateLimitHeadersAt(headers, observedAt); snapshot != nil {
 		s.updateCodexUsageSnapshot(ctx, userID, accountID, snapshot)
 	}
+}
+
+// attributeCodexUsageSnapshotAfterLog 必须在当前请求的 usage_log 确认落库后调用。
+// usageLog 的数据库 ID/CreatedAt 作为前向增量游标上界，避免重复刷新重扫历史。
+func (s *OpenAIGatewayService) attributeCodexUsageSnapshotAfterLog(ctx context.Context, userID, accountID int64, headers http.Header, observedAt time.Time, usageLog *UsageLog, inserted bool) {
+	if s == nil || s.accountWindowQuota == nil || !s.accountWindowQuota.Enabled() ||
+		userID <= 0 || accountID <= 0 || headers == nil || usageLog == nil {
+		return
+	}
+	snapshot := parseCodexRateLimitHeadersAt(headers, observedAt)
+	if snapshot == nil {
+		return
+	}
+	base := context.Background()
+	if ctx != nil {
+		base = context.WithoutCancel(ctx)
+	}
+	attrCtx, cancel := context.WithTimeout(base, 5*time.Second)
+	defer cancel()
+	s.accountWindowQuota.AttributeRecordedUsage(attrCtx, userID, accountID, snapshot, &AccountWindowUsageLogRef{
+		ID:        usageLog.ID,
+		CreatedAt: usageLog.CreatedAt,
+		UserID:    usageLog.UserID,
+		CostUSD:   usageLog.TotalCost,
+		Inserted:  inserted,
+		RequestID: usageLog.RequestID,
+		APIKeyID:  usageLog.APIKeyID,
+	})
 }

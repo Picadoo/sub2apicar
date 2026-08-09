@@ -1221,7 +1221,7 @@ func normalizeGrokRateLimitResetAt(account *Account, resetAt, now time.Time) tim
 	return resetAt
 }
 
-type grokRateLimitExtendingRepository interface {
+type accountRateLimitExtendingRepository interface {
 	SetRateLimitedIfLater(ctx context.Context, id int64, resetAt time.Time) error
 }
 
@@ -1260,7 +1260,7 @@ func persistGrokRateLimit(ctx context.Context, repo AccountRepository, account *
 	stateCtx, cancel := openAIAccountStateContext(ctx)
 	defer cancel()
 	var err error
-	if extendingRepo, ok := repo.(grokRateLimitExtendingRepository); ok {
+	if extendingRepo, ok := repo.(accountRateLimitExtendingRepository); ok {
 		err = extendingRepo.SetRateLimitedIfLater(stateCtx, account.ID, resetAt)
 	} else {
 		err = repo.SetRateLimited(stateCtx, account.ID, resetAt)
