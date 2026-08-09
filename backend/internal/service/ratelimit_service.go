@@ -30,6 +30,7 @@ type RateLimitService struct {
 	settingService        *SettingService
 	tokenCacheInvalidator TokenCacheInvalidator
 	runtimeBlocker        AccountRuntimeBlocker
+	accountWindowQuota    *AccountWindowQuotaService
 	usageCacheMu          sync.RWMutex
 	usageCache            map[int64]*geminiUsageCacheEntry
 }
@@ -116,6 +117,10 @@ func (s *RateLimitService) SetAccountRuntimeBlocker(blocker AccountRuntimeBlocke
 	s.runtimeBlocker = blocker
 }
 
+func (s *RateLimitService) SetAccountWindowQuotaService(quota *AccountWindowQuotaService) {
+	s.accountWindowQuota = quota
+}
+
 func (s *RateLimitService) IsOpenAIAdvancedSchedulerStickyWeightedEnabled(ctx context.Context) bool {
 	if s == nil || s.settingService == nil {
 		return false
@@ -173,9 +178,16 @@ func (s *RateLimitService) CheckErrorPolicy(ctx context.Context, account *Accoun
 	return ErrorPolicyNone
 }
 
-// HandleUpstreamError 处理上游错误响应，标记账号状态
-// 返回是否应该停止该账号的调度
-func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, responseBody []byte, requestedModel ...string) (shouldDisable bool) {
+// HandleUpstreamError 处理上游错误响应，标记账号状态。
+// 未显式提供传输观测时间的兼容调用使用当前时间；HTTP/WS 转发路径应调用 HandleUpstreamErrorAt。
+func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Account, statusCode int, headers http.Header, responseBody []byte, requestedModel ...string) bool {
+	return s.HandleUpstreamErrorAt(ctx, account, statusCode, headers, responseBody, time.Now(), requestedModel...)
+}
+
+func (s *RateLimitService) HandleUpstreamErrorAt(ctx context.Context, account *Account, statusCode int, headers http.Header, responseBody []byte, observedAt time.Time, requestedModel ...string) (shouldDisable bool) {
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
 	ctx = withTempUnschedulableModel(ctx, requestedModel)
 	customErrorCodesEnabled := account.IsCustomErrorCodesEnabled()
 
@@ -373,7 +385,7 @@ func (s *RateLimitService) HandleUpstreamError(ctx context.Context, account *Acc
 		)
 		shouldDisable = s.handle403(ctx, account, upstreamMsg, responseBody)
 	case 429:
-		s.handle429(ctx, account, headers, responseBody)
+		s.handle429At(ctx, account, headers, responseBody, observedAt)
 		shouldDisable = false
 	case 529:
 		s.handle529(ctx, account)
@@ -924,9 +936,20 @@ func (s *RateLimitService) handleCustomErrorCode(ctx context.Context, account *A
 	slog.Warn("account_disabled_custom_error", "account_id", account.ID, "status_code", statusCode, "error", errorMsg)
 }
 
-// handle429 处理429限流错误
-// 解析响应头获取重置时间，标记账号为限流状态
+func setAccountRateLimitedMonotonic(ctx context.Context, repo AccountRepository, accountID int64, resetAt time.Time) error {
+	if extendingRepo, ok := repo.(accountRateLimitExtendingRepository); ok {
+		return extendingRepo.SetRateLimitedIfLater(ctx, accountID, resetAt)
+	}
+	return repo.SetRateLimited(ctx, accountID, resetAt)
+}
+
+// handle429 兼容内部测试和无传输时间调用。
 func (s *RateLimitService) handle429(ctx context.Context, account *Account, headers http.Header, responseBody []byte) {
+	s.handle429At(ctx, account, headers, responseBody, time.Now())
+}
+
+// handle429At 解析响应头获取重置时间，标记账号为限流状态，并用真实响应观测时间处理官方快照。
+func (s *RateLimitService) handle429At(ctx context.Context, account *Account, headers http.Header, responseBody []byte, observedAt time.Time) {
 	// Spark 影子：限流/熔断状态 100% 由 QueryUsage(/wham/usage body 的 codex_bengalfox)驱动。
 	// /responses 的 429 携带的 x-codex-*/usage_limit_reached 是 global codex 道(plan/spec §8),
 	// 套到影子会把 spark 误耦合到 global 窗口——即便 spark 仍有配额也会被冷却到 global reset,
@@ -938,10 +961,14 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 	// 1. OpenAI 平台：优先尝试解析 x-codex-* 响应头（用于 rate_limit_exceeded）
 	if account.Platform == PlatformOpenAI {
 		persistOpenAI429PlanType(ctx, s.accountRepo, account, responseBody)
-		s.persistOpenAICodexSnapshot(ctx, account, headers)
-		if resetAt := s.calculateOpenAI429ResetTime(headers); resetAt != nil {
+		s.persistOpenAICodexSnapshotAt(ctx, account, headers, observedAt)
+		if resetAt := s.calculateOpenAI429ResetTimeAt(headers, observedAt); resetAt != nil {
+			// 已经过期的迟到 429 不得重新封禁账号，也不得覆盖更晚的限流边界。
+			if !resetAt.After(time.Now()) {
+				return
+			}
 			s.notifyAccountSchedulingBlocked(account, *resetAt, "429")
-			if err := s.accountRepo.SetRateLimited(ctx, account.ID, *resetAt); err != nil {
+			if err := setAccountRateLimitedMonotonic(ctx, s.accountRepo, account.ID, *resetAt); err != nil {
 				slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
 				return
 			}
@@ -982,8 +1009,11 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 			// 尝试解析 OpenAI 的 usage_limit_reached 错误
 			if resetAt := parseOpenAIRateLimitResetTime(responseBody); resetAt != nil {
 				resetTime := time.Unix(*resetAt, 0)
+				if !resetTime.After(time.Now()) {
+					return
+				}
 				s.notifyAccountSchedulingBlocked(account, resetTime, "429")
-				if err := s.accountRepo.SetRateLimited(ctx, account.ID, resetTime); err != nil {
+				if err := setAccountRateLimitedMonotonic(ctx, s.accountRepo, account.ID, resetTime); err != nil {
 					slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
 					return
 				}
@@ -1013,12 +1043,12 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 				"account_id", account.ID,
 				"platform", account.Platform,
 				"reason", "no rate limit reset time in headers, likely not a real rate limit")
-			s.apply429FallbackRateLimit(ctx, account, "anthropic_no_reset_time")
+			s.apply429FallbackRateLimitAt(ctx, account, "anthropic_no_reset_time", observedAt)
 			return
 		}
 
 		// 其他平台：没有重置时间，使用可配置的秒级默认回避，避免误伤长时间不可调度。
-		s.apply429FallbackRateLimit(ctx, account, "no_reset_time")
+		s.apply429FallbackRateLimitAt(ctx, account, "no_reset_time", observedAt)
 		return
 	}
 
@@ -1026,7 +1056,7 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 	ts, err := strconv.ParseInt(resetTimestamp, 10, 64)
 	if err != nil {
 		slog.Warn("rate_limit_reset_parse_failed", "reset_timestamp", resetTimestamp, "error", err)
-		s.apply429FallbackRateLimit(ctx, account, "reset_parse_failed")
+		s.apply429FallbackRateLimitAt(ctx, account, "reset_parse_failed", observedAt)
 		return
 	}
 
@@ -1050,16 +1080,26 @@ func (s *RateLimitService) handle429(ctx context.Context, account *Account, head
 }
 
 func (s *RateLimitService) apply429FallbackRateLimit(ctx context.Context, account *Account, reason string) {
+	s.apply429FallbackRateLimitAt(ctx, account, reason, time.Now())
+}
+
+func (s *RateLimitService) apply429FallbackRateLimitAt(ctx context.Context, account *Account, reason string, observedAt time.Time) {
 	cooldown, enabled := s.get429FallbackCooldown(ctx, account)
 	if !enabled {
 		slog.Info("rate_limit_429_fallback_ignored", "account_id", account.ID, "platform", account.Platform, "reason", reason)
 		return
 	}
-
-	resetAt := time.Now().Add(cooldown)
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
+	resetAt := observedAt.Add(cooldown)
+	if !resetAt.After(time.Now()) {
+		slog.Info("rate_limit_429_stale_fallback_ignored", "account_id", account.ID, "platform", account.Platform, "reason", reason, "observed_at", observedAt.UTC())
+		return
+	}
 	slog.Warn("rate_limit_429_fallback_used", "account_id", account.ID, "platform", account.Platform, "reason", reason, "using_default", cooldown.String())
 	s.notifyAccountSchedulingBlocked(account, resetAt, "429_fallback")
-	if err := s.accountRepo.SetRateLimited(ctx, account.ID, resetAt); err != nil {
+	if err := setAccountRateLimitedMonotonic(ctx, s.accountRepo, account.ID, resetAt); err != nil {
 		slog.Warn("rate_limit_set_failed", "account_id", account.ID, "error", err)
 	}
 }
@@ -1092,10 +1132,17 @@ func clampRateLimit429CooldownSeconds(seconds int) int {
 	return seconds
 }
 
-// calculateOpenAI429ResetTime 从 OpenAI 429 响应头计算正确的重置时间
-// 返回 nil 表示无法从响应头中确定重置时间
+// calculateOpenAI429ResetTime 从 OpenAI 429 响应头计算正确的重置时间。
+// 兼容调用使用当前时间；真实转发路径必须调用 calculateOpenAI429ResetTimeAt。
 func calculateOpenAI429ResetTime(headers http.Header) *time.Time {
-	snapshot := ParseCodexRateLimitHeaders(headers)
+	return calculateOpenAI429ResetTimeAt(headers, time.Now())
+}
+
+func calculateOpenAI429ResetTimeAt(headers http.Header, observedAt time.Time) *time.Time {
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
+	snapshot := parseCodexRateLimitHeadersAt(headers, observedAt)
 	if snapshot == nil {
 		return nil
 	}
@@ -1105,7 +1152,7 @@ func calculateOpenAI429ResetTime(headers http.Header) *time.Time {
 		return nil
 	}
 
-	now := time.Now()
+	now := observedAt
 
 	// 判断哪个限制被触发（used_percent >= 100）
 	is7dExhausted := normalized.Used7dPercent != nil && *normalized.Used7dPercent >= 100
@@ -1142,6 +1189,10 @@ func calculateOpenAI429ResetTime(headers http.Header) *time.Time {
 
 func (s *RateLimitService) calculateOpenAI429ResetTime(headers http.Header) *time.Time {
 	return calculateOpenAI429ResetTime(headers)
+}
+
+func (s *RateLimitService) calculateOpenAI429ResetTimeAt(headers http.Header, observedAt time.Time) *time.Time {
+	return calculateOpenAI429ResetTimeAt(headers, observedAt)
 }
 
 // anthropic429Result holds the parsed Anthropic 429 rate-limit information.
@@ -1436,6 +1487,10 @@ func pickSooner(a, b *time.Time) *time.Time {
 }
 
 func (s *RateLimitService) persistOpenAICodexSnapshot(ctx context.Context, account *Account, headers http.Header) {
+	s.persistOpenAICodexSnapshotAt(ctx, account, headers, time.Now())
+}
+
+func (s *RateLimitService) persistOpenAICodexSnapshotAt(ctx context.Context, account *Account, headers http.Header, observedAt time.Time) {
 	if s == nil || s.accountRepo == nil || account == nil || headers == nil {
 		return
 	}
@@ -1444,15 +1499,29 @@ func (s *RateLimitService) persistOpenAICodexSnapshot(ctx context.Context, accou
 	if account.IsShadow() {
 		return
 	}
-	snapshot := ParseCodexRateLimitHeaders(headers)
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
+	snapshot := parseCodexRateLimitHeadersAt(headers, observedAt)
 	if snapshot == nil {
 		return
 	}
-	updates := buildCodexUsageExtraUpdates(snapshot, time.Now())
+	// 429 也携带官方账号窗口快照；它必须进入与成功响应相同的 PostgreSQL checkpoint + 美元份额事务。
+	if s.accountWindowQuota != nil && account.IsWindowQuotaShared() {
+		if err := s.accountWindowQuota.SyncOfficialSnapshot(ctx, account.ID, snapshot); err != nil {
+			slog.Warn("openai_codex_429_attribution_failed", "account_id", account.ID, "error", err)
+		}
+	}
+	updates := buildCodexUsageExtraUpdates(snapshot, observedAt)
 	if len(updates) == 0 {
 		return
 	}
-	if err := s.accountRepo.UpdateExtra(ctx, account.ID, updates); err != nil {
+	writer, ok := s.accountRepo.(codexUsageSnapshotWriter)
+	if !ok {
+		slog.Warn("openai_codex_snapshot_conditional_writer_unavailable", "account_id", account.ID)
+		return
+	}
+	if _, err := writer.UpdateCodexUsageSnapshotIfNewer(ctx, account.ID, observedAt, updates); err != nil {
 		slog.Warn("openai_codex_snapshot_persist_failed", "account_id", account.ID, "error", err)
 	}
 }

@@ -39,6 +39,10 @@ func (r *sparkShadowUsageTestRepo) UpdateExtra(_ context.Context, _ int64, updat
 	return nil
 }
 
+func (r *sparkShadowUsageTestRepo) UpdateCodexUsageSnapshotIfNewer(ctx context.Context, accountID int64, _ time.Time, updates map[string]any) (bool, error) {
+	return true, r.UpdateExtra(ctx, accountID, updates)
+}
+
 // TestGetOpenAIUsage_SparkShadow_WritesExtraAndReturnsNonEmptyWindows covers
 // two assertions required by Task 3.2:
 //
@@ -61,6 +65,7 @@ func TestGetOpenAIUsage_SparkShadow_WritesExtraAndReturnsNonEmptyWindows(t *test
 		Type:            AccountTypeOAuth,
 		Status:          StatusActive,
 		QuotaDimension:  QuotaDimensionSpark,
+		Extra:           map[string]any{AccountExtraWindowQuotaShared: true},
 	}
 	parent := &Account{
 		ID:       100,
@@ -93,6 +98,18 @@ func TestGetOpenAIUsage_SparkShadow_WritesExtraAndReturnsNonEmptyWindows(t *test
 		capturedAccountID = r.Header.Get("chatgpt-account-id")
 		w.Header().Set("content-type", "application/json")
 		resp := OpenAIQuotaUsage{
+			RateLimit: &OpenAIRateLimit{
+				PrimaryWindow: &OpenAIRateLimitWindow{
+					UsedPercent:        92.5,
+					ResetAfterSeconds:  90,
+					LimitWindowSeconds: 18000,
+				},
+				SecondaryWindow: &OpenAIRateLimitWindow{
+					UsedPercent:        82.0,
+					ResetAfterSeconds:  180,
+					LimitWindowSeconds: 604800,
+				},
+			},
 			AdditionalRateLimits: []OpenAIAdditionalRateLimit{
 				{
 					MeteredFeature: "codex_bengalfox",
@@ -118,9 +135,12 @@ func TestGetOpenAIUsage_SparkShadow_WritesExtraAndReturnsNonEmptyWindows(t *test
 	defer srv.Close()
 
 	quotaService := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv))
+	windowRepo := &stubWindowRepo{}
+	windowQuota, _ := newQuotaServiceWithMiniRedis(t, windowRepo)
 	svc := &AccountUsageService{
 		accountRepo:        repo,
 		openAIQuotaService: quotaService,
+		accountWindowQuota: windowQuota,
 	}
 
 	usage, err := svc.getOpenAIUsage(ctx, shadow, true /*force*/)
@@ -148,4 +168,12 @@ func TestGetOpenAIUsage_SparkShadow_WritesExtraAndReturnsNonEmptyWindows(t *test
 		"returned UsageInfo.FiveHour must be non-nil (rebuild from merged Extra must happen)")
 	require.NotNil(t, usage.SevenDay,
 		"returned UsageInfo.SevenDay must be non-nil (rebuild from merged Extra must happen)")
+
+	// Assertion C: the official /wham/usage snapshot must also drive the same
+	// account-window dollar attribution path, including delayed official increases.
+	require.Len(t, windowRepo.costCalls, 2)
+	require.Equal(t, WindowType5h, windowRepo.costCalls[0].window)
+	require.InDelta(t, 42.5, windowRepo.costCalls[0].officialPercent, 1e-9)
+	require.Equal(t, WindowType7d, windowRepo.costCalls[1].window)
+	require.InDelta(t, 10.0, windowRepo.costCalls[1].officialPercent, 1e-9)
 }

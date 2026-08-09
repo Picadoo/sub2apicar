@@ -26,6 +26,7 @@ type openAIWSRateLimitSignalRepo struct {
 type openAICodexSnapshotAsyncRepo struct {
 	stubOpenAIAccountRepo
 	updateExtraCh chan map[string]any
+	observedAtCh  chan time.Time
 	rateLimitCh   chan time.Time
 }
 
@@ -48,6 +49,10 @@ func (r *openAIWSRateLimitSignalRepo) UpdateExtra(_ context.Context, _ int64, up
 	return nil
 }
 
+func (r *openAIWSRateLimitSignalRepo) UpdateCodexUsageSnapshotIfNewer(ctx context.Context, accountID int64, _ time.Time, updates map[string]any) (bool, error) {
+	return true, r.UpdateExtra(ctx, accountID, updates)
+}
+
 func (r *openAICodexSnapshotAsyncRepo) SetRateLimited(_ context.Context, _ int64, resetAt time.Time) error {
 	if r.rateLimitCh != nil {
 		r.rateLimitCh <- resetAt
@@ -64,6 +69,13 @@ func (r *openAICodexSnapshotAsyncRepo) UpdateExtra(_ context.Context, _ int64, u
 		r.updateExtraCh <- copied
 	}
 	return nil
+}
+
+func (r *openAICodexSnapshotAsyncRepo) UpdateCodexUsageSnapshotIfNewer(ctx context.Context, accountID int64, observedAt time.Time, updates map[string]any) (bool, error) {
+	if r.observedAtCh != nil {
+		r.observedAtCh <- observedAt
+	}
+	return true, r.UpdateExtra(ctx, accountID, updates)
 }
 
 func (r *openAICodexExtraListRepo) SetRateLimited(_ context.Context, _ int64, resetAt time.Time) error {
@@ -237,6 +249,67 @@ func TestOpenAIGatewayService_Forward_WSv2Handshake429PersistsRateLimit(t *testi
 	require.Len(t, repo.rateLimitCalls, 1)
 	require.NotEmpty(t, repo.updateExtra, "握手 429 的 x-codex 头应立即落库")
 	require.Contains(t, repo.updateExtra[0], "codex_usage_updated_at")
+}
+
+func TestOpenAIGatewayService_PersistWSRateLimitSignalUsesHandshakeObservation(t *testing.T) {
+	tests := []struct {
+		name        string
+		observedAt  time.Time
+		wantLimited bool
+	}{
+		{
+			name:        "active observed window",
+			observedAt:  time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Second),
+			wantLimited: true,
+		},
+		{
+			name:        "expired delayed signal",
+			observedAt:  time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second),
+			wantLimited: false,
+		},
+	}
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &openAIWSRateLimitSignalRepo{}
+			rateSvc := &RateLimitService{accountRepo: repo}
+			svc := &OpenAIGatewayService{rateLimitService: rateSvc}
+			account := &Account{
+				ID:          int64(610 + i),
+				Platform:    PlatformOpenAI,
+				Type:        AccountTypeOAuth,
+				Status:      StatusActive,
+				Schedulable: true,
+			}
+			headers := make(http.Header)
+			headers.Set("x-codex-primary-used-percent", "100")
+			headers.Set("x-codex-primary-reset-after-seconds", "3600")
+			headers.Set("x-codex-primary-window-minutes", "300")
+
+			svc.persistOpenAIWSRateLimitSignal(
+				context.Background(),
+				account,
+				headers,
+				nil,
+				tt.observedAt,
+				"rate_limit_exceeded",
+				"usage_limit_reached",
+				"The usage limit has been reached",
+			)
+
+			require.Len(t, repo.updateExtra, 1)
+			require.Equal(t, tt.observedAt.Format(time.RFC3339Nano), repo.updateExtra[0]["codex_usage_updated_at"])
+			require.Equal(t, tt.observedAt.Add(time.Hour).Format(time.RFC3339), repo.updateExtra[0]["codex_5h_reset_at"])
+			if tt.wantLimited {
+				require.Len(t, repo.rateLimitCalls, 1)
+				require.WithinDuration(t, tt.observedAt.Add(time.Hour), repo.rateLimitCalls[0], time.Second)
+				require.True(t, svc.isOpenAIAccountRuntimeBlocked(account))
+			} else {
+				require.Empty(t, repo.rateLimitCalls)
+				require.False(t, svc.isOpenAIAccountRuntimeBlocked(account))
+			}
+		})
+	}
 }
 
 func TestOpenAIGatewayService_Forward_WSv2Handshake502RecordsModelTransient(t *testing.T) {
@@ -483,6 +556,35 @@ func TestOpenAIGatewayService_UpdateCodexUsageSnapshot_ThrottlesExtraWrites(t *t
 	case updates := <-repo.updateExtraCh:
 		t.Fatalf("unexpected second codex snapshot write: %v", updates)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+func TestOpenAIGatewayService_UpdateCodexUsageSnapshotFromHeadersAtPreservesTransportObservation(t *testing.T) {
+	observedAt := time.Date(2026, time.August, 2, 10, 11, 12, 345678900, time.UTC)
+	repo := &openAICodexSnapshotAsyncRepo{
+		updateExtraCh: make(chan map[string]any, 1),
+		observedAtCh:  make(chan time.Time, 1),
+	}
+	svc := &OpenAIGatewayService{accountRepo: repo}
+	headers := make(http.Header)
+	headers.Set("x-codex-primary-used-percent", "12.5")
+	headers.Set("x-codex-primary-reset-after-seconds", "3600")
+	headers.Set("x-codex-primary-window-minutes", "300")
+
+	svc.UpdateCodexUsageSnapshotFromHeadersAt(context.Background(), 1, 603, headers, observedAt)
+
+	select {
+	case got := <-repo.observedAtCh:
+		require.Equal(t, observedAt, got)
+	case <-time.After(2 * time.Second):
+		t.Fatal("等待带观测时间的 codex 快照落库超时")
+	}
+	select {
+	case updates := <-repo.updateExtraCh:
+		require.Equal(t, observedAt.Format(time.RFC3339Nano), updates["codex_usage_updated_at"])
+		require.Equal(t, observedAt.Add(time.Hour).Format(time.RFC3339), updates["codex_5h_reset_at"])
+	case <-time.After(2 * time.Second):
+		t.Fatal("等待 codex 快照更新内容超时")
 	}
 }
 

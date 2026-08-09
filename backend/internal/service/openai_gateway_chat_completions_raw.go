@@ -373,6 +373,8 @@ func (s *OpenAIGatewayService) streamRawChatCompletions(
 		Stream:                        true,
 		Duration:                      time.Since(startTime),
 		FirstTokenMs:                  firstTokenMs,
+		ResponseHeaders:               resp.Header.Clone(),
+		ResponseHeadersObservedAt:     HTTPUpstreamResponseHeadersObservedAt(resp),
 	}, nil
 }
 
@@ -466,6 +468,8 @@ func (s *OpenAIGatewayService) bufferRawChatCompletions(
 		ServiceTier:                   serviceTier,
 		Stream:                        false,
 		Duration:                      time.Since(startTime),
+		ResponseHeaders:               resp.Header.Clone(),
+		ResponseHeadersObservedAt:     HTTPUpstreamResponseHeadersObservedAt(resp),
 	}, nil
 }
 

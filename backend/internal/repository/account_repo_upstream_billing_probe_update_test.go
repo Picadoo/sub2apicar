@@ -285,6 +285,40 @@ func TestUpdateExtraNilProbeRemovesKeyInsteadOfWritingJSONNull(t *testing.T) {
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestUpdateCodexUsageSnapshotIfNewerUsesAtomicObservationGuard(t *testing.T) {
+	tests := []struct {
+		name         string
+		rowsAffected int64
+		wantUpdated  bool
+	}{
+		{name: "newer snapshot is persisted", rowsAffected: 1, wantUpdated: true},
+		{name: "late or duplicate snapshot is rejected", rowsAffected: 0, wantUpdated: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = db.Close() })
+			client := dbent.NewClient(dbent.Driver(entsql.OpenDB(dialect.Postgres, db)))
+			t.Cleanup(func() { _ = client.Close() })
+
+			observedAt := time.Date(2026, time.August, 2, 10, 11, 12, 345678900, time.UTC)
+			mock.ExpectExec(`(?s)UPDATE accounts.*codex_usage_observed_unix_nano.*::numeric < \$3::numeric.*codex_usage_updated_at.*< \$4`).
+				WithArgs(sqlmock.AnyArg(), int64(27), observedAt.UnixNano(), observedAt.Truncate(time.Second).Format(time.RFC3339)).
+				WillReturnResult(sqlmock.NewResult(0, tt.rowsAffected))
+			repo := newAccountRepositoryWithSQL(client, db, nil)
+
+			updated, err := repo.UpdateCodexUsageSnapshotIfNewer(context.Background(), 27, observedAt, map[string]any{
+				"codex_5h_used_percent": 12.5,
+			})
+
+			require.NoError(t, err)
+			require.Equal(t, tt.wantUpdated, updated)
+			require.NoError(t, mock.ExpectationsWereMet())
+		})
+	}
+}
+
 func TestBulkUpdateNilProbeRemovesKeyInsteadOfWritingJSONNull(t *testing.T) {
 	exec := &recordingSQLExecutor{result: rowsAffectedResult(1)}
 	repo := newAccountRepositoryWithSQL(nil, exec, nil)

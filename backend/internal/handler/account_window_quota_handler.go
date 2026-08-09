@@ -25,19 +25,22 @@ func NewAccountWindowQuotaHandler(quota *service.AccountWindowQuotaService) *Acc
 }
 
 type accountWindowQuotaItem struct {
-	AccountID             int64   `json:"account_id"`
-	WindowType            string  `json:"window_type"`
-	LimitPercent          float64 `json:"limit_percent"`
-	UsedPercent           float64 `json:"used_percent"`
-	RemainingPercent      float64 `json:"remaining_percent"`
-	DonateFraction        float64 `json:"donate_fraction"`         // 本窗口救急池捐赠比例（占自己份额）
-	MinimumDonateFraction float64 `json:"minimum_donate_fraction"` // 已借出额度锁定后的最低捐赠比例
-	EffectiveLimitPercent float64 `json:"effective_limit_percent"` // 当前实际可用上限（含救急池增量 / 捐赠自留约束）
-	PoolAvailablePercent  float64 `json:"pool_available_percent"`  // 该账号该窗口尚未被借走的救急池余额
-	AccountUsedPercent    float64 `json:"account_used_percent"`    // 该账号该窗口全员已用之和（账号级利用率）
-	CeilingPercent        float64 `json:"ceiling_percent"`         // 该窗口账号总额上限（官方安全水位）
-	WindowResetAt         *string `json:"window_reset_at,omitempty"`
-	ResetInSeconds        *int64  `json:"reset_in_seconds,omitempty"`
+	AccountID                  int64    `json:"account_id"`
+	WindowType                 string   `json:"window_type"`
+	LimitPercent               float64  `json:"limit_percent"`
+	UsedPercent                float64  `json:"used_percent"`
+	RemainingPercent           float64  `json:"remaining_percent"`
+	DonateFraction             float64  `json:"donate_fraction"`                        // 本窗口救急池捐赠比例（占自己份额）
+	MinimumDonateFraction      float64  `json:"minimum_donate_fraction"`                // 已借出额度锁定后的最低捐赠比例
+	EffectiveLimitPercent      float64  `json:"effective_limit_percent"`                // 当前实际可用上限（含救急池增量 / 捐赠自留约束）
+	PoolAvailablePercent       float64  `json:"pool_available_percent"`                 // 该账号该窗口尚未被借走的救急池余额
+	AccountUsedPercent         *float64 `json:"account_used_percent,omitempty"`         // OpenAI 官方账号窗口已用百分比；缺失时不返回
+	AccountAttributedPercent   *float64 `json:"account_attributed_percent,omitempty"`   // 当前活跃成员已归因之和
+	AccountUnattributedPercent *float64 `json:"account_unattributed_percent,omitempty"` // 官方总量减成员归因
+	CeilingPercent             float64  `json:"ceiling_percent"`                        // 该窗口账号总额上限（官方安全水位）
+	ForceUnattributed          bool     `json:"force_unattributed"`                     // 账号处于「官方用量强制未归因」模式
+	WindowResetAt              *string  `json:"window_reset_at,omitempty"`
+	ResetInSeconds             *int64   `json:"reset_in_seconds,omitempty"`
 }
 
 // GetMyWindows 返回当前登录用户的全部窗口配额（含救急池信息）。
@@ -84,53 +87,25 @@ func buildWindowItemsFromViews(views []service.UserWindowQuotaView, now time.Tim
 			remaining = 0
 		}
 		item := accountWindowQuotaItem{
-			AccountID:             v.AccountID,
-			WindowType:            v.WindowType,
-			LimitPercent:          v.LimitPercent,
-			UsedPercent:           v.AttributedPercent,
-			RemainingPercent:      remaining,
-			DonateFraction:        v.DonateFraction,
-			MinimumDonateFraction: v.MinimumDonateFraction,
-			EffectiveLimitPercent: v.EffectiveLimitPercent,
-			PoolAvailablePercent:  v.PoolAvailablePercent,
-			AccountUsedPercent:    v.AccountUsedPercent,
-			CeilingPercent:        v.CeilingPercent,
-		}
+			AccountID:                  v.AccountID,
+			WindowType:                 v.WindowType,
+			LimitPercent:               v.LimitPercent,
+			UsedPercent:                v.AttributedPercent,
+			RemainingPercent:           remaining,
+			DonateFraction:             v.DonateFraction,
+			MinimumDonateFraction:      v.MinimumDonateFraction,
+			EffectiveLimitPercent:      v.EffectiveLimitPercent,
+			PoolAvailablePercent:       v.PoolAvailablePercent,
+			AccountUsedPercent:         v.AccountUsedPercent,
+			AccountAttributedPercent:   v.AccountAttributedPercent,
+		AccountUnattributedPercent: v.AccountUnattributedPercent,
+		CeilingPercent:             v.CeilingPercent,
+		ForceUnattributed:          v.ForceUnattributed,
+	}
 		if v.WindowResetAt != nil {
 			iso := v.WindowResetAt.UTC().Format(time.RFC3339)
 			item.WindowResetAt = &iso
 			secs := int64(v.WindowResetAt.Sub(now).Seconds())
-			if secs < 0 {
-				secs = 0
-			}
-			item.ResetInSeconds = &secs
-		}
-		windows = append(windows, item)
-	}
-	return windows
-}
-
-// buildWindowItems 把配额台账记录转成展示项（管理端按用户查看，不含救急池信息）。
-func buildWindowItems(records []service.UserAccountWindowQuotaRecord, now time.Time) []accountWindowQuotaItem {
-	windows := make([]accountWindowQuotaItem, 0, len(records))
-	for _, r := range records {
-		remaining := r.LimitPercent - r.AttributedPercent
-		if remaining < 0 {
-			remaining = 0
-		}
-		item := accountWindowQuotaItem{
-			AccountID:             r.AccountID,
-			WindowType:            r.WindowType,
-			LimitPercent:          r.LimitPercent,
-			UsedPercent:           r.AttributedPercent,
-			RemainingPercent:      remaining,
-			DonateFraction:        r.DonatePoolFraction,
-			EffectiveLimitPercent: r.LimitPercent,
-		}
-		if r.WindowResetAt != nil {
-			iso := r.WindowResetAt.UTC().Format(time.RFC3339)
-			item.WindowResetAt = &iso
-			secs := int64(r.WindowResetAt.Sub(now).Seconds())
 			if secs < 0 {
 				secs = 0
 			}
@@ -153,12 +128,12 @@ func (h *AccountWindowQuotaHandler) AdminGetUserWindows(c *gin.Context) {
 		response.Success(c, gin.H{"enabled": false, "windows": []accountWindowQuotaItem{}})
 		return
 	}
-	records, err := h.quota.ListUserWindows(c.Request.Context(), userID)
+	views, err := h.quota.ListUserWindowsWithPool(c.Request.Context(), userID)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
 	}
-	response.Success(c, gin.H{"enabled": true, "windows": buildWindowItems(records, time.Now())})
+	response.Success(c, gin.H{"enabled": true, "windows": buildWindowItemsFromViews(views, time.Now())})
 }
 
 type adminWindowQuotaOverviewItem struct {
@@ -178,13 +153,15 @@ type adminWindowQuotaOverviewItem struct {
 }
 
 type adminWindowQuotaSummaryItem struct {
-	AccountID            int64   `json:"account_id"`
-	WindowType           string  `json:"window_type"`
-	MemberCount          int     `json:"member_count"`
-	ConfiguredSumPercent float64 `json:"configured_sum_percent"`
-	UsedSumPercent       float64 `json:"used_sum_percent"`
-	CeilingPercent       float64 `json:"ceiling_percent"`
-	Overallocated        bool    `json:"overallocated"`
+	AccountID            int64    `json:"account_id"`
+	WindowType           string   `json:"window_type"`
+	MemberCount          int      `json:"member_count"`
+	ConfiguredSumPercent float64  `json:"configured_sum_percent"`
+	AttributedSumPercent float64  `json:"attributed_sum_percent"`
+	OfficialUsedPercent  *float64 `json:"used_sum_percent,omitempty"` // 兼容原 JSON 字段名，值只来自 OpenAI 官方快照
+	UnattributedPercent  *float64 `json:"unattributed_percent,omitempty"`
+	CeilingPercent       float64  `json:"ceiling_percent"`
+	Overallocated        bool     `json:"overallocated"`
 }
 
 func buildOverviewItems(records []service.AdminWindowQuotaOverviewRow, now time.Time) []adminWindowQuotaOverviewItem {
@@ -235,7 +212,9 @@ func buildSummaryItems(records []service.AdminWindowQuotaSummary) []adminWindowQ
 			WindowType:           summary.WindowType,
 			MemberCount:          summary.MemberCount,
 			ConfiguredSumPercent: summary.ConfiguredSumPercent,
-			UsedSumPercent:       summary.UsedSumPercent,
+			AttributedSumPercent: summary.AttributedSumPercent,
+			OfficialUsedPercent:  summary.OfficialUsedPercent,
+			UnattributedPercent:  summary.UnattributedPercent,
 			CeilingPercent:       summary.CeilingPercent,
 			Overallocated:        summary.Overallocated,
 		})
@@ -363,7 +342,7 @@ type setAccountWindowMembersRequest struct {
 	UserIDs []int64 `json:"user_ids"`
 }
 
-// AdminSetAccountMembers 显式指定拼车账号成员；未使用过的用户也会创建 5h/7d 配额并立即均分。
+// AdminSetAccountMembers 显式同步拼车账号成员；保留已有成员手工额度，新成员仅创建安全默认额度。
 // PUT /api/v1/admin/account-window-quotas/accounts/:id/members
 func (h *AccountWindowQuotaHandler) AdminSetAccountMembers(c *gin.Context) {
 	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)

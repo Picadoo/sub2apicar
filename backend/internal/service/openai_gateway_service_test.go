@@ -59,6 +59,10 @@ func (r *snapshotUpdateAccountRepo) UpdateExtra(ctx context.Context, id int64, u
 	return nil
 }
 
+func (r *snapshotUpdateAccountRepo) UpdateCodexUsageSnapshotIfNewer(ctx context.Context, accountID int64, _ time.Time, updates map[string]any) (bool, error) {
+	return true, r.UpdateExtra(ctx, accountID, updates)
+}
+
 func (r stubOpenAIAccountRepo) GetByID(ctx context.Context, id int64) (*Account, error) {
 	for i := range r.accounts {
 		if r.accounts[i].ID == id {

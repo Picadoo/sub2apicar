@@ -761,9 +761,9 @@ func (s *GatewayService) invalidNonStreamingJSONFailoverError(
 
 	if s.rateLimitService != nil && account != nil {
 		if len(requestedModel) > 0 {
-			s.rateLimitService.HandleUpstreamError(ctx, account, statusCode, resp.Header, body, requestedModel[0])
+			s.rateLimitService.HandleUpstreamErrorAt(ctx, account, statusCode, resp.Header, body, HTTPUpstreamResponseHeadersObservedAt(resp), requestedModel[0])
 		} else {
-			s.rateLimitService.HandleUpstreamError(ctx, account, statusCode, resp.Header, body)
+			s.rateLimitService.HandleUpstreamErrorAt(ctx, account, statusCode, resp.Header, body, HTTPUpstreamResponseHeadersObservedAt(resp))
 		}
 	}
 

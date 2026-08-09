@@ -1,10 +1,15 @@
 package repository
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,19 +23,684 @@ type userAccountWindowQuotaRepository struct {
 	client *dbent.Client
 }
 
+var errAccountWindowStaleResetBoundary = errors.New("account window reset boundary is newer than candidate checkpoint")
+
 // NewUserAccountWindowQuotaRepository 创建 service.UserAccountWindowQuotaRepository 实现（DI Strategy A：直接返回接口）。
 func NewUserAccountWindowQuotaRepository(client *dbent.Client) service.UserAccountWindowQuotaRepository {
 	return &userAccountWindowQuotaRepository{client: client}
 }
 
-// RecomputeWindowSharesFromCheckpoint 使用成员均分检查点和检查点后的实际 Token 占比确定性重算。
-// 同一组 usage_logs 无论由谁碰巧读到官方快照，结果都完全一致。
-func (r *userAccountWindowQuotaRepository) RecomputeWindowSharesFromCheckpoint(ctx context.Context, accountID int64, window string, officialPercent float64, windowStart, checkpointAt time.Time, baseShares map[int64]float64, resetAt *time.Time) error {
-	if officialPercent < 0 {
+// ApplyWindowSharesFromCheckpoint atomically advances the official snapshot,
+// ingests only unseen usage-log cost basis, and settles only the new official delta.
+func (r *userAccountWindowQuotaRepository) ApplyWindowSharesFromCheckpoint(
+	ctx context.Context,
+	accountID int64,
+	window string,
+	candidate service.AccountWindowAttributionCheckpoint,
+	resetAt *time.Time,
+) (service.AccountWindowAttributionCheckpoint, bool, error) {
+	if !service.IsValidAccountWindowAttributionCheckpoint(&candidate) {
+		return service.AccountWindowAttributionCheckpoint{}, false, fmt.Errorf("invalid account window attribution checkpoint")
+	}
+	if resetAt != nil {
+		value := *resetAt
+		candidate.ResetAt = &value
+	}
+	winner := service.CloneAccountWindowAttributionCheckpoint(candidate)
+	applied := false
+	err := r.withWindowQuotaTx(ctx, func(txCtx context.Context, client *dbent.Client) error {
+		checkpointKey := service.AccountWindowAttributionCheckpointExtraKey(window)
+		rows, err := client.QueryContext(txCtx, `SELECT extra->>$2,
+			extra->>'codex_usage_observed_unix_nano',
+			extra->>'codex_usage_updated_at',
+			COALESCE(extra->>$3, 'false') = 'true'
+			FROM accounts
+			WHERE id = $1 AND deleted_at IS NULL
+			  AND COALESCE(extra->>'window_quota_shared', 'false') = 'true'
+			FOR UPDATE`, accountID, checkpointKey, service.AccountWindowForceUnattributedExtraKey)
+		if err != nil {
+			return fmt.Errorf("lock account %d attribution checkpoint: %w", accountID, err)
+		}
+		var raw, canonicalObservedNanoRaw, canonicalObservedAtRaw sql.NullString
+		var forceUnattributed bool
+		if rows.Next() {
+			err = rows.Scan(&raw, &canonicalObservedNanoRaw, &canonicalObservedAtRaw, &forceUnattributed)
+		} else if rows.Err() != nil {
+			err = rows.Err()
+		} else {
+			_ = rows.Close()
+			return nil
+		}
+		_ = rows.Close()
+		if err != nil {
+			return err
+		}
+
+		members, err := lockAccountWindowMembersInTx(txCtx, client, accountID, window)
+		if err != nil {
+			return err
+		}
+
+		var decodedRaw *service.AccountWindowAttributionCheckpoint
+		var existing *service.AccountWindowAttributionCheckpoint
+		if raw.Valid {
+			var decoded service.AccountWindowAttributionCheckpoint
+			if json.Unmarshal([]byte(raw.String), &decoded) == nil {
+				decodedRaw = &decoded
+				if service.IsValidAccountWindowAttributionCheckpoint(&decoded) {
+					cloned := service.CloneAccountWindowAttributionCheckpoint(decoded)
+					existing = &cloned
+				}
+			}
+		}
+
+		canonicalObservedAt := parseAccountOfficialObservedAt(canonicalObservedNanoRaw, canonicalObservedAtRaw)
+		candidateFresh := !candidate.CandidateExpired &&
+			(canonicalObservedAt.IsZero() || !candidate.LatestObservedAt.Before(canonicalObservedAt))
+
+		if existing == nil {
+			if !candidateFresh || membersHaveNewerResetBoundary(members, candidate.ResetAt) {
+				return nil
+			}
+			upper, err := attributionUpperBoundInTx(txCtx, client, accountID, candidate.WindowStart, candidate.ResetAt, candidate.LatestObservedAt, candidate.UsageLog)
+			if err != nil {
+				return err
+			}
+			sameWindow := candidate.ResetAt == nil || legacyCheckpointMatchesCandidate(decodedRaw, candidate) || membersMatchCandidateWindow(members, candidate.ResetAt)
+			if !sameWindow {
+				if err := resetAccountWindowMembersInTx(txCtx, client, accountID, window, candidate.ResetAt, window == service.WindowType5h); err != nil {
+					return err
+				}
+				for i := range members {
+					members[i].attributed = 0
+					members[i].resetAt = candidate.ResetAt
+				}
+			} else if candidate.ResetAt != nil {
+				if err := updateAccountWindowResetBoundaryInTx(txCtx, client, accountID, window, candidate.ResetAt); err != nil {
+					return err
+				}
+			}
+			memberTotal, err := reconcileFrozenMemberTotalInTx(txCtx, client, members, candidate.LatestOfficialPercent)
+			if err != nil {
+				return err
+			}
+			winner = service.CloneAccountWindowAttributionCheckpoint(candidate)
+			winner.UsageLog = nil
+			winner.CandidateExpired = false
+			winner.PendingBasisByUser = make(map[int64]float64)
+			winner.PendingUnattributedBasisUSD = 0
+			winner.UnattributedPercent = roundWindowPercent(math.Max(0, winner.LatestOfficialPercent-memberTotal))
+			winner.SeenThroughCreatedAt = upper.createdAt
+			winner.SeenThroughUsageLogID = upper.id
+			if err := persistAccountWindowCheckpointInTx(txCtx, client, accountID, checkpointKey, winner); err != nil {
+				return err
+			}
+			applied = true
+			return nil
+		}
+
+		current := service.CloneAccountWindowAttributionCheckpoint(*existing)
+		winner = service.CloneAccountWindowAttributionCheckpoint(current)
+		accepted := false
+		if candidateFresh {
+			var selected service.AccountWindowAttributionCheckpoint
+			selected, accepted = service.SelectAccountWindowAttributionCheckpoint(existing, candidate, candidate.ResetAt != nil)
+			if accepted {
+				winner.LatestOfficialPercent = selected.LatestOfficialPercent
+				winner.LatestObservedAt = selected.LatestObservedAt
+				winner.WindowStart = selected.WindowStart
+				winner.ResetAt = selected.ResetAt
+				winner.At = selected.At
+			}
+		}
+
+		newWindow := accepted && !sameRepositoryWindow(current, winner)
+		if newWindow {
+			upper, err := attributionUpperBoundInTx(txCtx, client, accountID, winner.WindowStart, winner.ResetAt, winner.LatestObservedAt, candidate.UsageLog)
+			if err != nil {
+				return err
+			}
+			if err := resetAccountWindowMembersInTx(txCtx, client, accountID, window, winner.ResetAt, window == service.WindowType5h); err != nil {
+				return err
+			}
+			winner.PendingBasisByUser = make(map[int64]float64)
+			winner.PendingUnattributedBasisUSD = 0
+			winner.UnattributedPercent = roundWindowPercent(winner.LatestOfficialPercent)
+			winner.SeenThroughCreatedAt = upper.createdAt
+			winner.SeenThroughUsageLogID = upper.id
+			winner.UsageLog = nil
+			winner.CandidateExpired = false
+			if err := persistAccountWindowCheckpointInTx(txCtx, client, accountID, checkpointKey, winner); err != nil {
+				return err
+			}
+			applied = true
+			return nil
+		}
+
+		resetBoundaryChanged := accepted && !sameOptionalTime(winner.ResetAt, current.ResetAt)
+		if resetBoundaryChanged {
+			if err := updateAccountWindowResetBoundaryInTx(txCtx, client, accountID, window, winner.ResetAt); err != nil {
+				return err
+			}
+		}
+		changed := accepted && (!winner.LatestObservedAt.Equal(current.LatestObservedAt) || winner.LatestOfficialPercent != current.LatestOfficialPercent || resetBoundaryChanged)
+		if winner.PendingBasisByUser == nil {
+			winner.PendingBasisByUser = make(map[int64]float64)
+		}
+		moveInactivePendingToUnattributed(&winner, members)
+
+		upper, hasUpper, lateInserted, err := incrementalAttributionUpperBoundInTx(txCtx, client, accountID, current, candidate)
+		if err != nil {
+			return err
+		}
+		if forceUnattributed {
+			// 账号存在中转站外部消费时，官方增量与本地 usage log 之间没有可证明的因果关系。
+			// 因此只推进游标，丢弃历史 pending basis，并将全部官方增量记为未归因。
+			if len(winner.PendingBasisByUser) > 0 || winner.PendingUnattributedBasisUSD != 0 {
+				// 审计：被丢弃的 pending basis 对应真实已发生的美元消耗，force 模式下不再归因，
+				// 但必须留下可追溯日志，避免账面对不上时无从查起。
+				droppedTotal := math.Max(0, winner.PendingUnattributedBasisUSD)
+				for _, cost := range winner.PendingBasisByUser {
+					if cost > 0 && !math.IsNaN(cost) && !math.IsInf(cost, 0) {
+						droppedTotal += cost
+					}
+				}
+				slog.Warn("account_window_quota.force_drop_pending_basis",
+					"account_id", accountID,
+					"window", window,
+					"dropped_basis_usd", droppedTotal,
+					"pending_members", len(winner.PendingBasisByUser),
+				)
+				winner.PendingBasisByUser = make(map[int64]float64)
+				winner.PendingUnattributedBasisUSD = 0
+				changed = true
+			}
+			if hasUpper && cursorAfter(upper, attributionCursor{createdAt: winner.SeenThroughCreatedAt, id: winner.SeenThroughUsageLogID}) {
+				winner.SeenThroughCreatedAt = upper.createdAt
+				winner.SeenThroughUsageLogID = upper.id
+				changed = true
+			}
+			deltaOfficial := roundWindowPercent(math.Max(0, winner.LatestOfficialPercent-current.LatestOfficialPercent))
+			if deltaOfficial > 0 {
+				winner.UnattributedPercent = roundWindowPercent(winner.UnattributedPercent + deltaOfficial)
+				changed = true
+			}
+			if !changed {
+				winner = current
+				return nil
+			}
+			winner.UsageLog = nil
+			winner.CandidateExpired = false
+			if err := persistAccountWindowCheckpointInTx(txCtx, client, accountID, checkpointKey, winner); err != nil {
+				return err
+			}
+			applied = true
+			return nil
+		}
+		if lateInserted && candidate.UsageLog != nil {
+			cost := candidate.UsageLog.CostUSD
+			if cost > 0 && !math.IsNaN(cost) && !math.IsInf(cost, 0) {
+				winner.PendingUnattributedBasisUSD += cost
+				changed = true
+			}
+		}
+		if hasUpper && cursorAfter(upper, attributionCursor{createdAt: winner.SeenThroughCreatedAt, id: winner.SeenThroughUsageLogID}) {
+			costByUser, err := readIncrementalUsageCostsInTx(txCtx, client, accountID, current.WindowStart, current.ResetAt, attributionCursor{createdAt: winner.SeenThroughCreatedAt, id: winner.SeenThroughUsageLogID}, upper)
+			if err != nil {
+				return err
+			}
+			activeUsers := make(map[int64]struct{}, len(members))
+			for _, member := range members {
+				activeUsers[member.userID] = struct{}{}
+			}
+			for userID, cost := range costByUser {
+				if cost <= 0 || math.IsNaN(cost) || math.IsInf(cost, 0) {
+					continue
+				}
+				if _, ok := activeUsers[userID]; ok {
+					winner.PendingBasisByUser[userID] += cost
+				} else {
+					winner.PendingUnattributedBasisUSD += cost
+				}
+			}
+			winner.SeenThroughCreatedAt = upper.createdAt
+			winner.SeenThroughUsageLogID = upper.id
+			changed = true
+		}
+
+		deltaOfficial := roundWindowPercent(math.Max(0, winner.LatestOfficialPercent-current.LatestOfficialPercent))
+		allocatedToMembers := 0.0
+		if deltaOfficial > 0 {
+			unattributedDelta, err := settlePendingOfficialDeltaInTx(txCtx, client, members, &winner, deltaOfficial)
+			if err != nil {
+				return err
+			}
+			// settle 返回的是未分完的余量；本次实际分给成员的份额 = delta − 余量。
+			allocatedToMembers = roundWindowPercent(math.Max(0, deltaOfficial-unattributedDelta))
+			winner.UnattributedPercent = roundWindowPercent(winner.UnattributedPercent + unattributedDelta)
+			changed = true
+		}
+		// 重锚：非 force 模式下，checkpoint 的未归因必须与「官方 − 成员归因(结算后)」保持一致。
+		// 这修复 force→非force 切换后历史 UnattributedPercent 只增不减、与成员归因双计的问题。
+		// 仅在已有变更（changed）的写路径上重锚；纯只读/拒绝场景（changed=false）不得因重锚变成写操作。
+		if changed {
+			memberTotal := allocatedToMembers
+			for _, member := range members {
+				if member.attributed > 0 && !math.IsNaN(member.attributed) && !math.IsInf(member.attributed, 0) {
+					memberTotal += member.attributed
+				}
+			}
+			winner.UnattributedPercent = roundWindowPercent(math.Max(0, winner.LatestOfficialPercent-memberTotal))
+		}
+		if !changed {
+			winner = current
+			return nil
+		}
+		winner.UsageLog = nil
+		winner.CandidateExpired = false
+		if err := persistAccountWindowCheckpointInTx(txCtx, client, accountID, checkpointKey, winner); err != nil {
+			return err
+		}
+		applied = true
+		return nil
+	})
+	return winner, applied, err
+}
+
+type accountWindowMemberState struct {
+	id         int64
+	userID     int64
+	attributed float64
+	resetAt    *time.Time
+}
+
+type attributionCursor struct {
+	createdAt time.Time
+	id        int64
+}
+
+func lockAccountWindowMembersInTx(ctx context.Context, client *dbent.Client, accountID int64, window string) ([]accountWindowMemberState, error) {
+	const q = `SELECT q.id, q.user_id, q.attributed_percent, q.window_reset_at
+		FROM user_account_window_quotas q
+		WHERE q.account_id = $1 AND q.window_type = $2 AND q.deleted_at IS NULL
+		ORDER BY q.user_id
+		FOR UPDATE`
+	rows, err := client.QueryContext(ctx, q, accountID, window)
+	if err != nil {
+		return nil, fmt.Errorf("lock account %d window %s members: %w", accountID, window, err)
+	}
+	defer rows.Close()
+	members := make([]accountWindowMemberState, 0)
+	for rows.Next() {
+		var member accountWindowMemberState
+		var resetAt sql.NullTime
+		if err := rows.Scan(&member.id, &member.userID, &member.attributed, &resetAt); err != nil {
+			return nil, fmt.Errorf("scan account %d window %s member: %w", accountID, window, err)
+		}
+		if resetAt.Valid {
+			value := resetAt.Time
+			member.resetAt = &value
+		}
+		members = append(members, member)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate account %d window %s members: %w", accountID, window, err)
+	}
+	return members, nil
+}
+
+func roundWindowPercent(value float64) float64 {
+	if value <= 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0
+	}
+	return math.Round(value*10000) / 10000
+}
+
+func sameOptionalTime(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return math.Abs(a.Sub(*b).Seconds()) <= time.Minute.Seconds()
+}
+
+func sameRepositoryWindow(a, b service.AccountWindowAttributionCheckpoint) bool {
+	if a.ResetAt != nil && b.ResetAt != nil {
+		return sameOptionalTime(a.ResetAt, b.ResetAt)
+	}
+	if a.WindowStart.IsZero() || b.WindowStart.IsZero() {
+		return false
+	}
+	return math.Abs(a.WindowStart.Sub(b.WindowStart).Seconds()) <= time.Minute.Seconds()
+}
+
+func legacyCheckpointMatchesCandidate(legacy *service.AccountWindowAttributionCheckpoint, candidate service.AccountWindowAttributionCheckpoint) bool {
+	if legacy == nil {
+		return false
+	}
+	if legacy.ResetAt != nil && candidate.ResetAt != nil {
+		return sameOptionalTime(legacy.ResetAt, candidate.ResetAt)
+	}
+	if legacy.WindowStart.IsZero() || candidate.WindowStart.IsZero() {
+		return false
+	}
+	return math.Abs(legacy.WindowStart.Sub(candidate.WindowStart).Seconds()) <= time.Minute.Seconds()
+}
+
+func membersMatchCandidateWindow(members []accountWindowMemberState, resetAt *time.Time) bool {
+	if resetAt == nil {
+		return false
+	}
+	for _, member := range members {
+		if member.resetAt != nil && sameOptionalTime(member.resetAt, resetAt) {
+			return true
+		}
+	}
+	return false
+}
+
+func membersHaveNewerResetBoundary(members []accountWindowMemberState, resetAt *time.Time) bool {
+	if resetAt == nil {
+		return false
+	}
+	for _, member := range members {
+		if member.resetAt != nil && member.resetAt.After(resetAt.Add(time.Minute)) {
+			return true
+		}
+	}
+	return false
+}
+
+func cursorAfter(candidate, current attributionCursor) bool {
+	if candidate.createdAt.IsZero() {
+		return false
+	}
+	if current.createdAt.IsZero() {
+		return true
+	}
+	if candidate.createdAt.After(current.createdAt) {
+		return true
+	}
+	return candidate.createdAt.Equal(current.createdAt) && candidate.id > current.id
+}
+
+func cursorWithinWindow(cursor attributionCursor, windowStart time.Time, resetAt *time.Time) bool {
+	if cursor.createdAt.IsZero() || cursor.createdAt.Before(windowStart) {
+		return false
+	}
+	return resetAt == nil || cursor.createdAt.Before(*resetAt)
+}
+
+func usageLogCursorInTx(ctx context.Context, client *dbent.Client, accountID int64, ref *service.AccountWindowUsageLogRef) (attributionCursor, bool, error) {
+	if ref == nil {
+		return attributionCursor{}, false, nil
+	}
+	if ref.ID > 0 && !ref.CreatedAt.IsZero() {
+		return attributionCursor{createdAt: ref.CreatedAt, id: ref.ID}, true, nil
+	}
+	var q string
+	var args []any
+	if ref.ID > 0 {
+		q = `SELECT created_at, id FROM usage_logs WHERE account_id = $1 AND id = $2`
+		args = []any{accountID, ref.ID}
+	} else if strings.TrimSpace(ref.RequestID) != "" && ref.APIKeyID > 0 {
+		q = `SELECT created_at, id FROM usage_logs WHERE account_id = $1 AND request_id = $2 AND api_key_id = $3`
+		args = []any{accountID, ref.RequestID, ref.APIKeyID}
+	} else {
+		return attributionCursor{}, false, nil
+	}
+	rows, err := client.QueryContext(ctx, q, args...)
+	if err != nil {
+		return attributionCursor{}, false, fmt.Errorf("resolve account %d usage-log cursor: %w", accountID, err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return attributionCursor{}, false, rows.Err()
+	}
+	var cursor attributionCursor
+	if err := rows.Scan(&cursor.createdAt, &cursor.id); err != nil {
+		return attributionCursor{}, false, err
+	}
+	return cursor, true, nil
+}
+
+func latestUsageCursorInTx(ctx context.Context, client *dbent.Client, accountID int64, windowStart time.Time, resetAt *time.Time, observedAt time.Time) (attributionCursor, bool, error) {
+	const q = `SELECT created_at, id
+		FROM usage_logs
+		WHERE account_id = $1 AND created_at >= $2
+		  AND ($3::timestamptz IS NULL OR created_at < $3)
+		  AND created_at <= $4
+		ORDER BY created_at DESC, id DESC
+		LIMIT 1`
+	rows, err := client.QueryContext(ctx, q, accountID, windowStart, nullableTime(resetAt), observedAt)
+	if err != nil {
+		return attributionCursor{}, false, fmt.Errorf("read account %d latest usage cursor: %w", accountID, err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return attributionCursor{}, false, rows.Err()
+	}
+	var cursor attributionCursor
+	if err := rows.Scan(&cursor.createdAt, &cursor.id); err != nil {
+		return attributionCursor{}, false, err
+	}
+	return cursor, true, nil
+}
+
+func attributionUpperBoundInTx(ctx context.Context, client *dbent.Client, accountID int64, windowStart time.Time, resetAt *time.Time, observedAt time.Time, ref *service.AccountWindowUsageLogRef) (attributionCursor, error) {
+	if cursor, ok, err := usageLogCursorInTx(ctx, client, accountID, ref); err != nil {
+		return attributionCursor{}, err
+	} else if ok && cursorWithinWindow(cursor, windowStart, resetAt) {
+		return cursor, nil
+	}
+	cursor, ok, err := latestUsageCursorInTx(ctx, client, accountID, windowStart, resetAt, observedAt)
+	if err != nil || !ok {
+		return attributionCursor{}, err
+	}
+	return cursor, nil
+}
+
+func incrementalAttributionUpperBoundInTx(ctx context.Context, client *dbent.Client, accountID int64, current service.AccountWindowAttributionCheckpoint, candidate service.AccountWindowAttributionCheckpoint) (attributionCursor, bool, bool, error) {
+	if candidate.UsageLog != nil {
+		cursor, ok, err := usageLogCursorInTx(ctx, client, accountID, candidate.UsageLog)
+		if err != nil || !ok || !cursorWithinWindow(cursor, current.WindowStart, current.ResetAt) {
+			return attributionCursor{}, false, false, err
+		}
+		if cursorAfter(cursor, attributionCursor{createdAt: current.SeenThroughCreatedAt, id: current.SeenThroughUsageLogID}) {
+			return cursor, true, false, nil
+		}
+		// 真正新插入但游标已落后的日志不能回写历史成员，只能作为未知成本等待后续官方增量结算。
+		// inserted=false 表示幂等重试命中的既有日志，必须保持 no-op，避免重复累计。
+		return attributionCursor{}, false, candidate.UsageLog.Inserted, nil
+	}
+	if candidate.CandidateExpired || candidate.LatestObservedAt.Before(current.LatestObservedAt) {
+		return attributionCursor{}, false, false, nil
+	}
+	cursor, ok, err := latestUsageCursorInTx(ctx, client, accountID, current.WindowStart, current.ResetAt, candidate.LatestObservedAt)
+	return cursor, ok, false, err
+}
+
+func readIncrementalUsageCostsInTx(ctx context.Context, client *dbent.Client, accountID int64, windowStart time.Time, resetAt *time.Time, lower, upper attributionCursor) (map[int64]float64, error) {
+	const q = `SELECT user_id,
+		COALESCE(SUM(GREATEST(COALESCE(total_cost, 0), 0)), 0)::double precision
+		FROM usage_logs
+		WHERE account_id = $1 AND created_at >= $2
+		  AND ($3::timestamptz IS NULL OR created_at < $3)
+		  AND (created_at, id) > ($4::timestamptz, $5::bigint)
+		  AND (created_at, id) <= ($6::timestamptz, $7::bigint)
+		GROUP BY user_id`
+	rows, err := client.QueryContext(ctx, q, accountID, windowStart, nullableTime(resetAt), lower.createdAt, lower.id, upper.createdAt, upper.id)
+	if err != nil {
+		return nil, fmt.Errorf("read account %d incremental usage costs: %w", accountID, err)
+	}
+	defer rows.Close()
+	costByUser := make(map[int64]float64)
+	for rows.Next() {
+		var userID int64
+		var cost float64
+		if err := rows.Scan(&userID, &cost); err != nil {
+			return nil, err
+		}
+		costByUser[userID] = cost
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return costByUser, nil
+}
+
+func moveInactivePendingToUnattributed(checkpoint *service.AccountWindowAttributionCheckpoint, members []accountWindowMemberState) {
+	if checkpoint == nil || len(checkpoint.PendingBasisByUser) == 0 {
+		return
+	}
+	active := make(map[int64]struct{}, len(members))
+	for _, member := range members {
+		active[member.userID] = struct{}{}
+	}
+	for userID, cost := range checkpoint.PendingBasisByUser {
+		if _, ok := active[userID]; ok {
+			continue
+		}
+		if cost > 0 && !math.IsNaN(cost) && !math.IsInf(cost, 0) {
+			checkpoint.PendingUnattributedBasisUSD += cost
+		}
+		delete(checkpoint.PendingBasisByUser, userID)
+	}
+}
+
+func settlePendingOfficialDeltaInTx(ctx context.Context, client *dbent.Client, members []accountWindowMemberState, checkpoint *service.AccountWindowAttributionCheckpoint, deltaOfficial float64) (float64, error) {
+	deltaOfficial = roundWindowPercent(deltaOfficial)
+	if checkpoint == nil || deltaOfficial <= 0 {
+		return 0, nil
+	}
+	totalBasis := math.Max(0, checkpoint.PendingUnattributedBasisUSD)
+	for _, cost := range checkpoint.PendingBasisByUser {
+		if cost > 0 && !math.IsNaN(cost) && !math.IsInf(cost, 0) {
+			totalBasis += cost
+		}
+	}
+	if totalBasis <= 0 {
+		checkpoint.PendingBasisByUser = make(map[int64]float64)
+		checkpoint.PendingUnattributedBasisUSD = 0
+		return deltaOfficial, nil
+	}
+
+	allocated := 0.0
+	const updateQ = `UPDATE user_account_window_quotas
+		SET attributed_percent = attributed_percent + $2, updated_at = $3
+		WHERE id = $1 AND deleted_at IS NULL`
+	now := time.Now()
+	for _, member := range members {
+		cost := checkpoint.PendingBasisByUser[member.userID]
+		if cost <= 0 || math.IsNaN(cost) || math.IsInf(cost, 0) {
+			continue
+		}
+		increment := math.Floor(deltaOfficial*cost/totalBasis*10000) / 10000
+		if increment <= 0 {
+			continue
+		}
+		if _, err := client.ExecContext(ctx, updateQ, member.id, increment, now); err != nil {
+			return 0, fmt.Errorf("increment account window attribution for user %d: %w", member.userID, err)
+		}
+		allocated += increment
+	}
+	checkpoint.PendingBasisByUser = make(map[int64]float64)
+	checkpoint.PendingUnattributedBasisUSD = 0
+	return roundWindowPercent(math.Max(0, deltaOfficial-allocated)), nil
+}
+
+func resetAccountWindowMembersInTx(ctx context.Context, client *dbent.Client, accountID int64, window string, resetAt *time.Time, clearDonation bool) error {
+	const q = `UPDATE user_account_window_quotas
+		SET attributed_percent = 0,
+			donate_pool_fraction = CASE WHEN $4 THEN 0 ELSE donate_pool_fraction END,
+			window_reset_at = $3,
+			updated_at = $5
+		WHERE account_id = $1 AND window_type = $2 AND deleted_at IS NULL`
+	_, err := client.ExecContext(ctx, q, accountID, window, nullableTime(resetAt), clearDonation, time.Now())
+	if err != nil {
+		return fmt.Errorf("reset account %d window %s for new boundary: %w", accountID, window, err)
+	}
+	return nil
+}
+
+func updateAccountWindowResetBoundaryInTx(ctx context.Context, client *dbent.Client, accountID int64, window string, resetAt *time.Time) error {
+	if resetAt == nil {
+		return nil
+	}
+	const q = `UPDATE user_account_window_quotas
+		SET window_reset_at = $3, updated_at = $4
+		WHERE account_id = $1 AND window_type = $2 AND deleted_at IS NULL`
+	_, err := client.ExecContext(ctx, q, accountID, window, *resetAt, time.Now())
+	return err
+}
+
+func reconcileFrozenMemberTotalInTx(ctx context.Context, client *dbent.Client, members []accountWindowMemberState, officialPercent float64) (float64, error) {
+	total := 0.0
+	for _, member := range members {
+		if member.attributed > 0 && !math.IsNaN(member.attributed) && !math.IsInf(member.attributed, 0) {
+			total += member.attributed
+		}
+	}
+	officialPercent = roundWindowPercent(officialPercent)
+	if total <= officialPercent+1e-9 {
+		return roundWindowPercent(total), nil
+	}
+	factor := 0.0
+	if total > 0 {
+		factor = officialPercent / total
+	}
+	adjustedTotal := 0.0
+	const q = `UPDATE user_account_window_quotas SET attributed_percent = $2, updated_at = $3 WHERE id = $1 AND deleted_at IS NULL`
+	now := time.Now()
+	for _, member := range members {
+		value := math.Floor(math.Max(0, member.attributed*factor)*10000) / 10000
+		if _, err := client.ExecContext(ctx, q, member.id, value, now); err != nil {
+			return 0, err
+		}
+		adjustedTotal += value
+	}
+	return roundWindowPercent(adjustedTotal), nil
+}
+
+func persistAccountWindowCheckpointInTx(ctx context.Context, client *dbent.Client, accountID int64, checkpointKey string, checkpoint service.AccountWindowAttributionCheckpoint) error {
+	checkpoint.UsageLog = nil
+	checkpoint.CandidateExpired = false
+	encodedCheckpoint, err := json.Marshal(checkpoint)
+	if err != nil {
+		return fmt.Errorf("encode account %d checkpoint: %w", accountID, err)
+	}
+	payload, err := json.Marshal(map[string]any{checkpointKey: json.RawMessage(encodedCheckpoint)})
+	if err != nil {
+		return fmt.Errorf("encode account %d checkpoint update: %w", accountID, err)
+	}
+	result, err := client.ExecContext(ctx, `UPDATE accounts
+		SET extra = COALESCE(extra, '{}'::jsonb) || $2::jsonb, updated_at = NOW()
+		WHERE id = $1 AND deleted_at IS NULL`, accountID, string(payload))
+	if err != nil {
+		return fmt.Errorf("persist account %d checkpoint: %w", accountID, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return service.ErrAccountNotFound
+	}
+	return nil
+}
+
+// RecomputeWindowSharesFromCheckpoint is retained for focused repository tests;
+// production service paths use ApplyWindowSharesFromCheckpoint for DB fencing.
+func (r *userAccountWindowQuotaRepository) RecomputeWindowSharesFromCheckpoint(ctx context.Context, accountID int64, window string, officialPercent float64, windowStart time.Time, resetAt *time.Time) error {
+	return r.withWindowQuotaTx(ctx, func(txCtx context.Context, client *dbent.Client) error {
+		return recomputeWindowSharesInTx(txCtx, client, accountID, window, officialPercent, windowStart, resetAt)
+	})
+}
+
+func recomputeWindowSharesInTx(txCtx context.Context, client *dbent.Client, accountID int64, window string, officialPercent float64, windowStart time.Time, resetAt *time.Time) error {
+	if math.IsNaN(officialPercent) || math.IsInf(officialPercent, 0) || officialPercent < 0 {
 		officialPercent = 0
 	}
-	return r.withWindowQuotaTx(ctx, func(txCtx context.Context, client *dbent.Client) error {
-		const rowsQ = `SELECT q.id, q.user_id
+	const rowsQ = `SELECT q.id, q.user_id, q.window_reset_at
 			FROM user_account_window_quotas q
 			JOIN accounts a ON a.id = q.account_id
 			WHERE q.account_id = $1 AND q.window_type = $2
@@ -38,146 +708,183 @@ func (r *userAccountWindowQuotaRepository) RecomputeWindowSharesFromCheckpoint(c
 			  AND COALESCE(a.extra->>'window_quota_shared', 'false') = 'true'
 			ORDER BY q.user_id
 			FOR UPDATE`
-		rows, err := client.QueryContext(txCtx, rowsQ, accountID, window)
-		if err != nil {
-			return fmt.Errorf("lock account %d window %s before token recompute: %w", accountID, window, err)
-		}
-		type memberUsage struct {
-			id     int64
-			userID int64
-			base   float64
-			tokens int64
-		}
-		var members []memberUsage
-		for rows.Next() {
-			var member memberUsage
-			if err := rows.Scan(&member.id, &member.userID); err != nil {
-				_ = rows.Close()
-				return fmt.Errorf("scan account %d window %s member: %w", accountID, window, err)
-			}
-			members = append(members, member)
-		}
-		if err := rows.Err(); err != nil {
+	rows, err := client.QueryContext(txCtx, rowsQ, accountID, window)
+	if err != nil {
+		return fmt.Errorf("lock account %d window %s before cost recompute: %w", accountID, window, err)
+	}
+	type memberUsage struct {
+		id     int64
+		userID int64
+		cost   float64
+	}
+	var members []memberUsage
+	staleResetBoundary := false
+	for rows.Next() {
+		var member memberUsage
+		var currentResetAt sql.NullTime
+		if err := rows.Scan(&member.id, &member.userID, &currentResetAt); err != nil {
 			_ = rows.Close()
-			return fmt.Errorf("iterate account %d window %s members: %w", accountID, window, err)
+			return fmt.Errorf("scan account %d window %s member: %w", accountID, window, err)
 		}
+		if resetAt != nil && currentResetAt.Valid && currentResetAt.Time.After(resetAt.Add(time.Minute)) {
+			staleResetBoundary = true
+		}
+		members = append(members, member)
+	}
+	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		if len(members) == 0 {
-			return nil
-		}
+		return fmt.Errorf("iterate account %d window %s members: %w", accountID, window, err)
+	}
+	_ = rows.Close()
+	if staleResetBoundary {
+		return errAccountWindowStaleResetBoundary
+	}
+	if len(members) == 0 {
+		return nil
+	}
 
-		tokenStart := checkpointAt
-		useBase := checkpointAt.After(windowStart)
-		if !useBase {
-			tokenStart = windowStart
-		}
-		baseTotal := 0.0
-		for i := range members {
-			if useBase {
-				members[i].base = math.Max(0, baseShares[members[i].userID])
-				baseTotal += members[i].base
-			}
-		}
-
-		placeholders := make([]string, len(members))
-		tokenArgs := make([]any, 0, len(members)+2)
-		tokenArgs = append(tokenArgs, accountID, tokenStart)
-		for i, member := range members {
-			placeholders[i] = fmt.Sprintf("$%d", i+3)
-			tokenArgs = append(tokenArgs, member.userID)
-		}
-		tokensQ := `SELECT user_id,
-			COALESCE(SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens), 0)::bigint
+	placeholders := make([]string, len(members))
+	usageArgs := make([]any, 0, len(members)+3)
+	usageArgs = append(usageArgs, accountID, windowStart, nullableTime(resetAt))
+	for i, member := range members {
+		placeholders[i] = fmt.Sprintf("$%d", i+4)
+		usageArgs = append(usageArgs, member.userID)
+	}
+	usageQ := `SELECT user_id,
+			COALESCE(SUM(GREATEST(COALESCE(total_cost, 0), 0)), 0)::double precision
 			FROM usage_logs
-			WHERE account_id = $1 AND created_at >= $2 AND user_id IN (` + strings.Join(placeholders, ",") + `)
+			WHERE account_id = $1 AND created_at >= $2
+			  AND ($3::timestamptz IS NULL OR created_at < $3)
+			  AND user_id IN (` + strings.Join(placeholders, ",") + `)
 			GROUP BY user_id`
-		tokenRows, err := client.QueryContext(txCtx, tokensQ, tokenArgs...)
-		if err != nil {
-			return fmt.Errorf("read account %d window %s checkpoint tokens: %w", accountID, window, err)
+	usageRows, err := client.QueryContext(txCtx, usageQ, usageArgs...)
+	if err != nil {
+		return fmt.Errorf("read account %d window %s costs: %w", accountID, window, err)
+	}
+	costByUser := make(map[int64]float64, len(members))
+	totalCost := 0.0
+	for usageRows.Next() {
+		var userID int64
+		var cost float64
+		if err := usageRows.Scan(&userID, &cost); err != nil {
+			_ = usageRows.Close()
+			return fmt.Errorf("scan account %d window %s costs: %w", accountID, window, err)
 		}
-		tokensByUser := make(map[int64]int64, len(members))
-		totalTokens := int64(0)
-		for tokenRows.Next() {
-			var userID, tokens int64
-			if err := tokenRows.Scan(&userID, &tokens); err != nil {
-				_ = tokenRows.Close()
-				return fmt.Errorf("scan account %d window %s checkpoint tokens: %w", accountID, window, err)
-			}
-			if tokens > 0 {
-				tokensByUser[userID] = tokens
-				totalTokens += tokens
-			}
+		if cost > 0 && !math.IsNaN(cost) && !math.IsInf(cost, 0) {
+			costByUser[userID] = cost
+			totalCost += cost
 		}
-		if err := tokenRows.Err(); err != nil {
-			_ = tokenRows.Close()
-			return fmt.Errorf("iterate account %d window %s checkpoint tokens: %w", accountID, window, err)
-		}
-		_ = tokenRows.Close()
-		for i := range members {
-			members[i].tokens = tokensByUser[members[i].userID]
-		}
+	}
+	if err := usageRows.Err(); err != nil {
+		_ = usageRows.Close()
+		return fmt.Errorf("iterate account %d window %s costs: %w", accountID, window, err)
+	}
+	_ = usageRows.Close()
+	for i := range members {
+		members[i].cost = costByUser[members[i].userID]
+	}
 
-		target := math.Round(officialPercent*10000) / 10000
-		rawValues := make([]float64, len(members))
-		switch {
-		case baseTotal > 0 && target <= baseTotal:
-			for i, member := range members {
-				rawValues[i] = target * member.base / baseTotal
-			}
-		case target > baseTotal && totalTokens > 0:
-			extra := target - baseTotal
-			for i, member := range members {
-				rawValues[i] = member.base + extra*float64(member.tokens)/float64(totalTokens)
-			}
-		case baseTotal > 0:
-			extra := target - baseTotal
-			for i, member := range members {
-				rawValues[i] = member.base + extra*member.base/baseTotal
-			}
-		default:
-			for i := range members {
-				rawValues[i] = target / float64(len(members))
-			}
+	target := math.Round(officialPercent*10000) / 10000
+	rawValues := make([]float64, len(members))
+	if totalCost > 0 {
+		for i, member := range members {
+			rawValues[i] = target * member.cost / totalCost
 		}
+	}
 
-		remaining := target
-		now := time.Now()
-		const updateQ = `UPDATE user_account_window_quotas
+	// 没有正美元成本时不存在合法的成员权重，全部归因保持为 0。
+	// 账号总量仍由官方快照单独保存/展示，绝不均分，也绝不回退 Token。
+	remainderIndex := -1
+	for i, member := range members {
+		if member.cost > 0 {
+			remainderIndex = i
+		}
+	}
+	remaining := target
+	now := time.Now()
+	const updateQ = `UPDATE user_account_window_quotas
 			SET attributed_percent = $2,
 				window_reset_at = COALESCE($3, window_reset_at),
 				updated_at = $4
 			WHERE id = $1 AND deleted_at IS NULL`
-		for i, member := range members {
-			value := remaining
-			if i < len(members)-1 {
+	for i, member := range members {
+		value := 0.0
+		if totalCost > 0 {
+			if i == remainderIndex {
+				// 四位小数尾差只落到最后一个正美元权重成员；零成本成员必须严格为 0。
+				value = math.Round(remaining*10000) / 10000
+			} else {
 				value = math.Floor(math.Max(0, rawValues[i])*10000) / 10000
 				remaining -= value
-			} else {
-				value = math.Round(remaining*10000) / 10000
 			}
 			if value < 0 {
 				value = 0
 			}
-			if _, err := client.ExecContext(txCtx, updateQ, member.id, value, nullableTime(resetAt), now); err != nil {
-				return fmt.Errorf("write account %d window %s token share for user %d: %w", accountID, window, member.userID, err)
-			}
 		}
-		return nil
-	})
+		if _, err := client.ExecContext(txCtx, updateQ, member.id, value, nullableTime(resetAt), now); err != nil {
+			return fmt.Errorf("write account %d window %s cost share for user %d: %w", accountID, window, member.userID, err)
+		}
+	}
+	return nil
 }
 
-// ResetWindowForAccount 把某账号某窗口下所有活跃记录的 attributed_percent 清零并刷新 window_reset_at。
-// 仅 5h 窗口重置时清零 donate_pool_fraction（5h 份额短、每窗口重新决定）；
-// 7d 捐赠是周级长期承诺，永久保留、绝不自动清（含跨周重置），只在用户手动拖滑块时改变。
-func (r *userAccountWindowQuotaRepository) ResetWindowForAccount(ctx context.Context, accountID int64, window string, newResetAt *time.Time) error {
-	client := clientFromContext(ctx, r.client)
-	const q = `UPDATE user_account_window_quotas
-		SET attributed_percent = 0,
-			donate_pool_fraction = CASE WHEN $2 = '5h' THEN 0 ELSE donate_pool_fraction END,
-			window_reset_at = $3, updated_at = $4
-		WHERE account_id = $1 AND window_type = $2 AND deleted_at IS NULL`
-	_, err := client.ExecContext(ctx, q, accountID, window, nullableTime(newResetAt), time.Now())
-	return err
+// ResetWindowForAccountIfDue 在账号行锁事务内清理到期窗口及其 durable checkpoint。
+// 新窗口若已先提交 future boundary，本次条件更新为 no-op；否则 5h donation 必须一并清零。
+func (r *userAccountWindowQuotaRepository) ResetWindowForAccountIfDue(ctx context.Context, accountID int64, window string, dueAt time.Time) (bool, error) {
+	reset := false
+	err := r.withWindowQuotaTx(ctx, func(txCtx context.Context, client *dbent.Client) error {
+		rows, err := client.QueryContext(txCtx, `SELECT id FROM accounts
+			WHERE id = $1 AND deleted_at IS NULL
+			  AND COALESCE(extra->>'window_quota_shared', 'false') = 'true'
+			FOR UPDATE`, accountID)
+		if err != nil {
+			return err
+		}
+		exists := rows.Next()
+		if rows.Err() != nil {
+			err = rows.Err()
+		}
+		_ = rows.Close()
+		if err != nil || !exists {
+			return err
+		}
+
+		const q = `UPDATE user_account_window_quotas AS target
+			SET attributed_percent = 0,
+				donate_pool_fraction = CASE WHEN $2 = '5h' THEN 0 ELSE target.donate_pool_fraction END,
+				window_reset_at = NULL, updated_at = $4
+			WHERE target.account_id = $1 AND target.window_type = $2 AND target.deleted_at IS NULL
+			  AND EXISTS (
+				SELECT 1 FROM user_account_window_quotas AS due
+				WHERE due.account_id = $1 AND due.window_type = $2 AND due.deleted_at IS NULL
+				  AND due.window_reset_at IS NOT NULL AND due.window_reset_at <= $3
+			  )
+			  AND NOT EXISTS (
+				SELECT 1 FROM user_account_window_quotas AS future
+				WHERE future.account_id = $1 AND future.window_type = $2 AND future.deleted_at IS NULL
+				  AND future.window_reset_at > $3
+			  )`
+		result, err := client.ExecContext(txCtx, q, accountID, window, dueAt, time.Now())
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if affected == 0 {
+			return nil
+		}
+		checkpointKey := service.AccountWindowAttributionCheckpointExtraKey(window)
+		if _, err := client.ExecContext(txCtx, `UPDATE accounts
+			SET extra = COALESCE(extra, '{}'::jsonb) - $2, updated_at = NOW()
+			WHERE id = $1 AND deleted_at IS NULL`, accountID, checkpointKey); err != nil {
+			return fmt.Errorf("clear account %d window %s checkpoint: %w", accountID, window, err)
+		}
+		reset = true
+		return nil
+	})
+	return reset, err
 }
 
 // GetByUserAccountWindow 查询拼车账号的单条活跃配额。私人、已删除账号均视为未配置。
@@ -239,14 +946,16 @@ func (r *userAccountWindowQuotaRepository) ListByUser(ctx context.Context, userI
 	return scanWindowQuotaRecords(rows)
 }
 
-// ListByAccount 返回某账号下所有用户所有窗口的活跃配额（裸 SQL 以带出 donate_pool_fraction）。
+// ListByAccount 返回共享且未删除账号下的活跃配额；历史 private 行不能继续参与网关预检。
 func (r *userAccountWindowQuotaRepository) ListByAccount(ctx context.Context, accountID int64) ([]service.UserAccountWindowQuotaRecord, error) {
-	const q = `SELECT user_id, account_id, window_type, limit_percent, attributed_percent, window_reset_at,
-		COALESCE(donate_pool_fraction, 0)
-		FROM user_account_window_quotas
-		WHERE account_id = $1 AND deleted_at IS NULL
-		ORDER BY user_id, window_type`
-	client := r.client
+	const q = `SELECT q.user_id, q.account_id, q.window_type, q.limit_percent, q.attributed_percent, q.window_reset_at,
+		COALESCE(q.donate_pool_fraction, 0)
+		FROM user_account_window_quotas q
+		JOIN accounts a ON a.id = q.account_id
+		WHERE q.account_id = $1 AND q.deleted_at IS NULL AND a.deleted_at IS NULL
+		  AND COALESCE(a.extra->>'window_quota_shared', 'false') = 'true'
+		ORDER BY q.user_id, q.window_type`
+	client := clientFromContext(ctx, r.client)
 	rows, err := client.QueryContext(ctx, q, accountID)
 	if err != nil {
 		return nil, err
@@ -277,6 +986,26 @@ func (r *userAccountWindowQuotaRepository) ListSharedAccountIDs(ctx context.Cont
 		accountIDs = append(accountIDs, accountID)
 	}
 	return accountIDs, rows.Err()
+}
+
+// IsAccountWindowForceUnattributed 读取账号是否处于「官方用量强制未归因」模式。
+// 该模式标记在 accounts.extra 的 window_quota_force_unattributed 上；查询失败或账号不存在时返回 false。
+func (r *userAccountWindowQuotaRepository) IsAccountWindowForceUnattributed(ctx context.Context, accountID int64) (bool, error) {
+	const q = `SELECT COALESCE(extra->>$2, 'false') = 'true'
+		FROM accounts
+		WHERE id = $1 AND deleted_at IS NULL`
+	rows, err := r.client.QueryContext(ctx, q, accountID, service.AccountWindowForceUnattributedExtraKey)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	force := false
+	if rows.Next() {
+		if err := rows.Scan(&force); err != nil {
+			return false, err
+		}
+	}
+	return force, rows.Err()
 }
 
 // ListPeerSharedAccountMemberUserIDs 返回与目标账号同分组的既有拼车账号成员。
@@ -315,6 +1044,250 @@ func (r *userAccountWindowQuotaRepository) ListPeerSharedAccountMemberUserIDs(ct
 		userIDs = append(userIDs, userID)
 	}
 	return userIDs, rows.Err()
+}
+
+// GetAccountOfficialWindowPercent 读取 accounts.extra 中持久化的 OpenAI 官方窗口快照。
+// 只有仍在有效期内且带官方 reset 的快照可用于账号级硬闸；不读取本地 usage_logs 或成员归因。
+func (r *userAccountWindowQuotaRepository) GetAccountOfficialWindowPercent(ctx context.Context, accountID int64, window string) (float64, bool, error) {
+	usedKey := "codex_5h_used_percent"
+	resetAtKey := "codex_5h_reset_at"
+	legacyResetKey := "codex_5h_reset"
+	resetAfterKey := "codex_5h_reset_after_seconds"
+	if window == service.WindowType7d {
+		usedKey = "codex_7d_used_percent"
+		resetAtKey = "codex_7d_reset_at"
+		legacyResetKey = "codex_7d_reset"
+		resetAfterKey = "codex_7d_reset_after_seconds"
+	}
+	checkpointKey := service.AccountWindowAttributionCheckpointExtraKey(window)
+	const q = `SELECT
+		extra->>$2,
+		extra->>$3,
+		extra->>$4,
+		extra->>$5,
+		extra->>'codex_usage_updated_at',
+		extra->>'codex_usage_observed_unix_nano',
+		extra->>$6
+		FROM accounts
+		WHERE id = $1 AND deleted_at IS NULL`
+	rows, err := r.client.QueryContext(ctx, q, accountID, usedKey, resetAtKey, legacyResetKey, resetAfterKey, checkpointKey)
+	if err != nil {
+		return 0, false, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return 0, false, err
+		}
+		return 0, false, nil
+	}
+	var usedRaw, resetAtRaw, legacyResetRaw, resetAfterRaw, observedAtRaw, observedNanoRaw, checkpointRaw sql.NullString
+	if err := rows.Scan(&usedRaw, &resetAtRaw, &legacyResetRaw, &resetAfterRaw, &observedAtRaw, &observedNanoRaw, &checkpointRaw); err != nil {
+		return 0, false, err
+	}
+	now := time.Now()
+	var checkpoint *service.AccountWindowAttributionCheckpoint
+	if checkpointRaw.Valid {
+		var decoded service.AccountWindowAttributionCheckpoint
+		if json.Unmarshal([]byte(checkpointRaw.String), &decoded) == nil && service.IsValidAccountWindowAttributionCheckpoint(&decoded) {
+			checkpointResetAt := decoded.ResetAt
+			if checkpointResetAt == nil {
+				fallback := decoded.WindowStart.Add(time.Duration(windowLengthSecondsForRepository(window)) * time.Second)
+				checkpointResetAt = &fallback
+			}
+			if checkpointResetAt.After(now) {
+				checkpoint = &decoded
+			}
+		}
+	}
+
+	canonicalFound := false
+	canonicalUsed := 0.0
+	var canonicalResetAt time.Time
+	if usedRaw.Valid {
+		if used, err := strconv.ParseFloat(usedRaw.String, 64); err == nil && !math.IsNaN(used) && !math.IsInf(used, 0) && used >= 0 {
+			if resetAt, foundReset := parseAccountOfficialResetAt(resetAtRaw, legacyResetRaw, resetAfterRaw, observedAtRaw); foundReset && resetAt.After(now) {
+				canonicalFound = true
+				canonicalUsed = used
+				canonicalResetAt = resetAt
+			}
+		}
+	}
+	canonicalObservedAt := parseAccountOfficialObservedAt(observedNanoRaw, observedAtRaw)
+	if checkpoint != nil && canonicalFound && !canonicalObservedAt.IsZero() {
+		candidate := service.NewAccountWindowAttributionCheckpoint(
+			canonicalUsed,
+			canonicalResetAt.Add(-time.Duration(windowLengthSecondsForRepository(window))*time.Second),
+			canonicalObservedAt,
+			&canonicalResetAt,
+		)
+		winner, _ := service.SelectAccountWindowAttributionCheckpoint(checkpoint, candidate, true)
+		return winner.LatestOfficialPercent, true, rows.Err()
+	}
+	if checkpoint != nil {
+		return checkpoint.LatestOfficialPercent, true, rows.Err()
+	}
+	if canonicalFound {
+		return canonicalUsed, true, rows.Err()
+	}
+	return 0, false, rows.Err()
+}
+
+func parseAccountOfficialObservedAt(observedNanoRaw, observedAtRaw sql.NullString) time.Time {
+	if observedNanoRaw.Valid {
+		if observedNano, err := strconv.ParseInt(observedNanoRaw.String, 10, 64); err == nil && observedNano > 0 {
+			return time.Unix(0, observedNano).UTC()
+		}
+	}
+	if observedAtRaw.Valid {
+		if observedAt, err := time.Parse(time.RFC3339Nano, observedAtRaw.String); err == nil {
+			return observedAt
+		}
+	}
+	return time.Time{}
+}
+
+func accountExtraString(extra map[string]any, key string) (string, bool) {
+	value, ok := extra[key]
+	if !ok || value == nil {
+		return "", false
+	}
+	switch typed := value.(type) {
+	case string:
+		return typed, true
+	case json.Number:
+		return typed.String(), true
+	case float64:
+		return strconv.FormatFloat(typed, 'f', -1, 64), true
+	default:
+		return "", false
+	}
+}
+
+func accountExtraNullString(extra map[string]any, key string) sql.NullString {
+	value, ok := accountExtraString(extra, key)
+	return sql.NullString{String: value, Valid: ok}
+}
+
+func durableAccountWindowAttributionCheckpoints(raw []byte, now time.Time) map[string]service.AccountWindowAttributionCheckpoint {
+	result := make(map[string]service.AccountWindowAttributionCheckpoint, 2)
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var extra map[string]any
+	if decoder.Decode(&extra) != nil {
+		return result
+	}
+	for _, window := range []string{service.WindowType5h, service.WindowType7d} {
+		rawCheckpoint, ok := extra[service.AccountWindowAttributionCheckpointExtraKey(window)]
+		if !ok {
+			continue
+		}
+		encoded, err := json.Marshal(rawCheckpoint)
+		if err != nil {
+			continue
+		}
+		var checkpoint service.AccountWindowAttributionCheckpoint
+		if json.Unmarshal(encoded, &checkpoint) != nil || !service.IsValidAccountWindowAttributionCheckpoint(&checkpoint) {
+			continue
+		}
+		resetAt := checkpoint.ResetAt
+		if resetAt == nil {
+			fallback := checkpoint.WindowStart.Add(time.Duration(windowLengthSecondsForRepository(window)) * time.Second)
+			resetAt = &fallback
+		}
+		if resetAt.After(now) {
+			result[window] = service.CloneAccountWindowAttributionCheckpoint(checkpoint)
+		}
+	}
+	return result
+}
+
+func effectiveAccountWindowRecomputeCheckpoints(raw []byte, now time.Time) map[string]service.AccountWindowAttributionCheckpoint {
+	result := make(map[string]service.AccountWindowAttributionCheckpoint, 2)
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var extra map[string]any
+	if decoder.Decode(&extra) != nil {
+		return result
+	}
+	observedAt := parseAccountOfficialObservedAt(
+		accountExtraNullString(extra, "codex_usage_observed_unix_nano"),
+		accountExtraNullString(extra, "codex_usage_updated_at"),
+	)
+	for _, window := range []string{service.WindowType5h, service.WindowType7d} {
+		var existing *service.AccountWindowAttributionCheckpoint
+		if rawCheckpoint, ok := extra[service.AccountWindowAttributionCheckpointExtraKey(window)]; ok {
+			if encoded, err := json.Marshal(rawCheckpoint); err == nil {
+				var checkpoint service.AccountWindowAttributionCheckpoint
+				if json.Unmarshal(encoded, &checkpoint) == nil && service.IsValidAccountWindowAttributionCheckpoint(&checkpoint) {
+					existing = &checkpoint
+				}
+			}
+		}
+
+		usedKey, resetAtKey, legacyResetKey, resetAfterKey := "codex_5h_used_percent", "codex_5h_reset_at", "codex_5h_reset", "codex_5h_reset_after_seconds"
+		if window == service.WindowType7d {
+			usedKey, resetAtKey, legacyResetKey, resetAfterKey = "codex_7d_used_percent", "codex_7d_reset_at", "codex_7d_reset", "codex_7d_reset_after_seconds"
+		}
+		var candidate *service.AccountWindowAttributionCheckpoint
+		if usedRaw, ok := accountExtraString(extra, usedKey); ok && !observedAt.IsZero() {
+			if used, err := strconv.ParseFloat(usedRaw, 64); err == nil && used >= 0 && !math.IsNaN(used) && !math.IsInf(used, 0) {
+				if resetAt, found := parseAccountOfficialResetAt(
+					accountExtraNullString(extra, resetAtKey),
+					accountExtraNullString(extra, legacyResetKey),
+					accountExtraNullString(extra, resetAfterKey),
+					accountExtraNullString(extra, "codex_usage_updated_at"),
+				); found && resetAt.After(now) {
+					windowStart := resetAt.Add(-time.Duration(windowLengthSecondsForRepository(window)) * time.Second)
+					checkpoint := service.NewAccountWindowAttributionCheckpoint(used, windowStart, observedAt, &resetAt)
+					candidate = &checkpoint
+				}
+			}
+		}
+
+		winner := existing
+		if candidate != nil {
+			selected, _ := service.SelectAccountWindowAttributionCheckpoint(existing, *candidate, true)
+			winner = &selected
+		}
+		if winner == nil || !service.IsValidAccountWindowAttributionCheckpoint(winner) {
+			continue
+		}
+		resetAt := winner.ResetAt
+		if resetAt == nil {
+			fallback := winner.WindowStart.Add(time.Duration(windowLengthSecondsForRepository(window)) * time.Second)
+			resetAt = &fallback
+		}
+		if resetAt.After(now) {
+			result[window] = *winner
+		}
+	}
+	return result
+}
+
+func parseAccountOfficialResetAt(resetAtRaw, legacyResetRaw, resetAfterRaw, observedAtRaw sql.NullString) (time.Time, bool) {
+	if resetAtRaw.Valid {
+		if resetAt, err := time.Parse(time.RFC3339Nano, resetAtRaw.String); err == nil {
+			return resetAt, true
+		}
+	}
+	if legacyResetRaw.Valid {
+		if resetUnix, err := strconv.ParseInt(legacyResetRaw.String, 10, 64); err == nil && resetUnix > 0 {
+			return time.Unix(resetUnix, 0), true
+		}
+		if resetAt, err := time.Parse(time.RFC3339Nano, legacyResetRaw.String); err == nil {
+			return resetAt, true
+		}
+	}
+	if resetAfterRaw.Valid && observedAtRaw.Valid {
+		resetAfter, err := strconv.ParseInt(resetAfterRaw.String, 10, 64)
+		if err == nil && resetAfter >= 0 {
+			if observedAt, parseErr := time.Parse(time.RFC3339Nano, observedAtRaw.String); parseErr == nil {
+				return observedAt.Add(time.Duration(resetAfter) * time.Second), true
+			}
+		}
+	}
+	return time.Time{}, false
 }
 
 // scanWindowQuotaRecords 把配额查询结果集扫描为传输结构体（含 donate_pool_fraction）。
@@ -373,7 +1346,7 @@ func (r *userAccountWindowQuotaRepository) SetDonatePoolFraction(ctx context.Con
 	})
 }
 
-// ListDueResets 返回 window_reset_at 已到期且仍有用量的 (账号, 窗口) 去重列表。
+// ListDueResets 返回所有已到期窗口；baseline-only 与 5h donation-only 窗口也必须清理。
 func (r *userAccountWindowQuotaRepository) ListDueResets(ctx context.Context, now time.Time) ([]service.AccountWindowReset, error) {
 	client := clientFromContext(ctx, r.client)
 	const q = `SELECT DISTINCT q.account_id, q.window_type
@@ -381,7 +1354,6 @@ func (r *userAccountWindowQuotaRepository) ListDueResets(ctx context.Context, no
 		JOIN accounts a ON a.id = q.account_id
 		WHERE q.deleted_at IS NULL AND a.deleted_at IS NULL
 		  AND COALESCE(a.extra->>'window_quota_shared', 'false') = 'true'
-		  AND q.attributed_percent > 0
 		  AND q.window_reset_at IS NOT NULL AND q.window_reset_at <= $1`
 	rows, err := client.QueryContext(ctx, q, now)
 	if err != nil {
@@ -557,29 +1529,40 @@ func (r *userAccountWindowQuotaRepository) EqualizeActiveMemberLimits(ctx contex
 	return results, nil
 }
 
-// SyncAccountMembers 以管理员显式选择为准同步账号成员，并在同一事务中为 5h/7d 创建或更新均分额度。
+// SyncAccountMembers 只同步成员集合。保留成员的手工 limit、已归因、reset 和 donation；
+// 新成员仅补缺失窗口行，显式 /equalize 才会批量覆盖 limit_percent。
 func (r *userAccountWindowQuotaRepository) SyncAccountMembers(ctx context.Context, accountID int64, userIDs []int64, ceiling5h, ceiling7d float64) ([]service.AccountWindowEqualizationResult, error) {
 	var results []service.AccountWindowEqualizationResult
 	err := r.withWindowQuotaTx(ctx, func(txCtx context.Context, client *dbent.Client) error {
-		rows, err := client.QueryContext(txCtx, `SELECT COUNT(*) FROM accounts WHERE id = $1 AND deleted_at IS NULL AND COALESCE(extra->>'window_quota_shared', 'false') = 'true'`, accountID)
+		rows, err := client.QueryContext(txCtx, `SELECT COALESCE(extra, '{}'::jsonb)::text
+			FROM accounts
+			WHERE id = $1 AND deleted_at IS NULL
+			  AND COALESCE(extra->>'window_quota_shared', 'false') = 'true'
+			FOR UPDATE`, accountID)
 		if err != nil {
-			return fmt.Errorf("check account %d before syncing members: %w", accountID, err)
+			return fmt.Errorf("lock account %d before syncing members: %w", accountID, err)
 		}
-		var accountCount int
+		var extraRaw string
 		if rows.Next() {
-			err = rows.Scan(&accountCount)
+			err = rows.Scan(&extraRaw)
+		} else if rows.Err() != nil {
+			err = rows.Err()
+		} else {
+			err = service.ErrAccountWindowInvalidMembers
 		}
 		_ = rows.Close()
 		if err != nil {
 			return fmt.Errorf("scan account %d before syncing members: %w", accountID, err)
 		}
-		if accountCount != 1 {
-			return fmt.Errorf("%w: account %d does not exist", service.ErrAccountWindowInvalidMembers, accountID)
-		}
+		syncNow := time.Now()
+		effectiveCheckpoints := effectiveAccountWindowRecomputeCheckpoints([]byte(extraRaw), syncNow)
+		checkpoints := durableAccountWindowAttributionCheckpoints([]byte(extraRaw), syncNow)
 
+		selected := make(map[int64]struct{}, len(userIDs))
 		placeholders := make([]string, len(userIDs))
 		userArgs := make([]any, len(userIDs))
 		for i, userID := range userIDs {
+			selected[userID] = struct{}{}
 			placeholders[i] = fmt.Sprintf("$%d", i+1)
 			userArgs[i] = userID
 		}
@@ -600,42 +1583,112 @@ func (r *userAccountWindowQuotaRepository) SyncAccountMembers(ctx context.Contex
 			return fmt.Errorf("%w: one or more selected users do not exist", service.ErrAccountWindowInvalidMembers)
 		}
 
-		type windowUsageState struct {
-			total   float64
-			resetAt *time.Time
+		type currentQuota struct {
+			userID     int64
+			window     string
+			limit      float64
+			attributed float64
+			resetAt    *time.Time
 		}
-		usageByWindow := map[string]windowUsageState{}
-		usageRows, err := client.QueryContext(txCtx, `SELECT window_type, COALESCE(SUM(attributed_percent), 0), MAX(window_reset_at)
+		currentByWindow := map[string]map[int64]currentQuota{
+			service.WindowType5h: {},
+			service.WindowType7d: {},
+		}
+		quotaRows, err := client.QueryContext(txCtx, `SELECT user_id, window_type, limit_percent, attributed_percent, window_reset_at
 			FROM user_account_window_quotas
 			WHERE account_id = $1 AND deleted_at IS NULL
-			GROUP BY window_type`, accountID)
+			ORDER BY window_type, user_id
+			FOR UPDATE`, accountID)
 		if err != nil {
-			return fmt.Errorf("read existing account %d usage before syncing members: %w", accountID, err)
+			return fmt.Errorf("lock account %d members before sync: %w", accountID, err)
 		}
-		for usageRows.Next() {
-			var window string
-			var total float64
+		for quotaRows.Next() {
+			var quota currentQuota
 			var resetAt sql.NullTime
-			if err := usageRows.Scan(&window, &total, &resetAt); err != nil {
-				_ = usageRows.Close()
-				return fmt.Errorf("scan existing account %d usage: %w", accountID, err)
+			if err := quotaRows.Scan(&quota.userID, &quota.window, &quota.limit, &quota.attributed, &resetAt); err != nil {
+				_ = quotaRows.Close()
+				return err
 			}
-			state := windowUsageState{total: total}
 			if resetAt.Valid {
-				t := resetAt.Time
-				state.resetAt = &t
+				value := resetAt.Time
+				quota.resetAt = &value
 			}
-			usageByWindow[window] = state
+			if currentByWindow[quota.window] == nil {
+				currentByWindow[quota.window] = make(map[int64]currentQuota)
+			}
+			currentByWindow[quota.window][quota.userID] = quota
 		}
-		if err := usageRows.Err(); err != nil {
-			_ = usageRows.Close()
-			return fmt.Errorf("iterate existing account %d usage: %w", accountID, err)
+		if err := quotaRows.Err(); err != nil {
+			_ = quotaRows.Close()
+			return err
 		}
-		_ = usageRows.Close()
+		_ = quotaRows.Close()
 
-		now := time.Now()
+		for _, window := range []string{service.WindowType5h, service.WindowType7d} {
+			checkpoint, ok := checkpoints[window]
+			if !ok {
+				continue
+			}
+			changed := false
+			if checkpoint.PendingBasisByUser == nil {
+				checkpoint.PendingBasisByUser = make(map[int64]float64)
+			}
+
+			// Freeze the membership boundary before adding new rows. Any usage that became
+			// visible since the durable cursor is credited only to retained members; costs
+			// from newly selected, removed, or otherwise inactive users stay unattributed.
+			upper, hasUpper, err := latestUsageCursorInTx(txCtx, client, accountID, checkpoint.WindowStart, checkpoint.ResetAt, syncNow)
+			if err != nil {
+				return err
+			}
+			seen := attributionCursor{createdAt: checkpoint.SeenThroughCreatedAt, id: checkpoint.SeenThroughUsageLogID}
+			if hasUpper && cursorAfter(upper, seen) {
+				costByUser, err := readIncrementalUsageCostsInTx(txCtx, client, accountID, checkpoint.WindowStart, checkpoint.ResetAt, seen, upper)
+				if err != nil {
+					return err
+				}
+				for userID, cost := range costByUser {
+					if cost <= 0 || math.IsNaN(cost) || math.IsInf(cost, 0) {
+						continue
+					}
+					_, keep := selected[userID]
+					_, wasMember := currentByWindow[window][userID]
+					if keep && wasMember {
+						checkpoint.PendingBasisByUser[userID] += cost
+					} else {
+						checkpoint.PendingUnattributedBasisUSD += cost
+					}
+				}
+				checkpoint.SeenThroughCreatedAt = upper.createdAt
+				checkpoint.SeenThroughUsageLogID = upper.id
+				changed = true
+			}
+
+			for userID, quota := range currentByWindow[window] {
+				if _, keep := selected[userID]; keep {
+					continue
+				}
+				if quota.attributed > 0 {
+					checkpoint.UnattributedPercent = roundWindowPercent(checkpoint.UnattributedPercent + quota.attributed)
+					changed = true
+				}
+				if cost := checkpoint.PendingBasisByUser[userID]; cost > 0 {
+					checkpoint.PendingUnattributedBasisUSD += cost
+					delete(checkpoint.PendingBasisByUser, userID)
+					changed = true
+				}
+			}
+			if changed {
+				if err := persistAccountWindowCheckpointInTx(txCtx, client, accountID, service.AccountWindowAttributionCheckpointExtraKey(window), checkpoint); err != nil {
+					return err
+				}
+				checkpoints[window] = checkpoint
+				effectiveCheckpoints[window] = checkpoint
+			}
+		}
+
 		removeArgs := make([]any, 0, len(userIDs)+2)
-		removeArgs = append(removeArgs, accountID, now)
+		removeArgs = append(removeArgs, accountID, syncNow)
 		removePlaceholders := make([]string, len(userIDs))
 		for i, userID := range userIDs {
 			removePlaceholders[i] = fmt.Sprintf("$%d", i+3)
@@ -654,26 +1707,44 @@ func (r *userAccountWindowQuotaRepository) SyncAccountMembers(ctx context.Contex
 			{window: service.WindowType5h, ceiling: ceiling5h},
 			{window: service.WindowType7d, ceiling: ceiling7d},
 		} {
-			share := math.Floor(item.ceiling/float64(len(userIDs))*10000) / 10000
-			usageState := usageByWindow[item.window]
-			usedShare := math.Floor(usageState.total/float64(len(userIDs))*10000) / 10000
-			const upsertQ = `INSERT INTO user_account_window_quotas
-				(user_id, account_id, window_type, limit_percent, attributed_percent, window_reset_at, created_at, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
-				ON CONFLICT (user_id, account_id, window_type) WHERE deleted_at IS NULL DO UPDATE SET
-					limit_percent = EXCLUDED.limit_percent,
-					attributed_percent = EXCLUDED.attributed_percent,
-					window_reset_at = COALESCE(EXCLUDED.window_reset_at, user_account_window_quotas.window_reset_at),
-					updated_at = EXCLUDED.updated_at`
+			current := currentByWindow[item.window]
+			retainedLimit := 0.0
+			newUsers := make([]int64, 0)
+			var resetAt *time.Time
+			if checkpoint, ok := effectiveCheckpoints[item.window]; ok && checkpoint.ResetAt != nil && checkpoint.ResetAt.After(syncNow) {
+				value := *checkpoint.ResetAt
+				resetAt = &value
+			}
 			for _, userID := range userIDs {
-				if _, err := client.ExecContext(txCtx, upsertQ, userID, accountID, item.window, share, usedShare, nullableTime(usageState.resetAt), now); err != nil {
+				if quota, ok := current[userID]; ok {
+					retainedLimit += quota.limit
+					if resetAt == nil && quota.resetAt != nil && quota.resetAt.After(syncNow) {
+						value := *quota.resetAt
+						resetAt = &value
+					}
+					continue
+				}
+				newUsers = append(newUsers, userID)
+			}
+			defaultLimit := 0.0
+			if len(newUsers) > 0 {
+				available := math.Max(0, item.ceiling-retainedLimit)
+				perSelection := item.ceiling / float64(len(userIDs))
+				defaultLimit = math.Floor(math.Min(perSelection, available/float64(len(newUsers)))*10000) / 10000
+			}
+			const insertQ = `INSERT INTO user_account_window_quotas
+				(user_id, account_id, window_type, limit_percent, attributed_percent, donate_pool_fraction, window_reset_at, created_at, updated_at)
+				VALUES ($1, $2, $3, $4, 0, 0, $5, $6, $6)
+				ON CONFLICT (user_id, account_id, window_type) WHERE deleted_at IS NULL DO NOTHING`
+			for _, userID := range newUsers {
+				if _, err := client.ExecContext(txCtx, insertQ, userID, accountID, item.window, defaultLimit, nullableTime(resetAt), syncNow); err != nil {
 					return fmt.Errorf("add account %d member %d window %s: %w", accountID, userID, item.window, err)
 				}
 			}
 			results = append(results, service.AccountWindowEqualizationResult{
 				WindowType:        item.window,
 				ActiveMemberCount: len(userIDs),
-				SharePercent:      share,
+				SharePercent:      defaultLimit,
 				CeilingPercent:    item.ceiling,
 			})
 		}
@@ -702,6 +1773,13 @@ func (r *userAccountWindowQuotaRepository) withWindowQuotaTx(ctx context.Context
 		return fmt.Errorf("commit account window quota transaction: %w", err)
 	}
 	return nil
+}
+
+func windowLengthSecondsForRepository(window string) int {
+	if window == service.WindowType7d {
+		return 7 * 24 * 60 * 60
+	}
+	return 5 * 60 * 60
 }
 
 // nullableTime 把 *time.Time 转为 ExecContext 可识别的参数（nil → SQL NULL）。

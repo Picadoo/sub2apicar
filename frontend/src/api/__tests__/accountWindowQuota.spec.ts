@@ -33,6 +33,8 @@ describe('account window quota admin API', () => {
         member_count: 4,
         configured_sum_percent: 96,
         used_sum_percent: 20,
+        attributed_sum_percent: 18,
+        unattributed_percent: 2,
         ceiling_percent: 92,
         overallocated: true,
       }],
@@ -43,10 +45,13 @@ describe('account window quota admin API', () => {
     expect(get).toHaveBeenCalledWith('/admin/account-window-quotas/overview')
   })
 
-  it('puts an explicit member list for unused users', async () => {
-    put.mockResolvedValue({ data: { ok: true, account_id: 7, windows: [] } })
+  it('puts an explicit member list without requiring a legacy rebalance payload', async () => {
+    const response = { ok: true, account_id: 7, member_count: 3 }
+    put.mockResolvedValue({ data: response })
 
-    await setAccountWindowMembers({ account_id: 7, user_ids: [1, 2, 3] })
+    await expect(
+      setAccountWindowMembers({ account_id: 7, user_ids: [1, 2, 3] }),
+    ).resolves.toEqual(response)
 
     expect(put).toHaveBeenCalledWith('/admin/account-window-quotas/accounts/7/members', {
       user_ids: [1, 2, 3],

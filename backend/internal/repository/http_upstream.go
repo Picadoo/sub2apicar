@@ -215,6 +215,7 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 	client := httpClientForUpstreamRequest(entry.client, req)
 	client = httpClientWithGrokAccessDeniedFallback(client)
 	resp, err := servertiming.Do(client, req)
+	responseHeadersObservedAt := time.Now()
 	if err != nil {
 		s.recordOpenAIHTTP2Failure(profile, entry.protocolMode, entry.proxyKey, err)
 		// 请求失败，立即减少计数
@@ -222,6 +223,7 @@ func (s *httpUpstreamService) Do(req *http.Request, proxyURL string, accountID i
 		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
 		return nil, err
 	}
+	service.MarkHTTPUpstreamResponseHeadersObservedAt(resp, responseHeadersObservedAt)
 	s.recordOpenAIHTTP2Success(profile, entry.protocolMode, entry.proxyKey)
 
 	// 如果上游返回了压缩内容，解压后再交给业务层
@@ -279,12 +281,14 @@ func (s *httpUpstreamService) DoWithTLS(req *http.Request, proxyURL string, acco
 	client := httpClientForUpstreamRequest(entry.client, req)
 	client = httpClientWithGrokAccessDeniedFallback(client)
 	resp, err := servertiming.Do(client, req)
+	responseHeadersObservedAt := time.Now()
 	if err != nil {
 		atomic.AddInt64(&entry.inFlight, -1)
 		atomic.StoreInt64(&entry.lastUsed, time.Now().UnixNano())
 		slog.Debug("tls_fingerprint_request_failed", "account_id", accountID, "error", err)
 		return nil, err
 	}
+	service.MarkHTTPUpstreamResponseHeadersObservedAt(resp, responseHeadersObservedAt)
 
 	decompressResponseBody(resp)
 

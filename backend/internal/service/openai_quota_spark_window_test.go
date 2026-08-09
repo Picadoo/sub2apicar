@@ -160,6 +160,69 @@ func TestBuildCodexSparkWindowExtraUpdates_NoBengalfox(t *testing.T) {
 	require.Nil(t, buildCodexSparkWindowExtraUpdates(usage, time.Now()))
 }
 
+func TestCodexUsageSnapshotFromQuotaUsage_PrefersTopLevelRateLimit(t *testing.T) {
+	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
+	usage := &OpenAIQuotaUsage{
+		RateLimit: &OpenAIRateLimit{
+			PrimaryWindow:   &OpenAIRateLimitWindow{UsedPercent: 0.99, LimitWindowSeconds: 18000, ResetAfterSeconds: 60},
+			SecondaryWindow: &OpenAIRateLimitWindow{UsedPercent: 0.77, LimitWindowSeconds: 604800, ResetAfterSeconds: 120},
+		},
+		AdditionalRateLimits: []OpenAIAdditionalRateLimit{{
+			MeteredFeature: "codex_bengalfox",
+			RateLimit: &OpenAIRateLimit{
+				PrimaryWindow:   &OpenAIRateLimitWindow{UsedPercent: 0.42, LimitWindowSeconds: 18000, ResetAfterSeconds: 3600},
+				SecondaryWindow: &OpenAIRateLimitWindow{UsedPercent: 0.15, LimitWindowSeconds: 604800, ResetAfterSeconds: 86400},
+			},
+		}},
+	}
+
+	snapshot := codexUsageSnapshotFromQuotaUsageAt(usage, now)
+	require.NotNil(t, snapshot)
+	normalized := snapshot.Normalize()
+	require.NotNil(t, normalized)
+	require.InDelta(t, 0.99, *normalized.Used5hPercent, 1e-9)
+	require.InDelta(t, 0.77, *normalized.Used7dPercent, 1e-9)
+	require.Equal(t, now.Format(time.RFC3339), snapshot.UpdatedAt)
+}
+
+func TestCodexUsageSnapshotFromQuotaUsage_UsesUpstreamObservationTime(t *testing.T) {
+	observedAt := time.Date(2026, time.August, 2, 10, 11, 12, 345678900, time.UTC)
+	usage := &OpenAIQuotaUsage{
+		ObservedAt: observedAt,
+		FetchedAt:  observedAt.Unix(),
+		RateLimit: &OpenAIRateLimit{
+			PrimaryWindow: &OpenAIRateLimitWindow{UsedPercent: 12.5, LimitWindowSeconds: 18000, ResetAfterSeconds: 3600},
+		},
+	}
+
+	snapshot := CodexUsageSnapshotFromQuotaUsage(usage)
+	require.NotNil(t, snapshot)
+	require.Equal(t, observedAt.Format(time.RFC3339Nano), snapshot.UpdatedAt)
+}
+
+func TestCodexUsageSnapshotFromQuotaUsage_FallsBackToBengalfoxWhenTopLevelMissing(t *testing.T) {
+	usage := &OpenAIQuotaUsage{
+		RateLimit: &OpenAIRateLimit{},
+		AdditionalRateLimits: []OpenAIAdditionalRateLimit{{
+			MeteredFeature: "codex_bengalfox",
+			RateLimit: &OpenAIRateLimit{
+				PrimaryWindow:   &OpenAIRateLimitWindow{UsedPercent: 0.31, LimitWindowSeconds: 18000, ResetAfterSeconds: 1800},
+				SecondaryWindow: &OpenAIRateLimitWindow{UsedPercent: 0.08, LimitWindowSeconds: 604800, ResetAfterSeconds: 7200},
+			},
+		}},
+	}
+
+	snapshot := codexUsageSnapshotFromQuotaUsageAt(usage, time.Now())
+	require.NotNil(t, snapshot)
+	normalized := snapshot.Normalize()
+	require.InDelta(t, 0.31, *normalized.Used5hPercent, 1e-9)
+	require.InDelta(t, 0.08, *normalized.Used7dPercent, 1e-9)
+}
+
+func TestCodexUsageSnapshotFromQuotaUsage_RejectsMissingWindows(t *testing.T) {
+	require.Nil(t, codexUsageSnapshotFromQuotaUsageAt(&OpenAIQuotaUsage{RateLimit: &OpenAIRateLimit{}}, time.Now()))
+}
+
 // ── Part C: ResetCredit 影子拒绝 ───────────────────────────────────────────
 
 // TestResetCreditShadowRejected 验证:
@@ -350,10 +413,12 @@ func TestPrepareUpstreamCallShadowResolve(t *testing.T) {
 		return req.C(), nil
 	})
 
-	_, chatGPTAccountID, _, _, err := svc.prepareUpstreamCall(ctx, 200)
+	_, chatGPTAccountID, _, _, quotaDimension, err := svc.prepareUpstreamCall(ctx, 200)
 	require.NoError(t, err, "shadow resolve should succeed; got error: %v", err)
 	require.Equal(t, "org-parent123", chatGPTAccountID,
 		"prepareUpstreamCall should use parent's chatgpt_account_id after shadow resolve")
+	require.Equal(t, QuotaDimensionSpark, quotaDimension,
+		"prepareUpstreamCall should preserve the requested shadow's quota dimension")
 }
 
 func TestQueryUsageAgentIdentityUsesAssertionWithoutOAuthToken(t *testing.T) {
@@ -725,4 +790,88 @@ func TestQueryUsageShadowResolve_EndToEnd(t *testing.T) {
 	require.NotNil(t, usage)
 	require.Equal(t, "org-e2e-parent", capturedAccountID,
 		"upstream should receive parent's chatgpt-account-id; got: %s", capturedAccountID)
+}
+
+func TestQueryUsageSelectsWindowQuotaSnapshotByRequestedDimension(t *testing.T) {
+	ctx := context.Background()
+	parentID := int64(100)
+	parent := &Account{
+		ID:       parentID,
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeOAuth,
+		Status:   StatusActive,
+		Credentials: map[string]any{
+			"chatgpt_account_id": "org-mixed-window-parent",
+		},
+	}
+	shadow := &Account{
+		ID:              200,
+		ParentAccountID: &parentID,
+		Platform:        PlatformOpenAI,
+		Type:            AccountTypeOAuth,
+		Status:          StatusActive,
+		QuotaDimension:  QuotaDimensionSpark,
+	}
+	mixedUsage := OpenAIQuotaUsage{
+		RateLimit: &OpenAIRateLimit{
+			PrimaryWindow:   &OpenAIRateLimitWindow{UsedPercent: 91, LimitWindowSeconds: 18000, ResetAfterSeconds: 91},
+			SecondaryWindow: &OpenAIRateLimitWindow{UsedPercent: 81, LimitWindowSeconds: 604800, ResetAfterSeconds: 81},
+		},
+		AdditionalRateLimits: []OpenAIAdditionalRateLimit{{
+			MeteredFeature: "codex_bengalfox",
+			RateLimit: &OpenAIRateLimit{
+				PrimaryWindow:   &OpenAIRateLimitWindow{UsedPercent: 41, LimitWindowSeconds: 18000, ResetAfterSeconds: 41},
+				SecondaryWindow: &OpenAIRateLimitWindow{UsedPercent: 11, LimitWindowSeconds: 604800, ResetAfterSeconds: 11},
+			},
+		}},
+	}
+
+	for _, tt := range []struct {
+		name       string
+		accountID  int64
+		want5h     float64
+		want7d     float64
+		wantHeader string
+	}{
+		{name: "ordinary account uses top-level", accountID: parentID, want5h: 91, want7d: 81, wantHeader: "org-mixed-window-parent"},
+		{name: "spark shadow uses bengalfox", accountID: shadow.ID, want5h: 41, want7d: 11, wantHeader: "org-mixed-window-parent"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := &stubQuotaAccountRepo{accounts: map[int64]*Account{parentID: parent, shadow.ID: shadow}}
+			tokenProvider := NewOpenAITokenProvider(repo, &stubQuotaTokenCache{tokens: map[string]string{
+				OpenAITokenCacheKey(parent): "fake-token-mixed-window",
+			}}, nil)
+			var capturedAccountID string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("content-type", "application/json")
+				switch r.URL.Path {
+				case "/backend-api/wham/usage":
+					capturedAccountID = r.Header.Get("chatgpt-account-id")
+					_ = json.NewEncoder(w).Encode(mixedUsage)
+				case "/backend-api/wham/rate-limit-reset-credits":
+					_, _ = w.Write([]byte(`{}`))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+
+			svc := NewOpenAIQuotaService(repo, nil, tokenProvider, newQuotaRedirectingFactory(srv))
+			usage, err := svc.QueryUsage(ctx, tt.accountID)
+			require.NoError(t, err)
+			require.NotNil(t, usage)
+			require.Equal(t, tt.wantHeader, capturedAccountID)
+			require.NotNil(t, usage.WindowQuotaSnapshot)
+			normalized := usage.WindowQuotaSnapshot.Normalize()
+			require.NotNil(t, normalized)
+			require.InDelta(t, tt.want5h, *normalized.Used5hPercent, 1e-9)
+			require.InDelta(t, tt.want7d, *normalized.Used7dPercent, 1e-9)
+
+			encoded, err := json.Marshal(usage)
+			require.NoError(t, err)
+			require.NotContains(t, string(encoded), "window_quota_snapshot")
+			require.Contains(t, string(encoded), `"rate_limit"`)
+			require.Contains(t, string(encoded), `"additional_rate_limits"`)
+		})
+	}
 }

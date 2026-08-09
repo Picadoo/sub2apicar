@@ -22,6 +22,39 @@ import (
 	"github.com/stretchr/testify/suite"
 )
 
+func TestHTTPUpstreamDoRecordsResponseHeaderObservationBeforeBodyCompletes(t *testing.T) {
+	releaseBody := make(chan struct{})
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-Test", "ready")
+		w.WriteHeader(http.StatusOK)
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		<-releaseBody
+		_, _ = io.WriteString(w, "done")
+	}))
+	t.Cleanup(upstreamServer.Close)
+
+	req, err := http.NewRequest(http.MethodGet, upstreamServer.URL, nil)
+	require.NoError(t, err)
+	upstream := NewHTTPUpstream(nil)
+	startedAt := time.Now()
+	resp, err := upstream.Do(req, "", 1, 1)
+	require.NoError(t, err)
+	observedAt := service.HTTPUpstreamResponseHeadersObservedAt(resp)
+	require.False(t, observedAt.IsZero())
+	require.False(t, observedAt.Before(startedAt))
+	returnedAt := time.Now()
+	require.False(t, observedAt.After(returnedAt))
+
+	time.Sleep(50 * time.Millisecond)
+	close(releaseBody)
+	_, err = io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.True(t, observedAt.Before(time.Now().Add(-25*time.Millisecond)), "header observation must not be recomputed after the body finishes")
+}
+
 func TestHTTPUpstreamDoCanDisableRedirectsPerRequest(t *testing.T) {
 	var redirectedCalls atomic.Int64
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

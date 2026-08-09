@@ -132,7 +132,7 @@ func (s *OpenAIGatewayService) ForwardEmbeddings(
 				Message:            upstreamMsg,
 				Detail:             upstreamDetail,
 			})
-			shouldDisable := s.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody, upstreamModel)
+			shouldDisable := s.handleOpenAIAccountUpstreamErrorAt(ctx, account, resp.StatusCode, resp.Header, respBody, HTTPUpstreamResponseHeadersObservedAt(resp), upstreamModel)
 			return nil, &UpstreamFailoverError{
 				StatusCode:             resp.StatusCode,
 				ResponseBody:           respBody,
@@ -154,13 +154,15 @@ func (s *OpenAIGatewayService) ForwardEmbeddings(
 	writeOpenAIEmbeddingsUpstreamResponse(c, resp, respBody, s.responseHeaderFilter)
 
 	return &OpenAIForwardResult{
-		RequestID:     firstNonEmptyString(resp.Header.Get("x-request-id"), resp.Header.Get("request-id")),
-		Usage:         extractOpenAIEmbeddingsUsage(respBody),
-		Model:         originalModel,
-		BillingModel:  billingModel,
-		UpstreamModel: upstreamModel,
-		Stream:        false,
-		Duration:      time.Since(startTime),
+		RequestID:                 firstNonEmptyString(resp.Header.Get("x-request-id"), resp.Header.Get("request-id")),
+		Usage:                     extractOpenAIEmbeddingsUsage(respBody),
+		Model:                     originalModel,
+		BillingModel:              billingModel,
+		UpstreamModel:             upstreamModel,
+		Stream:                    false,
+		Duration:                  time.Since(startTime),
+		ResponseHeaders:           resp.Header.Clone(),
+		ResponseHeadersObservedAt: HTTPUpstreamResponseHeadersObservedAt(resp),
 	}, nil
 }
 

@@ -16,18 +16,27 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+type openAIQuotaQuerier interface {
+	QueryUsage(ctx context.Context, accountID int64) (*service.OpenAIQuotaUsage, error)
+	ResetCredit(ctx context.Context, accountID int64) (*service.OpenAIQuotaResetResult, error)
+}
+
+type accountWindowQuotaSynchronizer interface {
+	SyncOfficialSnapshot(ctx context.Context, accountID int64, snapshot *service.OpenAICodexUsageSnapshot) error
+}
+
 // OpenAIOAuthHandler handles OpenAI OAuth-related operations
 type OpenAIOAuthHandler struct {
 	openaiOAuthService *service.OpenAIOAuthService
 	adminService       service.AdminService
 	quotaService       openAIQuotaService
 	rateLimitService   openAIAccountStateRecoverer
+	windowQuota        accountWindowQuotaSynchronizer
 }
 
 type openAIQuotaService interface {
-	QueryUsage(ctx context.Context, accountID int64) (*service.OpenAIQuotaUsage, error)
+	openAIQuotaQuerier
 	CacheResetCreditsSnapshot(ctx context.Context, accountID int64, credits *service.OpenAIRateLimitResetCredits) error
-	ResetCredit(ctx context.Context, accountID int64) (*service.OpenAIQuotaResetResult, error)
 }
 
 type openAIAccountStateRecoverer interface {
@@ -87,6 +96,7 @@ func NewOpenAIOAuthHandler(
 	adminService service.AdminService,
 	quotaService *service.OpenAIQuotaService,
 	rateLimitService *service.RateLimitService,
+	windowQuota *service.AccountWindowQuotaService,
 ) *OpenAIOAuthHandler {
 	h := &OpenAIOAuthHandler{
 		openaiOAuthService: openaiOAuthService,
@@ -100,6 +110,9 @@ func NewOpenAIOAuthHandler(
 	}
 	if rateLimitService != nil {
 		h.rateLimitService = rateLimitService
+	}
+	if windowQuota != nil {
+		h.windowQuota = windowQuota
 	}
 	return h
 }
@@ -494,6 +507,18 @@ func (h *OpenAIOAuthHandler) QueryQuota(c *gin.Context) {
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return
+	}
+	snapshot := usage.WindowQuotaSnapshot
+	if snapshot == nil {
+		// Compatibility for older test stubs that only populate the raw payload.
+		snapshot = service.CodexUsageSnapshotFromQuotaUsage(usage)
+	}
+	if snapshot != nil && h.windowQuota != nil {
+		if err := h.windowQuota.SyncOfficialSnapshot(c.Request.Context(), accountID, snapshot); err != nil {
+			// 成员归因失败不能污染或遮挡 OpenAI 官方账号总量。
+			// 管理端仍返回刚读取到的上游 usage，并记录错误供后续修复。
+			slog.Error("openai_quota_window_sync_failed", "account_id", accountID, "error", err)
+		}
 	}
 	response.Success(c, usage)
 }

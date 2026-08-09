@@ -198,7 +198,7 @@ func (s *GatewayService) ForwardCountTokens(ctx context.Context, c *gin.Context,
 	// 处理错误响应
 	if resp.StatusCode >= 400 {
 		// 标记账号状态（429/529等）
-		s.rateLimitService.HandleUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+		s.rateLimitService.HandleUpstreamErrorAt(ctx, account, resp.StatusCode, resp.Header, respBody, HTTPUpstreamResponseHeadersObservedAt(resp))
 
 		upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))
 		upstreamMsg = sanitizeUpstreamErrorMessage(upstreamMsg)
@@ -297,7 +297,7 @@ func (s *GatewayService) forwardCountTokensAnthropicAPIKeyPassthrough(ctx contex
 
 	if resp.StatusCode >= 400 {
 		if s.rateLimitService != nil {
-			s.rateLimitService.HandleUpstreamError(ctx, account, resp.StatusCode, resp.Header, respBody)
+			s.rateLimitService.HandleUpstreamErrorAt(ctx, account, resp.StatusCode, resp.Header, respBody, HTTPUpstreamResponseHeadersObservedAt(resp))
 		}
 
 		upstreamMsg := strings.TrimSpace(extractUpstreamErrorMessage(respBody))

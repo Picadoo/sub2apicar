@@ -2592,6 +2592,55 @@ func (r *accountRepository) UpdateExtra(ctx context.Context, id int64, updates m
 	return nil
 }
 
+// UpdateCodexUsageSnapshotIfNewer atomically rejects a late Codex usage snapshot.
+// The monotonic nanosecond marker is separate from the RFC3339 compatibility field
+// so PostgreSQL never has to cast legacy or malformed JSON timestamps.
+func (r *accountRepository) UpdateCodexUsageSnapshotIfNewer(ctx context.Context, id int64, observedAt time.Time, updates map[string]any) (bool, error) {
+	if len(updates) == 0 || observedAt.IsZero() {
+		return false, nil
+	}
+	payloadUpdates := make(map[string]any, len(updates)+2)
+	for key, value := range updates {
+		payloadUpdates[key] = value
+	}
+	observedAt = observedAt.UTC()
+	payloadUpdates["codex_usage_updated_at"] = observedAt.Format(time.RFC3339Nano)
+	payloadUpdates["codex_usage_observed_unix_nano"] = observedAt.UnixNano()
+	payload, err := json.Marshal(payloadUpdates)
+	if err != nil {
+		return false, err
+	}
+
+	client := clientFromContext(ctx, r.client)
+	legacyObservedAt := observedAt.Truncate(time.Second).Format(time.RFC3339)
+	result, err := client.ExecContext(ctx, `
+		UPDATE accounts
+		SET extra = COALESCE(extra, '{}'::jsonb) || $1::jsonb, updated_at = NOW()
+		WHERE id = $2
+		  AND deleted_at IS NULL
+		  AND CASE
+			WHEN (extra ->> 'codex_usage_observed_unix_nano') ~ '^[0-9]+$'
+				THEN (extra ->> 'codex_usage_observed_unix_nano')::numeric < $3::numeric
+			WHEN (extra ->> 'codex_usage_updated_at') ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
+				THEN (extra ->> 'codex_usage_updated_at') < $4
+			ELSE TRUE
+		  END`, string(payload), id, observedAt.UnixNano(), legacyObservedAt)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected == 0 {
+		return false, nil
+	}
+	if dbent.TxFromContext(ctx) == nil {
+		r.syncSchedulerAccountSnapshot(ctx, id)
+	}
+	return true, nil
+}
+
 // UpdateUpstreamBillingProbeSnapshot stores a probe result only while the
 // network identity used by that probe is still current.
 func (r *accountRepository) UpdateUpstreamBillingProbeSnapshot(

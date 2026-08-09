@@ -268,7 +268,7 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 
 	// 排除 spark 影子:其 codex_* 仅由 QueryUsage(/wham/usage bengalfox)更新(外审第7轮 P1)。
 	if !account.IsShadow() {
-		if snapshot := ParseCodexRateLimitHeaders(resp.Header); snapshot != nil {
+		if snapshot := parseCodexRateLimitHeadersAt(resp.Header, HTTPUpstreamResponseHeadersObservedAt(resp)); snapshot != nil {
 			s.updateCodexUsageSnapshot(ctx, userIDFromGinContext(c), account.ID, snapshot)
 		}
 	}
@@ -291,6 +291,8 @@ func (s *OpenAIGatewayService) forwardOpenAIPassthrough(
 		OpenAIWSMode:                  false,
 		Duration:                      time.Since(startTime),
 		FirstTokenMs:                  firstTokenMs,
+		ResponseHeaders:               resp.Header.Clone(),
+		ResponseHeadersObservedAt:     HTTPUpstreamResponseHeadersObservedAt(resp),
 	}
 	if imageCount > 0 {
 		forwardResult.ImageCount = imageCount
@@ -619,7 +621,7 @@ func (s *OpenAIGatewayService) handleFailoverErrorResponsePassthrough(
 	logOpenAIInstructionsRequiredDebug(ctx, c, account, resp.StatusCode, upstreamMsg, requestBody, body)
 	reqModel, _, _ := extractOpenAIRequestMetaFromBody(requestBody)
 	canonicalModel := canonicalOpenAIAccountSchedulingModel(account, reqModel)
-	shouldDisable := s.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, body, canonicalModel)
+	shouldDisable := s.handleOpenAIAccountUpstreamErrorAt(ctx, account, resp.StatusCode, resp.Header, body, HTTPUpstreamResponseHeadersObservedAt(resp), canonicalModel)
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 		Platform:             account.Platform,
 		AccountID:            account.ID,
@@ -682,7 +684,7 @@ func (s *OpenAIGatewayService) handleErrorResponsePassthrough(
 	if !cyberHit {
 		reqModel, _, _ := extractOpenAIRequestMetaFromBody(requestBody)
 		canonicalModel := canonicalOpenAIAccountSchedulingModel(account, reqModel)
-		_ = s.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, body, canonicalModel)
+		_ = s.handleOpenAIAccountUpstreamErrorAt(ctx, account, resp.StatusCode, resp.Header, body, HTTPUpstreamResponseHeadersObservedAt(resp), canonicalModel)
 	}
 	appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
 		Platform:             account.Platform,

@@ -206,6 +206,9 @@ func ProvideAccountUsageService(
 		tlsFPProfileService,
 	)
 	service.agentIdentityWS = openAIGatewayService
+	if openAIGatewayService != nil {
+		service.accountWindowQuota = openAIGatewayService.accountWindowQuota
+	}
 	return service
 }
 

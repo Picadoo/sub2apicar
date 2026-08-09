@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -331,6 +332,118 @@ func TestOpenAIGatewayServiceRecordUsage_ZeroUsageStillWritesUsageLog(t *testing
 	require.Zero(t, billingRepo.lastCmd.APIKeyQuotaCost)
 	require.Zero(t, billingRepo.lastCmd.APIKeyRateLimitCost)
 	require.Zero(t, billingRepo.lastCmd.AccountQuotaCost)
+}
+
+func TestOpenAIGatewayServiceRecordUsage_AttributesWindowAfterUsageLogPersists(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
+	userRepo := &openAIRecordUsageUserRepoStub{}
+	subRepo := &openAIRecordUsageSubRepoStub{}
+	windowRepo := &stubWindowRepo{}
+	windowRepo.recomputeHook = func() {
+		require.Equal(t, 1, usageRepo.calls, "美元归因必须等待当前 usage_log 写入完成")
+		require.NotNil(t, usageRepo.lastLog)
+		require.Greater(t, usageRepo.lastLog.TotalCost, 0.0)
+	}
+	windowQuota, _ := newQuotaServiceWithMiniRedis(t, windowRepo)
+	svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(usageRepo, billingRepo, userRepo, subRepo, nil)
+	svc.accountWindowQuota = windowQuota
+
+	headers := http.Header{}
+	headers.Set("x-codex-primary-used-percent", "42")
+	headers.Set("x-codex-primary-reset-after-seconds", "518400")
+	headers.Set("x-codex-primary-window-minutes", "10080")
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID:       "resp_cost_attribution_order",
+			Usage:           OpenAIUsage{InputTokens: 1200, OutputTokens: 300},
+			Model:           "gpt-5.1",
+			Duration:        time.Second,
+			ResponseHeaders: headers,
+		},
+		APIKey:  &APIKey{ID: 1000, Quota: 100, Group: &Group{RateMultiplier: 1}},
+		User:    &User{ID: 1},
+		Account: &Account{ID: 29, Type: AccountTypeOAuth, Platform: PlatformOpenAI, Extra: map[string]any{AccountExtraWindowQuotaShared: true}},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, windowRepo.costCalls, 1)
+	require.Equal(t, int64(29), windowRepo.costCalls[0].accountID)
+	require.InDelta(t, 42, windowRepo.costCalls[0].officialPercent, 1e-9)
+}
+
+func TestOpenAIGatewayServiceRecordUsage_SkipsWindowAttributionForPrivateOAuthAccount(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
+	windowRepo := &stubWindowRepo{}
+	windowQuota, _ := newQuotaServiceWithMiniRedis(t, windowRepo)
+	svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(
+		usageRepo,
+		billingRepo,
+		&openAIRecordUsageUserRepoStub{},
+		&openAIRecordUsageSubRepoStub{},
+		nil,
+	)
+	svc.accountWindowQuota = windowQuota
+
+	headers := http.Header{}
+	headers.Set("x-codex-primary-used-percent", "42")
+	headers.Set("x-codex-primary-reset-after-seconds", "3600")
+	headers.Set("x-codex-primary-window-minutes", "300")
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID:       "resp_private_account",
+			Usage:           OpenAIUsage{InputTokens: 1200, OutputTokens: 300},
+			Model:           "gpt-5.1",
+			Duration:        time.Second,
+			ResponseHeaders: headers,
+		},
+		APIKey:  &APIKey{ID: 1000, Quota: 100, Group: &Group{RateMultiplier: 1}},
+		User:    &User{ID: 1},
+		Account: &Account{ID: 50, Type: AccountTypeOAuth, Platform: PlatformOpenAI},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, 1, usageRepo.calls)
+	require.Empty(t, windowRepo.costCalls)
+}
+
+func TestOpenAIGatewayServiceRecordUsage_DoesNotRefreshExpiredWebSocketHandshakeSnapshot(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}
+	windowRepo := &stubWindowRepo{}
+	windowQuota, _ := newQuotaServiceWithMiniRedis(t, windowRepo)
+	svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(
+		usageRepo,
+		billingRepo,
+		&openAIRecordUsageUserRepoStub{},
+		&openAIRecordUsageSubRepoStub{},
+		nil,
+	)
+	svc.accountWindowQuota = windowQuota
+
+	headers := http.Header{}
+	headers.Set("x-codex-secondary-used-percent", "88")
+	headers.Set("x-codex-secondary-reset-after-seconds", "60")
+	headers.Set("x-codex-secondary-window-minutes", "300")
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID:                 "resp_stale_ws_headers",
+			Usage:                     OpenAIUsage{InputTokens: 1200, OutputTokens: 300},
+			Model:                     "gpt-5.1",
+			Duration:                  time.Second,
+			OpenAIWSMode:              true,
+			ResponseHeaders:           headers,
+			ResponseHeadersObservedAt: time.Now().Add(-10 * time.Minute),
+		},
+		APIKey:  &APIKey{ID: 1000, Quota: 100, Group: &Group{RateMultiplier: 1}},
+		User:    &User{ID: 1},
+		Account: &Account{ID: 29, Type: AccountTypeOAuth, Platform: PlatformOpenAI, Extra: map[string]any{AccountExtraWindowQuotaShared: true}},
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, 1, usageRepo.calls)
+	require.Empty(t, windowRepo.costCalls, "过期的 WS 握手快照不能被当前请求重新标记为刚观测")
 }
 
 func TestOpenAIGatewayServiceRecordUsage_MissingPricingRecordsZeroCostUsageLog(t *testing.T) {

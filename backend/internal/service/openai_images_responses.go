@@ -901,7 +901,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesErrorResponse(
 	if len(requestedModel) > 0 {
 		modelForCooldown = strings.TrimSpace(requestedModel[0])
 	}
-	shouldDisable := s.handleOpenAIAccountUpstreamError(ctx, account, resp.StatusCode, resp.Header, body, modelForCooldown)
+	shouldDisable := s.handleOpenAIAccountUpstreamErrorAt(ctx, account, resp.StatusCode, resp.Header, body, HTTPUpstreamResponseHeadersObservedAt(resp), modelForCooldown)
 	kind := "http_error"
 	if shouldDisable {
 		kind = "failover"
@@ -1777,18 +1777,19 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 		if err != nil {
 			if imageCount > 0 {
 				return &OpenAIForwardResult{
-					RequestID:        resp.Header.Get("x-request-id"),
-					Usage:            usage,
-					Model:            requestModel,
-					UpstreamModel:    requestModel,
-					Stream:           parsed.Stream,
-					ResponseHeaders:  resp.Header.Clone(),
-					Duration:         time.Since(startTime),
-					FirstTokenMs:     firstTokenMs,
-					ImageCount:       imageCount,
-					ImageSize:        parsed.SizeTier,
-					ImageInputSize:   parsed.Size,
-					ImageOutputSizes: imageOutputSizes,
+					RequestID:                 resp.Header.Get("x-request-id"),
+					Usage:                     usage,
+					Model:                     requestModel,
+					UpstreamModel:             requestModel,
+					Stream:                    parsed.Stream,
+					ResponseHeaders:           resp.Header.Clone(),
+					ResponseHeadersObservedAt: HTTPUpstreamResponseHeadersObservedAt(resp),
+					Duration:                  time.Since(startTime),
+					FirstTokenMs:              firstTokenMs,
+					ImageCount:                imageCount,
+					ImageSize:                 parsed.SizeTier,
+					ImageInputSize:            parsed.Size,
+					ImageOutputSizes:          imageOutputSizes,
 				}, err
 			}
 			return nil, s.handleOpenAIImagesOAuthResponseError(
@@ -1821,18 +1822,19 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesOAuth(
 		imageCount = parsed.N
 	}
 	return &OpenAIForwardResult{
-		RequestID:        resp.Header.Get("x-request-id"),
-		Usage:            usage,
-		Model:            requestModel,
-		UpstreamModel:    requestModel,
-		Stream:           parsed.Stream,
-		ResponseHeaders:  resp.Header.Clone(),
-		Duration:         time.Since(startTime),
-		FirstTokenMs:     firstTokenMs,
-		ImageCount:       imageCount,
-		ImageSize:        parsed.SizeTier,
-		ImageInputSize:   parsed.Size,
-		ImageOutputSizes: imageOutputSizes,
+		RequestID:                 resp.Header.Get("x-request-id"),
+		Usage:                     usage,
+		Model:                     requestModel,
+		UpstreamModel:             requestModel,
+		Stream:                    parsed.Stream,
+		ResponseHeaders:           resp.Header.Clone(),
+		ResponseHeadersObservedAt: HTTPUpstreamResponseHeadersObservedAt(resp),
+		Duration:                  time.Since(startTime),
+		FirstTokenMs:              firstTokenMs,
+		ImageCount:                imageCount,
+		ImageSize:                 parsed.SizeTier,
+		ImageInputSize:            parsed.Size,
+		ImageOutputSizes:          imageOutputSizes,
 	}, nil
 }
 
@@ -1885,7 +1887,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesOAuthResponseError(
 	}
 
 	responseBody := openAIImagesUpstreamErrorResponseBody(upstreamErr)
-	shouldDisable := s.handleOpenAIAccountUpstreamError(ctx, account, upstreamErr.StatusCode, headers, responseBody, requestedModel)
+	shouldDisable := s.handleOpenAIAccountUpstreamErrorAt(ctx, account, upstreamErr.StatusCode, headers, responseBody, HTTPUpstreamResponseHeadersObservedAt(resp), requestedModel)
 	return &UpstreamFailoverError{
 		StatusCode:             upstreamErr.StatusCode,
 		ResponseBody:           responseBody,

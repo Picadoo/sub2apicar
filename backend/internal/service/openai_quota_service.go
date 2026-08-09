@@ -87,6 +87,8 @@ type OpenAIQuotaUsage struct {
 	AdditionalRateLimits  []OpenAIAdditionalRateLimit  `json:"additional_rate_limits,omitempty"`
 	RateLimitResetCredits *OpenAIRateLimitResetCredits `json:"rate_limit_reset_credits,omitempty"`
 	FetchedAt             int64                        `json:"fetched_at"`
+	ObservedAt            time.Time                    `json:"-"`
+	WindowQuotaSnapshot   *OpenAICodexUsageSnapshot    `json:"-"`
 }
 
 // OpenAIQuotaResetCredit captures the redeemed credit metadata returned by the
@@ -143,7 +145,7 @@ func NewOpenAIQuotaService(
 // OAuth account. Returns infraerrors so the handler layer can map them to
 // stable error codes / HTTP statuses.
 func (s *OpenAIQuotaService) QueryUsage(ctx context.Context, accountID int64) (*OpenAIQuotaUsage, error) {
-	accessToken, chatGPTAccountID, proxyURL, fedRAMP, err := s.prepareUpstreamCall(ctx, accountID)
+	accessToken, chatGPTAccountID, proxyURL, fedRAMP, quotaDimension, err := s.prepareUpstreamCall(ctx, accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -158,6 +160,7 @@ func (s *OpenAIQuotaService) QueryUsage(ctx context.Context, accountID int64) (*
 	agentIdentity := s.isAgentIdentityAccount(ctx, accountID)
 
 	var payload OpenAIQuotaUsage
+	var observedAt time.Time
 	for recovered := false; ; {
 		quotaHeaders, expectedTaskID, headerErr := s.buildCodexQuotaHeaders(callCtx, accountID, accessToken, chatGPTAccountID, fedRAMP)
 		if headerErr != nil {
@@ -168,6 +171,7 @@ func (s *OpenAIQuotaService) QueryUsage(ctx context.Context, accountID int64) (*
 			SetHeaders(quotaHeaders).
 			SetSuccessResult(&payload).
 			Get(chatGPTUsageURL)
+		observedAt = time.Now()
 		if err != nil {
 			return nil, infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_REQUEST_FAILED", "upstream request failed: %v", err)
 		}
@@ -187,7 +191,9 @@ func (s *OpenAIQuotaService) QueryUsage(ctx context.Context, accountID int64) (*
 		break
 	}
 
-	payload.FetchedAt = time.Now().Unix()
+	payload.ObservedAt = observedAt
+	payload.FetchedAt = observedAt.Unix()
+	payload.WindowQuotaSnapshot = openAIWindowQuotaSnapshotFromUsageAt(&payload, quotaDimension, observedAt)
 	details := s.queryResetCreditDetails(callCtx, client, accessToken, chatGPTAccountID, fedRAMP, accountID)
 	if details != nil {
 		hasDetailCount := details.AvailableCount != nil
@@ -292,7 +298,7 @@ func (s *OpenAIQuotaService) ResetCredit(ctx context.Context, accountID int64) (
 		}
 	}
 
-	accessToken, chatGPTAccountID, proxyURL, fedRAMP, err := s.prepareUpstreamCall(ctx, accountID)
+	accessToken, chatGPTAccountID, proxyURL, fedRAMP, _, err := s.prepareUpstreamCall(ctx, accountID)
 	if err != nil {
 		return nil, err
 	}
@@ -353,33 +359,40 @@ func (s *OpenAIQuotaService) ResetCredit(ctx context.Context, accountID int64) (
 
 // prepareUpstreamCall loads the account, validates it, obtains a fresh access
 // token via the shared TokenProvider, and resolves the chatgpt-account-id and
-// proxy URL. Centralized so QueryUsage / ResetCredit share validation.
-func (s *OpenAIQuotaService) prepareUpstreamCall(ctx context.Context, accountID int64) (accessToken, chatGPTAccountID, proxyURL string, fedRAMP bool, err error) {
+// proxy URL. The quota dimension is captured from the originally requested
+// account before a shadow resolves to its credential-owning parent.
+func (s *OpenAIQuotaService) prepareUpstreamCall(ctx context.Context, accountID int64) (accessToken, chatGPTAccountID, proxyURL string, fedRAMP bool, quotaDimension string, err error) {
 	if s == nil || s.accountRepo == nil || s.privacyClientFactory == nil {
-		return "", "", "", false, infraerrors.New(http.StatusInternalServerError, "OPENAI_QUOTA_NOT_CONFIGURED", "openai quota service is not configured")
+		return "", "", "", false, "", infraerrors.New(http.StatusInternalServerError, "OPENAI_QUOTA_NOT_CONFIGURED", "openai quota service is not configured")
 	}
 
 	account, err := s.accountRepo.GetByID(ctx, accountID)
 	if err != nil {
-		return "", "", "", false, infraerrors.Newf(http.StatusNotFound, "OPENAI_QUOTA_ACCOUNT_NOT_FOUND", "account not found: %v", err)
+		return "", "", "", false, "", infraerrors.Newf(http.StatusNotFound, "OPENAI_QUOTA_ACCOUNT_NOT_FOUND", "account not found: %v", err)
 	}
 	if account == nil {
-		return "", "", "", false, infraerrors.New(http.StatusNotFound, "OPENAI_QUOTA_ACCOUNT_NOT_FOUND", "account not found")
+		return "", "", "", false, "", infraerrors.New(http.StatusNotFound, "OPENAI_QUOTA_ACCOUNT_NOT_FOUND", "account not found")
 	}
 	if account.Platform != PlatformOpenAI {
-		return "", "", "", false, infraerrors.New(http.StatusBadRequest, "OPENAI_QUOTA_INVALID_PLATFORM", "account is not an OpenAI account")
+		return "", "", "", false, "", infraerrors.New(http.StatusBadRequest, "OPENAI_QUOTA_INVALID_PLATFORM", "account is not an OpenAI account")
 	}
 	if account.Type != AccountTypeOAuth {
-		return "", "", "", false, infraerrors.New(http.StatusBadRequest, "OPENAI_QUOTA_INVALID_TYPE", "account is not an OAuth account")
+		return "", "", "", false, "", infraerrors.New(http.StatusBadRequest, "OPENAI_QUOTA_INVALID_TYPE", "account is not an OAuth account")
+	}
+
+	quotaDimension = QuotaDimensionGlobal
+	if account.IsShadow() && account.QuotaDimensionOrDefault() == QuotaDimensionSpark {
+		quotaDimension = QuotaDimensionSpark
 	}
 
 	// Spark shadow accounts do not hold their own credentials; resolve to the
 	// parent account so that chatgpt_account_id / access_token / proxy all come
-	// from the parent. This must happen BEFORE the chatgpt_account_id check.
+	// from the parent. This must happen AFTER preserving the shadow's dimension
+	// and BEFORE the chatgpt_account_id check.
 	if account.IsShadow() {
 		resolved, rerr := resolveCredentialAccount(ctx, s.accountRepo, account)
 		if rerr != nil {
-			return "", "", "", false, infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_SHADOW_RESOLVE_FAILED", "failed to resolve shadow account: %v", rerr)
+			return "", "", "", false, "", infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_SHADOW_RESOLVE_FAILED", "failed to resolve shadow account: %v", rerr)
 		}
 		account = resolved
 	}
@@ -390,19 +403,19 @@ func (s *OpenAIQuotaService) prepareUpstreamCall(ctx context.Context, accountID 
 		chatGPTAccountID = strings.TrimSpace(account.GetCredential("organization_id"))
 	}
 	if chatGPTAccountID == "" {
-		return "", "", "", false, infraerrors.New(http.StatusBadRequest, "OPENAI_QUOTA_MISSING_ACCOUNT_ID", "chatgpt_account_id is missing; please re-authorize this account")
+		return "", "", "", false, "", infraerrors.New(http.StatusBadRequest, "OPENAI_QUOTA_MISSING_ACCOUNT_ID", "chatgpt_account_id is missing; please re-authorize this account")
 	}
 
 	if !account.IsOpenAIAgentIdentity() {
 		if s.tokenProvider == nil {
-			return "", "", "", false, infraerrors.New(http.StatusInternalServerError, "OPENAI_QUOTA_NOT_CONFIGURED", "openai quota token provider is not configured")
+			return "", "", "", false, "", infraerrors.New(http.StatusInternalServerError, "OPENAI_QUOTA_NOT_CONFIGURED", "openai quota token provider is not configured")
 		}
 		accessToken, err = s.tokenProvider.GetAccessToken(ctx, account)
 		if err != nil {
-			return "", "", "", false, infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_TOKEN_UNAVAILABLE", "failed to acquire access token: %v", err)
+			return "", "", "", false, "", infraerrors.Newf(http.StatusBadGateway, "OPENAI_QUOTA_TOKEN_UNAVAILABLE", "failed to acquire access token: %v", err)
 		}
 		if strings.TrimSpace(accessToken) == "" {
-			return "", "", "", false, infraerrors.New(http.StatusBadGateway, "OPENAI_QUOTA_TOKEN_UNAVAILABLE", "access token is empty")
+			return "", "", "", false, "", infraerrors.New(http.StatusBadGateway, "OPENAI_QUOTA_TOKEN_UNAVAILABLE", "access token is empty")
 		}
 	}
 	fedRAMP = account.IsChatGPTAccountFedRAMP()
@@ -423,7 +436,7 @@ func (s *OpenAIQuotaService) prepareUpstreamCall(ctx context.Context, accountID 
 		}
 	}
 
-	return accessToken, chatGPTAccountID, proxyURL, fedRAMP, nil
+	return accessToken, chatGPTAccountID, proxyURL, fedRAMP, quotaDimension, nil
 }
 
 func (s *OpenAIQuotaService) recoverAgentIdentityTask(ctx context.Context, accountID int64, expectedTaskID string) error {
@@ -546,6 +559,98 @@ func generateRedeemRequestID() (string, error) {
 	return fmt.Sprintf("%s-%s-%s-%s-%s", hexStr[0:8], hexStr[8:12], hexStr[12:16], hexStr[16:20], hexStr[20:]), nil
 }
 
+// CodexUsageSnapshotFromQuotaUsage converts /wham/usage rate-limit windows into
+// the canonical Codex snapshot used by the shared parent-account ledger.
+// The top-level rate_limit is authoritative for ordinary/shared parent accounts;
+// codex_bengalfox is only a fallback when the top-level envelope has no windows.
+func CodexUsageSnapshotFromQuotaUsage(usage *OpenAIQuotaUsage) *OpenAICodexUsageSnapshot {
+	if usage == nil {
+		return nil
+	}
+	observedAt := usage.ObservedAt
+	if observedAt.IsZero() && usage.FetchedAt > 0 {
+		observedAt = time.Unix(usage.FetchedAt, 0)
+	}
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
+	return codexUsageSnapshotFromQuotaUsageAt(usage, observedAt)
+}
+
+func codexUsageSnapshotFromQuotaUsageAt(usage *OpenAIQuotaUsage, now time.Time) *OpenAICodexUsageSnapshot {
+	if usage == nil {
+		return nil
+	}
+	if snapshot := codexUsageSnapshotFromRateLimit(usage.RateLimit, now); snapshot != nil {
+		return snapshot
+	}
+	for i := range usage.AdditionalRateLimits {
+		additional := usage.AdditionalRateLimits[i]
+		if additional.MeteredFeature != "codex_bengalfox" {
+			continue
+		}
+		if snapshot := codexUsageSnapshotFromRateLimit(additional.RateLimit, now); snapshot != nil {
+			return snapshot
+		}
+	}
+	return nil
+}
+
+func openAIWindowQuotaSnapshotFromUsageAt(usage *OpenAIQuotaUsage, quotaDimension string, observedAt time.Time) *OpenAICodexUsageSnapshot {
+	if usage == nil {
+		return nil
+	}
+	if quotaDimension == QuotaDimensionSpark {
+		return codexSparkUsageSnapshotFromQuotaUsageAt(usage, observedAt)
+	}
+	return codexUsageSnapshotFromRateLimit(usage.RateLimit, observedAt)
+}
+
+func codexSparkUsageSnapshotFromQuotaUsageAt(usage *OpenAIQuotaUsage, observedAt time.Time) *OpenAICodexUsageSnapshot {
+	if usage == nil {
+		return nil
+	}
+	for i := range usage.AdditionalRateLimits {
+		additional := usage.AdditionalRateLimits[i]
+		if additional.MeteredFeature == "codex_bengalfox" {
+			return codexUsageSnapshotFromRateLimit(additional.RateLimit, observedAt)
+		}
+	}
+	return nil
+}
+
+func codexUsageSnapshotFromRateLimit(rateLimit *OpenAIRateLimit, now time.Time) *OpenAICodexUsageSnapshot {
+	if rateLimit == nil {
+		return nil
+	}
+
+	// Reuse OpenAICodexUsageSnapshot / Normalize to map primary/secondary windows
+	// to canonical 5h/7d buckets (same logic as gateway header snapshots).
+	snapshot := &OpenAICodexUsageSnapshot{UpdatedAt: now.UTC().Format(time.RFC3339Nano)}
+	if window := rateLimit.PrimaryWindow; window != nil {
+		used := window.UsedPercent
+		snapshot.PrimaryUsedPercent = &used
+		resetAfter := int(window.ResetAfterSeconds)
+		snapshot.PrimaryResetAfterSeconds = &resetAfter
+		minutes := int(window.LimitWindowSeconds / 60)
+		snapshot.PrimaryWindowMinutes = &minutes
+	}
+	if window := rateLimit.SecondaryWindow; window != nil {
+		used := window.UsedPercent
+		snapshot.SecondaryUsedPercent = &used
+		resetAfter := int(window.ResetAfterSeconds)
+		snapshot.SecondaryResetAfterSeconds = &resetAfter
+		minutes := int(window.LimitWindowSeconds / 60)
+		snapshot.SecondaryWindowMinutes = &minutes
+	}
+
+	normalized := snapshot.Normalize()
+	if normalized == nil || (normalized.Used5hPercent == nil && normalized.Used7dPercent == nil) {
+		return nil
+	}
+	return snapshot
+}
+
 // buildCodexSparkWindowExtraUpdates extracts Codex Spark usage windows from the
 // /wham/usage response body's additional_rate_limits, matching the entry with
 // MeteredFeature == "codex_bengalfox". It produces plain codex_* keys (NOT the
@@ -554,42 +659,14 @@ func generateRedeemRequestID() (string, error) {
 // Returns nil when no codex_bengalfox entry is present or when the RateLimit
 // yields no window data.
 func buildCodexSparkWindowExtraUpdates(usage *OpenAIQuotaUsage, now time.Time) map[string]any {
-	if usage == nil {
+	return buildCodexWindowExtraUpdates(codexSparkUsageSnapshotFromQuotaUsageAt(usage, now), now)
+}
+
+func buildCodexWindowExtraUpdates(snapshot *OpenAICodexUsageSnapshot, now time.Time) map[string]any {
+	if snapshot == nil {
 		return nil
 	}
-	var spark *OpenAIRateLimit
-	for i := range usage.AdditionalRateLimits {
-		a := usage.AdditionalRateLimits[i]
-		if a.MeteredFeature == "codex_bengalfox" {
-			spark = a.RateLimit
-			break
-		}
-	}
-	if spark == nil {
-		return nil
-	}
-
-	// Reuse OpenAICodexUsageSnapshot / Normalize to map primary/secondary windows
-	// to canonical 5h/7d buckets (same logic as probeOpenAICodexSnapshot).
-	snap := &OpenAICodexUsageSnapshot{}
-	if w := spark.PrimaryWindow; w != nil {
-		p := w.UsedPercent
-		snap.PrimaryUsedPercent = &p
-		ra := int(w.ResetAfterSeconds)
-		snap.PrimaryResetAfterSeconds = &ra
-		wm := int(w.LimitWindowSeconds / 60)
-		snap.PrimaryWindowMinutes = &wm
-	}
-	if w := spark.SecondaryWindow; w != nil {
-		p := w.UsedPercent
-		snap.SecondaryUsedPercent = &p
-		ra := int(w.ResetAfterSeconds)
-		snap.SecondaryResetAfterSeconds = &ra
-		wm := int(w.LimitWindowSeconds / 60)
-		snap.SecondaryWindowMinutes = &wm
-	}
-
-	normalized := snap.Normalize()
+	normalized := snapshot.Normalize()
 	if normalized == nil {
 		return nil
 	}
@@ -613,16 +690,16 @@ func buildCodexSparkWindowExtraUpdates(usage *OpenAIQuotaUsage, now time.Time) m
 	if normalized.Window7dMinutes != nil {
 		updates["codex_7d_window_minutes"] = *normalized.Window7dMinutes
 	}
-	if r := codexResetAtRFC3339(now, normalized.Reset5hSeconds); r != nil {
-		updates["codex_5h_reset_at"] = *r
+	if resetAt := codexResetAtRFC3339(now, normalized.Reset5hSeconds); resetAt != nil {
+		updates["codex_5h_reset_at"] = *resetAt
 	}
-	if r := codexResetAtRFC3339(now, normalized.Reset7dSeconds); r != nil {
-		updates["codex_7d_reset_at"] = *r
+	if resetAt := codexResetAtRFC3339(now, normalized.Reset7dSeconds); resetAt != nil {
+		updates["codex_7d_reset_at"] = *resetAt
 	}
 	if len(updates) == 0 {
 		return nil
 	}
-	updates["codex_usage_updated_at"] = now.Format(time.RFC3339)
+	updates["codex_usage_updated_at"] = now.UTC().Format(time.RFC3339Nano)
 	return updates
 }
 

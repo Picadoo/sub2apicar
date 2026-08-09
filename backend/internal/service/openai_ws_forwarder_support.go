@@ -131,7 +131,7 @@ func (s *OpenAIGatewayService) performOpenAIWSGeneratePrewarm(
 
 		if eventType == "error" {
 			errCodeRaw, errTypeRaw, errMsgRaw := parseOpenAIWSErrorEventFields(message)
-			s.persistOpenAIWSRateLimitSignal(ctx, account, lease.HandshakeHeaders(), message, errCodeRaw, errTypeRaw, errMsgRaw)
+			s.persistOpenAIWSRateLimitSignal(ctx, account, lease.HandshakeHeaders(), message, lease.HandshakeObservedAt(), errCodeRaw, errTypeRaw, errMsgRaw)
 			errMsg := strings.TrimSpace(errMsgRaw)
 			if errMsg == "" {
 				errMsg = "OpenAI websocket prewarm error"
@@ -265,6 +265,10 @@ func openAIWSPayloadTransientStatus(payload []byte) int {
 }
 
 func (s *OpenAIGatewayService) handleOpenAIWSTerminalTransientFailure(ctx context.Context, account *Account, canonicalModel string, headers http.Header, payload []byte) string {
+	return s.handleOpenAIWSTerminalTransientFailureAt(ctx, account, canonicalModel, headers, payload, time.Now())
+}
+
+func (s *OpenAIGatewayService) handleOpenAIWSTerminalTransientFailureAt(ctx context.Context, account *Account, canonicalModel string, headers http.Header, payload []byte, observedAt time.Time) string {
 	eventType, _, _ := parseOpenAIWSEventEnvelope(payload)
 	terminalEvent := normalizeOpenAIWSTerminalEvent(eventType)
 	if terminalEvent != "response.failed" {
@@ -272,19 +276,23 @@ func (s *OpenAIGatewayService) handleOpenAIWSTerminalTransientFailure(ctx contex
 	}
 	status := openAIWSPayloadTransientStatus(payload)
 	if status != 0 {
-		s.handleOpenAIAccountUpstreamError(ctx, account, status, headers, payload, canonicalModel)
+		s.handleOpenAIAccountUpstreamErrorAt(ctx, account, status, headers, payload, observedAt, canonicalModel)
 	}
 	return terminalEvent
 }
 
 func (s *OpenAIGatewayService) handleOpenAIWSErrorEventTransientFailure(ctx context.Context, account *Account, canonicalModel string, headers http.Header, payload []byte) {
+	s.handleOpenAIWSErrorEventTransientFailureAt(ctx, account, canonicalModel, headers, payload, time.Now())
+}
+
+func (s *OpenAIGatewayService) handleOpenAIWSErrorEventTransientFailureAt(ctx context.Context, account *Account, canonicalModel string, headers http.Header, payload []byte, observedAt time.Time) {
 	eventType, _, _ := parseOpenAIWSEventEnvelope(payload)
 	if eventType != "error" {
 		return
 	}
 	status := openAIWSPayloadTransientStatus(payload)
 	if status != 0 {
-		s.handleOpenAIAccountUpstreamError(ctx, account, status, headers, payload, canonicalModel)
+		s.handleOpenAIAccountUpstreamErrorAt(ctx, account, status, headers, payload, observedAt, canonicalModel)
 	}
 }
 
@@ -293,7 +301,7 @@ func (s *OpenAIGatewayService) handleOpenAIWSDialTransientFailure(ctx context.Co
 	if !errors.As(err, &dialErr) || dialErr == nil || !shouldCooldownOpenAITransientUpstreamError(dialErr.StatusCode, dialErr.ResponseBody) {
 		return
 	}
-	s.handleOpenAIAccountUpstreamError(ctx, account, dialErr.StatusCode, dialErr.ResponseHeaders, dialErr.ResponseBody, canonicalModel)
+	s.handleOpenAIAccountUpstreamErrorAt(ctx, account, dialErr.StatusCode, dialErr.ResponseHeaders, dialErr.ResponseBody, dialErr.ObservedAt, canonicalModel)
 }
 
 func isOpenAIWSTokenEvent(eventType string) bool {
@@ -609,14 +617,14 @@ func isOpenAIWSRateLimitError(codeRaw, errTypeRaw, msgRaw string) bool {
 	return false
 }
 
-func (s *OpenAIGatewayService) persistOpenAIWSRateLimitSignal(ctx context.Context, account *Account, headers http.Header, responseBody []byte, codeRaw, errTypeRaw, msgRaw string) {
+func (s *OpenAIGatewayService) persistOpenAIWSRateLimitSignal(ctx context.Context, account *Account, headers http.Header, responseBody []byte, observedAt time.Time, codeRaw, errTypeRaw, msgRaw string) {
 	if s == nil || s.rateLimitService == nil || account == nil || account.Platform != PlatformOpenAI {
 		return
 	}
 	if !isOpenAIWSRateLimitError(codeRaw, errTypeRaw, msgRaw) {
 		return
 	}
-	s.handleOpenAIAccountUpstreamError(ctx, account, http.StatusTooManyRequests, headers, responseBody)
+	s.handleOpenAIAccountUpstreamErrorAt(ctx, account, http.StatusTooManyRequests, headers, responseBody, observedAt)
 }
 
 func classifyOpenAIWSErrorEventFromRaw(codeRaw, errTypeRaw, msgRaw string) (string, bool) {

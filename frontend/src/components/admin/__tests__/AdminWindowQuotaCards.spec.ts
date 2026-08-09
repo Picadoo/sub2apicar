@@ -60,6 +60,7 @@ const overview = {
       used_percent: 10,
       remaining_percent: 38,
       donate_fraction: 0,
+      effective_limit_percent: 48,
     },
     {
       user_id: 2,
@@ -71,6 +72,7 @@ const overview = {
       used_percent: 12,
       remaining_percent: 36,
       donate_fraction: 0,
+      effective_limit_percent: 48,
     },
   ],
   summaries: [
@@ -79,7 +81,9 @@ const overview = {
       window_type: '5h',
       member_count: 2,
       configured_sum_percent: 96,
-      used_sum_percent: 22,
+      used_sum_percent: 25,
+      attributed_sum_percent: 22,
+      unattributed_percent: 3,
       ceiling_percent: 92,
       overallocated: true,
     },
@@ -91,7 +95,7 @@ describe('AdminWindowQuotaOverviewCard', () => {
     vi.clearAllMocks()
     apiMocks.getOverview.mockResolvedValue(overview)
     apiMocks.rebalance.mockResolvedValue({ account_id: 7, updated_rows: 4 })
-    apiMocks.setMembers.mockResolvedValue({ account_id: 7, windows: [] })
+    apiMocks.setMembers.mockResolvedValue({ ok: true, account_id: 7, member_count: 3 })
     apiMocks.listUsers.mockResolvedValue({
       items: [
         { id: 1, username: 'A', email: 'a@example.com' },
@@ -111,7 +115,44 @@ describe('AdminWindowQuotaOverviewCard', () => {
 
     expect(wrapper.text()).toContain('96%')
     expect(wrapper.text()).toContain('92%')
+    expect(wrapper.text()).toContain('admin.windowQuotaOverview.official')
+    expect(wrapper.text()).toContain('25%')
+    expect(wrapper.text()).toContain('admin.windowQuotaOverview.attributedSum')
+    expect(wrapper.text()).toContain('22%')
+    expect(wrapper.text()).toContain('admin.windowQuotaOverview.unattributed')
+    expect(wrapper.text()).toContain('3%')
+    expect(wrapper.text()).toContain('admin.windowQuotaOverview.attributed 10%')
+    expect(wrapper.text()).toContain('admin.windowQuotaOverview.remaining 38%')
     expect(wrapper.text()).toContain('admin.windowQuotaOverview.overallocatedWarning')
+  })
+
+  it('renders invalid member metrics as em dashes with a neutral progress bar', async () => {
+    apiMocks.getOverview.mockResolvedValue({
+      enabled: true,
+      rows: [
+        {
+          user_id: 1,
+          email: 'a@example.com',
+          username: 'A',
+          account_id: 7,
+          window_type: '5h',
+          limit_percent: Number.POSITIVE_INFINITY,
+          used_percent: Number.NaN,
+          remaining_percent: Number.NEGATIVE_INFINITY,
+          donate_fraction: 0,
+          effective_limit_percent: Number.NaN,
+        },
+      ],
+      summaries: [],
+    })
+
+    const wrapper = mount(AdminWindowQuotaOverviewCard)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('—')
+    const progress = wrapper.get('[data-testid="admin-window-quota-progress"]')
+    expect(progress.classes()).toContain('bg-gray-400')
+    expect(progress.attributes('style')).toContain('width: 0%')
   })
 
   it('shows per-window donor badges including 7d donations', async () => {

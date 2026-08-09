@@ -260,20 +260,21 @@ type OpenAIForwardResult struct {
 	OpenAIWSMode    bool
 	// UpstreamTerminalEvent is the normalized terminal event observed on an
 	// upstream Responses WebSocket turn. Empty preserves legacy/non-WS success.
-	UpstreamTerminalEvent string
-	ResponseHeaders       http.Header
-	Duration              time.Duration
-	FirstTokenMs          *int
-	ClientDisconnect      bool
-	ImageCount            int
-	ImageSize             string
-	ImageInputSize        string
-	ImageOutputSize       string
-	ImageOutputSizes      []string
-	ImageSizeSource       string
-	ImageSizeBreakdown    map[string]int
-	VideoCount            int
-	VideoResolution       string
+	UpstreamTerminalEvent     string
+	ResponseHeaders           http.Header
+	ResponseHeadersObservedAt time.Time // HTTP 响应头或 WebSocket 握手头首次返回时的真实观测时间
+	Duration                  time.Duration
+	FirstTokenMs              *int
+	ClientDisconnect          bool
+	ImageCount                int
+	ImageSize                 string
+	ImageInputSize            string
+	ImageOutputSize           string
+	ImageOutputSizes          []string
+	ImageSizeSource           string
+	ImageSizeBreakdown        map[string]int
+	VideoCount                int
+	VideoResolution           string
 	// VideoDurationSeconds 是提交时请求的生成时长（xAI 按输出秒数计费），已归一化到 1-15 秒。
 	VideoDurationSeconds int
 	// WebSearchCalls 是 Codex alpha/search 网页搜索调用次数（每次成功请求为 1）。
@@ -533,6 +534,7 @@ func NewOpenAIGatewayService(
 	}
 	if rateLimitService != nil {
 		rateLimitService.SetAccountRuntimeBlocker(svc)
+		rateLimitService.SetAccountWindowQuotaService(accountWindowQuota)
 	}
 	if openAITokenProvider != nil {
 		openAITokenProvider.SetAccountRuntimeBlocker(svc)

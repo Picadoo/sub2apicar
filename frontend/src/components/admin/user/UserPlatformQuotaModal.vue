@@ -125,12 +125,15 @@
               <div class="mb-2 text-sm font-semibold text-gray-900 dark:text-white">
                 {{ t('admin.users.windowQuota.account', { id: g.accountId }) }}
               </div>
-              <table class="min-w-full text-sm">
+              <table class="min-w-full text-sm" data-testid="window-quota-table">
                 <thead>
                   <tr class="text-xs text-gray-500">
                     <th class="px-2 py-1 text-left font-medium">{{ t('admin.users.windowQuota.columns.window') }}</th>
-                    <th class="px-2 py-1 text-left font-medium">{{ t('admin.users.windowQuota.columns.used') }}</th>
+                    <th class="px-2 py-1 text-left font-medium">{{ t('admin.users.windowQuota.columns.attributed') }}</th>
                     <th class="px-2 py-1 text-left font-medium">{{ t('admin.users.windowQuota.columns.limit') }}</th>
+                    <th class="px-2 py-1 text-left font-medium">{{ t('admin.users.windowQuota.columns.effectiveLimit') }}</th>
+                    <th class="px-2 py-1 text-left font-medium">{{ t('admin.users.windowQuota.columns.remaining') }}</th>
+                    <th class="px-2 py-1 text-left font-medium">{{ t('admin.users.windowQuota.columns.officialAttribution') }}</th>
                     <th class="px-2 py-1 text-left font-medium">{{ t('admin.users.windowQuota.columns.reset') }}</th>
                     <th class="px-2 py-1"></th>
                   </tr>
@@ -138,11 +141,23 @@
                 <tbody>
                   <tr v-for="w in g.windows" :key="w.window_type" class="border-t border-gray-100 dark:border-dark-800">
                     <td class="px-2 py-1.5 text-gray-700 dark:text-gray-200">{{ windowLabel(w.window_type) }}</td>
-                    <td class="px-2 py-1.5 font-mono text-gray-600 dark:text-gray-300">{{ formatPct(w.used_percent) }}%</td>
+                    <td class="px-2 py-1.5 font-mono text-gray-600 dark:text-gray-300">{{ formatPctValue(w.used_percent) }}</td>
                     <td class="px-2 py-1.5">
                       <div class="flex items-center gap-1">
                         <input v-model.number="w.limit_percent" type="number" min="0" max="100" step="1" class="input w-20" />
                         <span class="text-xs text-gray-400">%</span>
+                      </div>
+                    </td>
+                    <td class="px-2 py-1.5 font-mono text-xs text-gray-500">{{ formatPctValue(effectiveLimit(w)) }}</td>
+                    <td class="px-2 py-1.5 font-mono text-xs text-gray-500">{{ formatPctValue(w.remaining_percent) }}</td>
+                    <td class="px-2 py-1.5 text-[11px] text-gray-500">
+                      <div>
+                        {{ t('admin.users.windowQuota.official') }}
+                        <span class="font-mono">{{ formatPctValue(w.account_used_percent) }}</span>
+                      </div>
+                      <div>
+                        {{ t('admin.users.windowQuota.unattributed') }}
+                        <span class="font-mono">{{ formatPctValue(w.account_unattributed_percent) }}</span>
                       </div>
                     </td>
                     <td class="px-2 py-1.5 text-xs text-gray-500">{{ formatReset(w.window_reset_at) }}</td>
@@ -364,9 +379,21 @@ function windowLabel(windowType: string): string {
   if (windowType === '7d') return t('admin.users.windowQuota.window7d')
   return windowType
 }
-function formatPct(n: number): string {
-  if (!Number.isFinite(n)) return '0'
-  return (Math.round(n * 10) / 10).toString()
+function finiteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+function formatPct(n: unknown): string {
+  const value = finiteNumber(n)
+  if (value === null) return '—'
+  return (Math.round(value * 10) / 10).toString()
+}
+function formatPctValue(n: unknown): string {
+  const value = formatPct(n)
+  return value === '—' ? value : `${value}%`
+}
+function effectiveLimit(windowQuota: AccountWindowQuotaItem): number | null {
+  const effective = finiteNumber(windowQuota.effective_limit_percent)
+  return effective !== null && effective >= 0 ? effective : null
 }
 function formatReset(iso: string | null | undefined): string {
   if (!iso) return '-'

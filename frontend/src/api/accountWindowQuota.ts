@@ -11,6 +11,7 @@ export interface AccountWindowQuotaItem {
   account_id: number
   window_type: string // '5h' | '7d'
   limit_percent: number
+  /** 当前用户被归因的官方窗口百分比（兼容旧字段名）。 */
   used_percent: number
   remaining_percent: number
   /** 本窗口救急池捐赠比例（占自己份额，0~1）；5h / 7d 各自独立。 */
@@ -21,10 +22,16 @@ export interface AccountWindowQuotaItem {
   effective_limit_percent: number
   /** 该账号该窗口尚未被借走的救急池余额。 */
   pool_available_percent: number
-  /** 该账号该窗口全员已用之和（账号级利用率%）。 */
+  /** OpenAI 官方账号窗口已用百分比；官方快照暂缺时不返回。 */
   account_used_percent?: number
+  /** 当前成员归因值之和；旧版后端可能不返回。 */
+  account_attributed_percent?: number
+  /** 官方用量中尚未归因给成员的部分；旧版后端可能不返回。 */
+  account_unattributed_percent?: number
   /** 该窗口账号总额上限（官方安全水位%）。 */
   ceiling_percent?: number
+  /** 账号处于「官方用量强制未归因」模式：成员归因恒为 0，官方用量主要来自站外。 */
+  force_unattributed?: boolean
   window_reset_at?: string
   reset_in_seconds?: number
 }
@@ -119,6 +126,7 @@ export interface AdminWindowQuotaOverviewItem {
   account_id: number
   window_type: string
   limit_percent: number
+  /** 该成员被归因的官方窗口百分比（兼容旧字段名）。 */
   used_percent: number
   remaining_percent: number
   /** 本窗口救急池捐赠比例（5h/7d 各自独立，0~1）。 */
@@ -137,8 +145,12 @@ export interface AdminWindowQuotaSummary {
   member_count: number
   /** 当前成员已配置 limit_percent 之和。 */
   configured_sum_percent: number
-  /** 当前成员已用官方窗口百分比之和。 */
-  used_sum_percent: number
+  /** OpenAI 官方账号窗口已用百分比；兼容旧字段名，官方快照暂缺时不返回。 */
+  used_sum_percent?: number
+  /** 当前成员 attributed_percent 之和；旧版后端可能不返回。 */
+  attributed_sum_percent?: number
+  /** 官方用量中尚未归因给成员的部分；旧版后端可能不返回。 */
+  unattributed_percent?: number
   /** 该账号该窗口允许分配的安全总额。 */
   ceiling_percent: number
   /** configured_sum_percent 是否超过 ceiling_percent。 */
@@ -170,6 +182,15 @@ export interface RebalanceAccountWindowQuotasResponse {
   windows: EqualizedAccountWindowItem[]
 }
 
+export interface SetAccountWindowMembersResponse {
+  ok: boolean
+  account_id: number
+  /** 新版响应可返回保存后的成员数。 */
+  member_count?: number
+  /** 兼容旧版后端：旧响应会附带自动均分结果。 */
+  windows?: EqualizedAccountWindowItem[]
+}
+
 /** 管理端：所有用户在所有账号所有窗口的配额总览与分配诊断。 */
 export async function getAccountWindowQuotaOverview(): Promise<AdminWindowQuotaOverviewResponse> {
   const { data } = await apiClient.get<AdminWindowQuotaOverviewResponse>(
@@ -183,11 +204,11 @@ export interface SetAccountWindowMembersPayload {
   user_ids: number[]
 }
 
-/** 管理端：显式指定拼车成员；未使用用户也会创建额度并立即均分。 */
+/** 管理端：显式同步拼车成员；新增成员可创建额度记录，但保存成员不等同于执行安全均分。 */
 export async function setAccountWindowMembers(
   payload: SetAccountWindowMembersPayload,
-): Promise<RebalanceAccountWindowQuotasResponse> {
-  const { data } = await apiClient.put<RebalanceAccountWindowQuotasResponse>(
+): Promise<SetAccountWindowMembersResponse> {
+  const { data } = await apiClient.put<SetAccountWindowMembersResponse>(
     `/admin/account-window-quotas/accounts/${payload.account_id}/members`,
     { user_ids: payload.user_ids },
   )

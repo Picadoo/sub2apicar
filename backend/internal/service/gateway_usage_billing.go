@@ -523,9 +523,9 @@ func (s *GatewayService) billingDeps() *billingDeps {
 	}
 }
 
-func writeUsageLogBestEffort(ctx context.Context, repo UsageLogRepository, usageLog *UsageLog, logKey string) {
+func writeUsageLogBestEffort(ctx context.Context, repo UsageLogRepository, usageLog *UsageLog, logKey string) bool {
 	if repo == nil || usageLog == nil {
-		return
+		return false
 	}
 	usageCtx, cancel := detachedBillingContext(ctx)
 	defer cancel()
@@ -545,14 +545,38 @@ func writeUsageLogBestEffort(ctx context.Context, repo UsageLogRepository, usage
 			}
 			if _, syncErr := repo.Create(fallbackCtx, usageLog); syncErr != nil {
 				logger.LegacyPrintf(logKey, "Create usage log sync fallback failed: %v", syncErr)
+				return false
 			}
 		}
-		return
+		return true
 	}
 
 	if _, err := repo.Create(usageCtx, usageLog); err != nil {
 		logger.LegacyPrintf(logKey, "Create usage log failed: %v", err)
+		return false
 	}
+	return true
+}
+
+type usageLogWriteState struct {
+	Persisted bool
+	Inserted  bool
+}
+
+// writeUsageLogWithState 用于需要精确增量游标的共享账号。
+// Create 会返回幂等插入状态，并把数据库中的 ID/CreatedAt 回填到 usageLog。
+func writeUsageLogWithState(ctx context.Context, repo UsageLogRepository, usageLog *UsageLog, logKey string) usageLogWriteState {
+	if repo == nil || usageLog == nil {
+		return usageLogWriteState{}
+	}
+	usageCtx, cancel := detachedBillingContext(ctx)
+	defer cancel()
+	inserted, err := repo.Create(usageCtx, usageLog)
+	if err != nil {
+		logger.LegacyPrintf(logKey, "Create usage log with state failed: %v", err)
+		return usageLogWriteState{}
+	}
+	return usageLogWriteState{Persisted: true, Inserted: inserted}
 }
 
 // recordUsageOpts 内部选项，参数化普通计费与长上下文计费的差异点。
