@@ -1366,6 +1366,7 @@ export interface OpenAIResponsesState {
 }
 
 export interface CreateAccountRequest {
+  window_quota_shared?: boolean
   name: string
   notes?: string | null
   platform: AccountPlatform
@@ -1385,6 +1386,7 @@ export interface CreateAccountRequest {
 }
 
 export interface UpdateAccountRequest {
+  window_quota_shared?: boolean
   name?: string
   notes?: string | null
   type?: AccountType
@@ -1505,6 +1507,7 @@ export interface AdminDataImportResult {
 }
 
 export interface CodexSessionImportRequest {
+  window_quota_shared?: boolean
   content?: string
   contents?: string[]
   name?: string
@@ -1525,6 +1528,7 @@ export interface CodexSessionImportRequest {
 }
 
 export interface OpenAICodexPATCreateRequest {
+  window_quota_shared?: boolean
   access_token: string
   name?: string
   notes?: string | null
