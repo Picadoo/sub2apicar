@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/alibabacloud-go/tea/dara"
+	"github.com/alibabacloud-go/tea/tea"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
@@ -90,4 +92,28 @@ func TestAliyunCaptchaVerifier_TransportError(t *testing.T) {
 	require.Error(t, err)
 	var apiErr *service.AliyunCaptchaAPIError
 	require.False(t, errors.As(err, &apiErr), "transport errors must not be normalized to API errors")
+}
+
+func TestNormalizeAliyunCaptchaError_NonAPIErrorRemainsTransportError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "tea", err: &tea.SDKError{}},
+		{name: "dara", err: &dara.SDKError{}},
+		{
+			name: "tea synthetic service unavailable",
+			err: &tea.SDKError{
+				Code:       tea.String("<nil>"),
+				StatusCode: tea.Int(http.StatusServiceUnavailable),
+				Message:    tea.String("code: 503, <nil> request id: <nil>"),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Same(t, tt.err, normalizeAliyunCaptchaError(tt.err))
+		})
+	}
 }

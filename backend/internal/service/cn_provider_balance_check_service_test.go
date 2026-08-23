@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
@@ -14,11 +15,15 @@ import (
 //   - payg 账号不经过额度探测（走余额路径，本测试不放 payg 账号避免真实网络）；
 //   - 非激活账号完全跳过。
 
+// fakeCNQuotaProber must be safe for runOnce's concurrent quota probes.
 type fakeCNQuotaProber struct {
+	mu     sync.Mutex
 	probed []int64
 }
 
 func (f *fakeCNQuotaProber) QueryUsage(ctx context.Context, accountID int64) (*CNProviderQuotaProbeResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.probed = append(f.probed, accountID)
 	return &CNProviderQuotaProbeResult{Success: true, Persisted: true}, nil
 }
