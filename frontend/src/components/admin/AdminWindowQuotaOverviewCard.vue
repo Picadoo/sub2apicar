@@ -127,27 +127,106 @@
             </div>
             <span class="text-xs text-gray-500">{{ selectedUserIds.length }}</span>
           </div>
+          <div class="mb-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <div
+              v-for="windowType in WINDOW_TYPES"
+              :key="windowType"
+              :class="[
+                'rounded-md border px-2.5 py-1.5 text-[11px]',
+                allocationOverCeiling(windowType)
+                  ? 'border-red-300 bg-red-50 font-medium text-red-700 dark:border-red-500/40 dark:bg-red-500/10 dark:text-red-300'
+                  : 'border-gray-200 bg-white text-gray-600 dark:border-dark-700 dark:bg-dark-900 dark:text-gray-300',
+              ]"
+              :data-testid="`member-allocation-${windowType}`"
+            >
+              {{
+                t('admin.windowQuotaOverview.memberAllocation', {
+                  window: windowLabel(windowType),
+                  total: fmt(selectedLimitTotal(windowType)),
+                  ceiling: fmt(accountCeiling(g, windowType)),
+                })
+              }}
+            </div>
+          </div>
+          <p class="mb-2 text-[11px] text-gray-500 dark:text-gray-400">
+            {{ t('admin.windowQuotaOverview.memberLimitHint') }}
+          </p>
           <input
             v-model="memberSearch"
             type="search"
             class="input mb-2 w-full"
+            :disabled="memberSaving"
             :placeholder="t('admin.windowQuotaOverview.memberSearch')"
           />
           <div v-if="memberUsersLoading" class="py-4 text-center text-xs text-gray-500">
             {{ t('common.loading') }}
           </div>
-          <div v-else class="max-h-56 space-y-1 overflow-y-auto">
-            <label
-              v-for="user in filteredMemberUsers"
-              :key="user.id"
-              class="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-white dark:hover:bg-dark-700"
-            >
-              <input v-model="selectedUserIds" type="checkbox" :value="user.id" />
-              <span class="text-gray-800 dark:text-gray-200">{{
-                user.username || user.email || '#' + user.id
-              }}</span>
-              <span v-if="user.username" class="truncate text-gray-400">{{ user.email }}</span>
-            </label>
+          <div v-else class="max-h-72 overflow-auto">
+            <div class="min-w-[30rem] space-y-1">
+              <div
+                class="grid grid-cols-[auto_minmax(0,1fr)_6rem_6rem] items-center gap-2 px-2 text-[11px] font-medium text-gray-500 dark:text-gray-400"
+              >
+                <span></span>
+                <span>{{ t('admin.windowQuotaOverview.memberColumn') }}</span>
+                <span>{{ t('admin.windowQuotaOverview.member5hLimit') }}</span>
+                <span>{{ t('admin.windowQuotaOverview.member7dLimit') }}</span>
+              </div>
+              <div
+                v-for="user in filteredMemberUsers"
+                :key="user.id"
+                class="grid grid-cols-[auto_minmax(0,1fr)_6rem_6rem] items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-white dark:hover:bg-dark-700"
+              >
+                <input
+                  type="checkbox"
+                  :checked="isMemberSelected(user.id)"
+                  :disabled="memberSaving"
+                  :data-testid="`member-checkbox-${user.id}`"
+                  @change="onMemberToggle(user.id, $event)"
+                />
+                <div class="min-w-0">
+                  <div class="truncate text-gray-800 dark:text-gray-200">
+                    {{ user.username || user.email || '#' + user.id }}
+                  </div>
+                  <div v-if="user.username" class="truncate text-[11px] text-gray-400">
+                    {{ user.email }}
+                  </div>
+                </div>
+                <div
+                  v-if="isMemberSelected(user.id) && memberLimitDrafts[user.id]"
+                  class="flex items-center gap-1"
+                >
+                  <input
+                    v-model.number="memberLimitDrafts[user.id].w5h"
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.1"
+                    class="input w-20"
+                    :disabled="memberSaving"
+                    :data-testid="`member-limit-${user.id}-5h`"
+                  />
+                  <span class="text-[10px] text-gray-400">%</span>
+                </div>
+                <span v-else class="text-gray-300 dark:text-gray-600">—</span>
+                <div
+                  v-if="isMemberSelected(user.id) && memberLimitDrafts[user.id]"
+                  class="flex items-center gap-1"
+                >
+                  <input
+                    v-model.number="memberLimitDrafts[user.id].w7d"
+                    type="number"
+                    min="0"
+                    max="100"
+                    step="0.1"
+                    class="input w-20"
+                    :disabled="memberSaving"
+                    :data-testid="`member-limit-${user.id}-7d`"
+                  />
+                  <span class="text-[10px] text-gray-400">%</span>
+                </div>
+                <span v-else class="text-gray-300 dark:text-gray-600">—</span>
+              </div>
+            </div>
           </div>
           <div class="mt-3 flex gap-2">
             <button
@@ -162,7 +241,12 @@
                   : t('admin.windowQuotaOverview.saveMembers')
               }}
             </button>
-            <button type="button" class="btn btn-secondary btn-sm" @click="closeMemberEditor">
+            <button
+              type="button"
+              class="btn btn-secondary btn-sm"
+              :disabled="memberSaving"
+              @click="closeMemberEditor"
+            >
               {{ t('common.cancel') }}
             </button>
           </div>
@@ -230,11 +314,14 @@ import { useAppStore } from '@/stores/app'
 import { adminAPI } from '@/api/admin'
 import type { AdminUser } from '@/types'
 import {
+  getAccountWindowCeilings,
   getAccountWindowQuotaOverview,
+  setAccountWindowLimit,
   setAccountWindowMembers,
   rebalanceAccountWindowQuotas,
   type AdminWindowQuotaSummary,
   type AdminWindowQuotaOverviewItem,
+  type AdminWindowQuotaOverviewResponse,
 } from '@/api/accountWindowQuota'
 
 const { t } = useI18n()
@@ -249,9 +336,22 @@ const rebalancingAccountId = ref<number | null>(null)
 const memberEditorAccountId = ref<number | null>(null)
 const memberUsers = ref<AdminUser[]>([])
 const selectedUserIds = ref<number[]>([])
+const memberLimitDrafts = ref<Record<number, MemberLimitDraft>>({})
 const memberSearch = ref('')
 const memberUsersLoading = ref(false)
 const memberSaving = ref(false)
+const configuredSeats = ref(4)
+const configuredCeilings = ref<Record<WindowType, number>>({ '5h': 92, '7d': 92 })
+
+const WINDOW_TYPES: WindowType[] = ['5h', '7d']
+const LIMIT_EPSILON = 0.0001
+
+type WindowType = '5h' | '7d'
+
+interface MemberLimitDraft {
+  w5h: number
+  w7d: number
+}
 
 interface UserRow {
   userId: number
@@ -318,6 +418,10 @@ const filteredMemberUsers = computed(() => {
   )
 })
 
+const currentEditorGroup = computed(() =>
+  groups.value.find((group) => group.accountId === memberEditorAccountId.value),
+)
+
 function finiteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
@@ -351,6 +455,59 @@ function safeEqual(diagnostic: AdminWindowQuotaSummary, fallbackMembers: number)
   const members = diagnostic.member_count > 0 ? diagnostic.member_count : fallbackMembers
   return members > 0 ? diagnostic.ceiling_percent / members : 0
 }
+
+function memberDraftKey(windowType: WindowType): keyof MemberLimitDraft {
+  return windowType === '5h' ? 'w5h' : 'w7d'
+}
+
+function accountCeiling(group: AccountGroup | undefined, windowType: WindowType): number {
+  const diagnostic = group?.diagnostics.find((item) => item.window_type === windowType)
+  return finiteNumber(diagnostic?.ceiling_percent) ?? configuredCeilings.value[windowType]
+}
+
+function defaultMemberLimit(group: AccountGroup, windowType: WindowType): number {
+  const seats = configuredSeats.value > 0 ? configuredSeats.value : Math.max(group.users.length, 1)
+  return Math.round((accountCeiling(group, windowType) / seats) * 10) / 10
+}
+
+function prepareMemberLimitDrafts(group: AccountGroup) {
+  const drafts: Record<number, MemberLimitDraft> = {}
+  const currentUsers = new Map(group.users.map((user) => [user.userId, user]))
+  for (const user of memberUsers.value) {
+    const current = currentUsers.get(user.id)
+    drafts[user.id] = {
+      w5h: finiteNumber(current?.w5h?.limit_percent) ?? defaultMemberLimit(group, '5h'),
+      w7d: finiteNumber(current?.w7d?.limit_percent) ?? defaultMemberLimit(group, '7d'),
+    }
+  }
+  memberLimitDrafts.value = drafts
+}
+
+function isMemberSelected(userId: number): boolean {
+  return selectedUserIds.value.includes(userId)
+}
+
+function onMemberToggle(userId: number, event: Event) {
+  const checked = (event.target as HTMLInputElement).checked
+  if (checked) {
+    if (!selectedUserIds.value.includes(userId)) selectedUserIds.value.push(userId)
+    return
+  }
+  selectedUserIds.value = selectedUserIds.value.filter((id) => id !== userId)
+}
+
+function selectedLimitTotal(windowType: WindowType): number {
+  const key = memberDraftKey(windowType)
+  return selectedUserIds.value.reduce((sum, userId) => {
+    const value = finiteNumber(memberLimitDrafts.value[userId]?.[key])
+    return sum + (value ?? 0)
+  }, 0)
+}
+
+function allocationOverCeiling(windowType: WindowType): boolean {
+  return selectedLimitTotal(windowType) > accountCeiling(currentEditorGroup.value, windowType) + LIMIT_EPSILON
+}
+
 // 5h / 7d 捐赠各自独立，逐窗口出徽标；此前只看 5h，7d 捐赠者不显示。
 function donorBadges(u: UserRow): Array<{ window: string; pct: number }> {
   const badges: Array<{ window: string; pct: number }> = []
@@ -390,9 +547,11 @@ async function loadMemberUsers() {
 async function openMemberEditor(group: AccountGroup) {
   memberEditorAccountId.value = group.accountId
   selectedUserIds.value = group.users.map((user) => user.userId)
+  memberLimitDrafts.value = {}
   memberSearch.value = ''
   try {
     await loadMemberUsers()
+    prepareMemberLimitDrafts(group)
   } catch (error: any) {
     appStore.showError(
       error?.response?.data?.message || t('admin.windowQuotaOverview.loadMembersFailed'),
@@ -403,32 +562,132 @@ async function openMemberEditor(group: AccountGroup) {
 function closeMemberEditor() {
   memberEditorAccountId.value = null
   selectedUserIds.value = []
+  memberLimitDrafts.value = {}
   memberSearch.value = ''
 }
 
+interface MemberLimitUpdate {
+  userId: number
+  windowType: WindowType
+  target: number
+  current: number
+  delta: number
+}
+
+function validateMemberLimits(accountId: number): boolean {
+  const group = groups.value.find((item) => item.accountId === accountId)
+  for (const userId of selectedUserIds.value) {
+    const draft = memberLimitDrafts.value[userId]
+    for (const windowType of WINDOW_TYPES) {
+      const value = finiteNumber(draft?.[memberDraftKey(windowType)])
+      if (value === null || value < 0 || value > 100) {
+        appStore.showError(
+          t('admin.windowQuotaOverview.invalidMemberLimit', {
+            user: userId,
+            window: windowLabel(windowType),
+          }),
+        )
+        return false
+      }
+    }
+  }
+  for (const windowType of WINDOW_TYPES) {
+    const total = selectedLimitTotal(windowType)
+    const ceiling = accountCeiling(group, windowType)
+    if (total > ceiling + LIMIT_EPSILON) {
+      appStore.showError(
+        t('admin.windowQuotaOverview.memberCeilingExceeded', {
+          window: windowLabel(windowType),
+          total: fmt(total),
+          ceiling: fmt(ceiling),
+        }),
+      )
+      return false
+    }
+  }
+  return true
+}
+
+function buildMemberLimitUpdates(
+  data: AdminWindowQuotaOverviewResponse,
+  accountId: number,
+): MemberLimitUpdate[] {
+  const currentLimits = new Map<string, number>()
+  for (const row of data.rows ?? []) {
+    if (row.account_id !== accountId || !WINDOW_TYPES.includes(row.window_type as WindowType)) continue
+    const value = finiteNumber(row.limit_percent)
+    if (value !== null) currentLimits.set(`${row.user_id}.${row.window_type}`, value)
+  }
+
+  const updates: MemberLimitUpdate[] = []
+  for (const userId of selectedUserIds.value) {
+    const draft = memberLimitDrafts.value[userId]
+    for (const windowType of WINDOW_TYPES) {
+      const target = finiteNumber(draft?.[memberDraftKey(windowType)])
+      if (target === null) continue
+      const current = currentLimits.get(`${userId}.${windowType}`) ?? 0
+      if (Math.abs(target - current) <= LIMIT_EPSILON) continue
+      updates.push({ userId, windowType, target, current, delta: target - current })
+    }
+  }
+  return updates.sort(
+    (a, b) => a.delta - b.delta || a.windowType.localeCompare(b.windowType) || a.userId - b.userId,
+  )
+}
+
+function applyOverviewData(data: AdminWindowQuotaOverviewResponse) {
+  enabled.value = data.enabled
+  rows.value = data.rows ?? []
+  summaries.value = data.summaries ?? []
+  sharedAccountIds.value = data.account_ids ?? []
+}
+
 async function saveMembers(accountId: number) {
-  if (selectedUserIds.value.length === 0) return
+  if (selectedUserIds.value.length === 0 || !validateMemberLimits(accountId)) return
   if (
     !window.confirm(
       t('admin.windowQuotaOverview.membersConfirm', {
         id: accountId,
         count: selectedUserIds.value.length,
+        total5h: fmt(selectedLimitTotal('5h')),
+        total7d: fmt(selectedLimitTotal('7d')),
       }),
     )
   )
     return
+
   memberSaving.value = true
+  let membersSynced = false
   try {
     await setAccountWindowMembers({
       account_id: accountId,
       user_ids: selectedUserIds.value,
     })
+    membersSynced = true
+
+    const syncedOverview = await getAccountWindowQuotaOverview()
+    for (const update of buildMemberLimitUpdates(syncedOverview, accountId)) {
+      await setAccountWindowLimit({
+        user_id: update.userId,
+        account_id: accountId,
+        window_type: update.windowType,
+        limit_percent: update.target,
+      })
+    }
+
     closeMemberEditor()
     await load()
     appStore.showSuccess(t('admin.windowQuotaOverview.membersSaved'))
   } catch (error: any) {
+    closeMemberEditor()
+    await load()
     appStore.showError(
-      error?.response?.data?.message || t('admin.windowQuotaOverview.membersSaveFailed'),
+      error?.response?.data?.message ||
+        t(
+          membersSynced
+            ? 'admin.windowQuotaOverview.memberLimitsSaveFailed'
+            : 'admin.windowQuotaOverview.membersSaveFailed',
+        ),
     )
   } finally {
     memberSaving.value = false
@@ -437,11 +696,21 @@ async function saveMembers(accountId: number) {
 
 async function load() {
   try {
-    const data = await getAccountWindowQuotaOverview()
-    enabled.value = data.enabled
-    rows.value = data.rows ?? []
-    summaries.value = data.summaries ?? []
-    sharedAccountIds.value = data.account_ids ?? []
+    const [data, config] = await Promise.all([
+      getAccountWindowQuotaOverview(),
+      getAccountWindowCeilings().catch(() => null),
+    ])
+    applyOverviewData(data)
+    if (config?.enabled) {
+      if (typeof config.seats === 'number' && Number.isFinite(config.seats) && config.seats > 0) {
+        configuredSeats.value = config.seats
+      }
+      for (const item of config.ceilings ?? []) {
+        if (!WINDOW_TYPES.includes(item.window_type as WindowType)) continue
+        const ceiling = finiteNumber(item.ceiling_percent)
+        if (ceiling !== null) configuredCeilings.value[item.window_type as WindowType] = ceiling
+      }
+    }
   } catch (error) {
     console.warn('Failed to load window quota overview:', error)
     enabled.value = false

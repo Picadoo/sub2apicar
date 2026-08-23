@@ -360,17 +360,14 @@ func sameOptionalTime(a, b *time.Time) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}
-	return math.Abs(a.Sub(*b).Seconds()) <= time.Minute.Seconds()
+	return service.AccountWindowBoundariesMatch(*a, *b)
 }
 
 func sameRepositoryWindow(a, b service.AccountWindowAttributionCheckpoint) bool {
 	if a.ResetAt != nil && b.ResetAt != nil {
 		return sameOptionalTime(a.ResetAt, b.ResetAt)
 	}
-	if a.WindowStart.IsZero() || b.WindowStart.IsZero() {
-		return false
-	}
-	return math.Abs(a.WindowStart.Sub(b.WindowStart).Seconds()) <= time.Minute.Seconds()
+	return service.AccountWindowBoundariesMatch(a.WindowStart, b.WindowStart)
 }
 
 func legacyCheckpointMatchesCandidate(legacy *service.AccountWindowAttributionCheckpoint, candidate service.AccountWindowAttributionCheckpoint) bool {
@@ -380,10 +377,7 @@ func legacyCheckpointMatchesCandidate(legacy *service.AccountWindowAttributionCh
 	if legacy.ResetAt != nil && candidate.ResetAt != nil {
 		return sameOptionalTime(legacy.ResetAt, candidate.ResetAt)
 	}
-	if legacy.WindowStart.IsZero() || candidate.WindowStart.IsZero() {
-		return false
-	}
-	return math.Abs(legacy.WindowStart.Sub(candidate.WindowStart).Seconds()) <= time.Minute.Seconds()
+	return service.AccountWindowBoundariesMatch(legacy.WindowStart, candidate.WindowStart)
 }
 
 func membersMatchCandidateWindow(members []accountWindowMemberState, resetAt *time.Time) bool {
@@ -403,7 +397,7 @@ func membersHaveNewerResetBoundary(members []accountWindowMemberState, resetAt *
 		return false
 	}
 	for _, member := range members {
-		if member.resetAt != nil && member.resetAt.After(resetAt.Add(time.Minute)) {
+		if member.resetAt != nil && member.resetAt.After(resetAt.Add(service.AccountWindowBoundaryTolerance)) {
 			return true
 		}
 	}
@@ -726,7 +720,7 @@ func recomputeWindowSharesInTx(txCtx context.Context, client *dbent.Client, acco
 			_ = rows.Close()
 			return fmt.Errorf("scan account %d window %s member: %w", accountID, window, err)
 		}
-		if resetAt != nil && currentResetAt.Valid && currentResetAt.Time.After(resetAt.Add(time.Minute)) {
+		if resetAt != nil && currentResetAt.Valid && currentResetAt.Time.After(resetAt.Add(service.AccountWindowBoundaryTolerance)) {
 			staleResetBoundary = true
 		}
 		members = append(members, member)

@@ -233,6 +233,59 @@ func TestUserAccountWindowQuotaRepository_ApplyWindowSharesSettlesOnlyOfficialDe
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
+func TestUserAccountWindowQuotaRepository_ApplyWindowSharesSevenDayBoundaryJitterPreservesMemberUsage(t *testing.T) {
+	repo, mock := newWindowQuotaRepoSQLMock(t)
+	windowStart := time.Date(2026, time.August, 8, 20, 31, 52, 0, time.UTC)
+	resetAt := windowStart.Add(7 * 24 * time.Hour)
+	previousObservedAt := time.Date(2026, time.August, 9, 13, 0, 0, 0, time.UTC)
+	observedAt := previousObservedAt.Add(time.Hour)
+	seenAt := previousObservedAt.Add(-time.Minute)
+	current := service.NewAccountWindowAttributionCheckpoint(26, windowStart, previousObservedAt, &resetAt)
+	current.PendingBasisByUser = map[int64]float64{1: 1, 33: 1}
+	current.SeenThroughCreatedAt = seenAt
+	current.SeenThroughUsageLogID = 50
+	encoded, err := json.Marshal(current)
+	require.NoError(t, err)
+
+	jitteredResetAt := resetAt.Add(8*time.Minute + 30*time.Second)
+	jitteredWindowStart := jitteredResetAt.Add(-7 * 24 * time.Hour)
+	candidate := service.NewAccountWindowAttributionCheckpoint(29, jitteredWindowStart, observedAt, &jitteredResetAt)
+
+	mock.ExpectBegin()
+	mock.ExpectQuery(`SELECT extra->>\$2,[\s\S]*codex_usage_observed_unix_nano[\s\S]*FOR UPDATE`).
+		WithArgs(int64(29), service.AccountWindowAttributionCheckpointExtraKey(service.WindowType7d), service.AccountWindowForceUnattributedExtraKey).
+		WillReturnRows(sqlmock.NewRows([]string{"checkpoint", "observed_nano", "observed_at", "force_unattributed"}).
+			AddRow(string(encoded), strconv.FormatInt(observedAt.UnixNano(), 10), observedAt.Format(time.RFC3339Nano), false))
+	mock.ExpectQuery(`SELECT q.id, q.user_id, q.attributed_percent, q.window_reset_at[\s\S]*FOR UPDATE`).
+		WithArgs(int64(29), service.WindowType7d).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "user_id", "attributed_percent", "window_reset_at"}).
+			AddRow(int64(11), int64(1), 20.0, resetAt).
+			AddRow(int64(12), int64(33), 6.0, resetAt))
+	mock.ExpectQuery(`SELECT created_at, id[\s\S]*ORDER BY created_at DESC`).
+		WithArgs(int64(29), windowStart, resetAt, observedAt).
+		WillReturnRows(sqlmock.NewRows([]string{"created_at", "id"}))
+	mock.ExpectExec(`UPDATE user_account_window_quotas[\s\S]*attributed_percent = attributed_percent \+ \$2`).
+		WithArgs(int64(11), 1.5, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE user_account_window_quotas[\s\S]*attributed_percent = attributed_percent \+ \$2`).
+		WithArgs(int64(12), 1.5, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE accounts[\s\S]*extra = COALESCE\(extra`).
+		WithArgs(int64(29), sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	winner, applied, err := repo.ApplyWindowSharesFromCheckpoint(context.Background(), 29, service.WindowType7d, candidate, &jitteredResetAt)
+	require.NoError(t, err)
+	require.True(t, applied)
+	require.InDelta(t, 29, winner.LatestOfficialPercent, 1e-9)
+	require.WithinDuration(t, windowStart, winner.WindowStart, time.Second)
+	require.NotNil(t, winner.ResetAt)
+	require.WithinDuration(t, resetAt, *winner.ResetAt, time.Second)
+	require.Empty(t, winner.PendingBasisByUser)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
 func TestUserAccountWindowQuotaRepository_ApplyWindowSharesForceUnattributedNeverChargesMembers(t *testing.T) {
 	repo, mock := newWindowQuotaRepoSQLMock(t)
 	windowStart := time.Date(2026, time.August, 3, 4, 0, 0, 0, time.UTC)

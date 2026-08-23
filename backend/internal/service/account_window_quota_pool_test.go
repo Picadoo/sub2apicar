@@ -492,6 +492,24 @@ func TestAttributeWindow_KeepsOfficialPercentMonotonicAcrossSnapshotJitter(t *te
 	}
 }
 
+func TestSelectAccountWindowAttributionCheckpoint_SevenDayBoundaryJitterStaysInSameWindow(t *testing.T) {
+	windowStart := time.Date(2026, time.August, 8, 20, 31, 52, 0, time.UTC)
+	resetAt := windowStart.Add(7 * 24 * time.Hour)
+	observedAt := time.Date(2026, time.August, 9, 13, 0, 0, 0, time.UTC)
+	existing := NewAccountWindowAttributionCheckpoint(26, windowStart, observedAt, &resetAt)
+
+	jitteredResetAt := resetAt.Add(8*time.Minute + 30*time.Second)
+	jitteredWindowStart := jitteredResetAt.Add(-7 * 24 * time.Hour)
+	candidate := NewAccountWindowAttributionCheckpoint(29, jitteredWindowStart, observedAt.Add(time.Hour), &jitteredResetAt)
+
+	winner, accepted := SelectAccountWindowAttributionCheckpoint(&existing, candidate, true)
+	require.True(t, accepted)
+	require.InDelta(t, 29, winner.LatestOfficialPercent, 1e-9)
+	require.WithinDuration(t, windowStart, winner.WindowStart, time.Second)
+	require.NotNil(t, winner.ResetAt)
+	require.WithinDuration(t, resetAt, *winner.ResetAt, time.Second)
+}
+
 func TestAttributeWindow_LateOlderHigherSnapshotCannotOverwriteNewerObservation(t *testing.T) {
 	repo := &stubWindowRepo{}
 	svc, mr := newQuotaServiceWithMiniRedis(t, repo)

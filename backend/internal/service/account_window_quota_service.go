@@ -46,6 +46,10 @@ const (
 
 	window5hLengthSeconds = 5 * 60 * 60
 	window7dLengthSeconds = 7 * 24 * 60 * 60
+
+	// AccountWindowBoundaryTolerance absorbs upstream reset-after jitter without mistaking it for a new window.
+	// Real 5h/7d rollovers move the boundary by the full window length, while observed OpenAI drift can span several minutes.
+	AccountWindowBoundaryTolerance = 15 * time.Minute
 )
 
 // ErrAccountWindowCeilingExceeded 表示设置某用户 limit 会令该窗口所有用户之和超过总额上限。
@@ -417,20 +421,23 @@ func normalizeAccountWindowPercent(value float64) float64 {
 	return math.Round(value*10000) / 10000
 }
 
-func sameAccountWindowBoundary(a, b time.Time) bool {
+// AccountWindowBoundariesMatch reports whether two observed starts belong to the same official window.
+func AccountWindowBoundariesMatch(a, b time.Time) bool {
 	if a.IsZero() || b.IsZero() {
 		return false
 	}
-	// reset_after_seconds 的精度是秒，网络与处理延迟会让两次观测产生
-	// 少量偏差；一分钟以内仍视为同一个官方窗口。
-	return math.Abs(a.Sub(b).Seconds()) <= time.Minute.Seconds()
+	return math.Abs(a.Sub(b).Seconds()) <= AccountWindowBoundaryTolerance.Seconds()
+}
+
+func sameAccountWindowBoundary(a, b time.Time) bool {
+	return AccountWindowBoundariesMatch(a, b)
 }
 
 func accountWindowBoundaryIsNewer(candidate, current time.Time) bool {
 	if candidate.IsZero() || current.IsZero() {
 		return false
 	}
-	return candidate.After(current.Add(time.Minute))
+	return candidate.After(current.Add(AccountWindowBoundaryTolerance))
 }
 
 func validAccountWindowCostCheckpoint(checkpoint *accountWindowAttributionCheckpoint) bool {
@@ -490,7 +497,10 @@ func SelectAccountWindowAttributionCheckpoint(existing *AccountWindowAttribution
 		if candidate.LatestObservedAt.After(current.LatestObservedAt) {
 			winner.LatestObservedAt = candidate.LatestObservedAt
 		}
-		if candidate.ResetAt != nil {
+		// Keep the first durable boundary for the current window. Upstream reset-after values can
+		// drift by several minutes between responses; replacing the canonical boundary each time
+		// would let that jitter accumulate and eventually look like a rollover.
+		if winner.ResetAt == nil && candidate.ResetAt != nil {
 			value := *candidate.ResetAt
 			winner.ResetAt = &value
 		}
