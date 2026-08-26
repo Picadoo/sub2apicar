@@ -114,6 +114,7 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	var lastFailoverErr *service.UpstreamFailoverError
+	var lastWindowQuotaErr error
 	switchCount := 0
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	routingStart := time.Now()
@@ -151,7 +152,9 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 				h.errorResponse(c, cls.Status, cls.ErrType, cls.Message)
 				return
 			}
-			if lastFailoverErr != nil {
+			if lastFailoverErr == nil && lastWindowQuotaErr != nil {
+				h.writeAccountWindowQuotaExceeded(c, lastWindowQuotaErr, false, false)
+			} else if lastFailoverErr != nil {
 				h.handleFailoverExhausted(c, lastFailoverErr, false)
 			} else {
 				h.errorResponse(c, http.StatusBadGateway, "upstream_error", "Upstream request failed")
@@ -160,6 +163,15 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 		}
 
 		account := selection.Account
+		if quotaErr := h.gatewayService.CheckAccountWindowQuota(c.Request.Context(), c, account); quotaErr != nil {
+			if selection.Acquired && selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			failedAccountIDs[account.ID] = struct{}{}
+			lastWindowQuotaErr = quotaErr
+			reqLog.Debug("openai_alpha_search.account_window_quota_excluded", zap.Int64("account_id", account.ID), zap.Error(quotaErr))
+			continue
+		}
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 		accountRelease, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, false, &streamStarted, reqLog)
 		if slotResult == openAISlotAcquireProfitVetoed {
@@ -191,6 +203,11 @@ func (h *OpenAIGatewayHandler) AlphaSearch(c *gin.Context) {
 				h.recordAlphaSearchUsage(c, apiKey, account, subscription, channelMapping, requestedModel, body, result, subject.UserID)
 			}
 			return
+		}
+		if errors.Is(err, service.ErrUserAccountWindowQuotaExceeded) {
+			failedAccountIDs[account.ID] = struct{}{}
+			lastWindowQuotaErr = err
+			continue
 		}
 
 		var failoverErr *service.UpstreamFailoverError

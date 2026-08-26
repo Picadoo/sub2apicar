@@ -98,10 +98,10 @@ func buildWindowItemsFromViews(views []service.UserWindowQuotaView, now time.Tim
 			PoolAvailablePercent:       v.PoolAvailablePercent,
 			AccountUsedPercent:         v.AccountUsedPercent,
 			AccountAttributedPercent:   v.AccountAttributedPercent,
-		AccountUnattributedPercent: v.AccountUnattributedPercent,
-		CeilingPercent:             v.CeilingPercent,
-		ForceUnattributed:          v.ForceUnattributed,
-	}
+			AccountUnattributedPercent: v.AccountUnattributedPercent,
+			CeilingPercent:             v.CeilingPercent,
+			ForceUnattributed:          v.ForceUnattributed,
+		}
 		if v.WindowResetAt != nil {
 			iso := v.WindowResetAt.UTC().Format(time.RFC3339)
 			item.WindowResetAt = &iso
@@ -284,7 +284,7 @@ func (h *AccountWindowQuotaHandler) AdminSetLimit(c *gin.Context) {
 		return
 	}
 	if err := h.quota.SetLimitForUserAccount(c.Request.Context(), req.UserID, req.AccountID, req.WindowType, req.LimitPercent); err != nil {
-		if errors.Is(err, service.ErrAccountWindowCeilingExceeded) {
+		if errors.Is(err, service.ErrAccountWindowCeilingExceeded) || errors.Is(err, service.ErrAccountWindowInvalidMembers) {
 			response.BadRequest(c, err.Error())
 			return
 		}
@@ -500,7 +500,7 @@ func (h *AccountWindowQuotaHandler) Donate(c *gin.Context) {
 		return
 	}
 	if err := h.quota.SetDonateFraction(c.Request.Context(), subject.UserID, req.AccountID, req.WindowType, req.Fraction); err != nil {
-		if errors.Is(err, service.ErrAccountWindowDonationInUse) {
+		if errors.Is(err, service.ErrAccountWindowDonationInUse) || errors.Is(err, service.ErrAccountWindowNotMember) {
 			response.BadRequest(c, err.Error())
 			return
 		}

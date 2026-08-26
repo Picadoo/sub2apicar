@@ -1305,9 +1305,17 @@ func scanWindowQuotaRecords(rows *sql.Rows) ([]service.UserAccountWindowQuotaRec
 	return out, nil
 }
 
-// SetDonatePoolFraction 在事务中锁定账号窗口全体成员，防止并发撤回已经被借用的捐赠额度。
-func (r *userAccountWindowQuotaRepository) SetDonatePoolFraction(ctx context.Context, userID, accountID int64, window string, fraction, defaultLimit float64) error {
+// SetDonatePoolFraction 在事务中锁定账号和窗口全体成员，防止并发成员变更或撤回已借用额度。
+// 捐赠是成员已有额度行的属性更新，绝不能借此创建新成员。
+func (r *userAccountWindowQuotaRepository) SetDonatePoolFraction(ctx context.Context, userID, accountID int64, window string, fraction, _ float64) error {
 	return r.withWindowQuotaTx(ctx, func(txCtx context.Context, client *dbent.Client) error {
+		found, err := lockSharedAccountForWindowQuotaTx(txCtx, client, accountID)
+		if err != nil {
+			return fmt.Errorf("lock account %d before donation update: %w", accountID, err)
+		}
+		if !found {
+			return fmt.Errorf("%w: account=%d", service.ErrAccountWindowNotMember, accountID)
+		}
 		const lockQ = `SELECT q.user_id, q.account_id, q.window_type, q.limit_percent, q.attributed_percent, q.window_reset_at, COALESCE(q.donate_pool_fraction, 0)
 			FROM user_account_window_quotas q
 			JOIN accounts a ON a.id = q.account_id
@@ -1325,18 +1333,35 @@ func (r *userAccountWindowQuotaRepository) SetDonatePoolFraction(ctx context.Con
 		if err != nil {
 			return fmt.Errorf("scan account %d window %s before donation update: %w", accountID, window, err)
 		}
+		isMember := false
+		for _, record := range records {
+			if record.UserID == userID {
+				isMember = true
+				break
+			}
+		}
+		if !isMember {
+			return fmt.Errorf("%w: user=%d account=%d window=%s", service.ErrAccountWindowNotMember, userID, accountID, window)
+		}
 		if err := service.ValidateAccountWindowDonateFraction(records, userID, window, fraction); err != nil {
 			return err
 		}
 
-		const upsertQ = `INSERT INTO user_account_window_quotas
-			(user_id, account_id, window_type, limit_percent, attributed_percent, donate_pool_fraction, created_at, updated_at)
-			VALUES ($1, $2, $3, $4, 0, $5, $6, $6)
-			ON CONFLICT (user_id, account_id, window_type) WHERE deleted_at IS NULL DO UPDATE SET
-				donate_pool_fraction = EXCLUDED.donate_pool_fraction,
-				updated_at           = EXCLUDED.updated_at`
-		_, err = client.ExecContext(txCtx, upsertQ, userID, accountID, window, defaultLimit, fraction, time.Now())
-		return err
+		const updateQ = `UPDATE user_account_window_quotas
+			SET donate_pool_fraction = $4, updated_at = $5
+			WHERE user_id = $1 AND account_id = $2 AND window_type = $3 AND deleted_at IS NULL`
+		res, err := client.ExecContext(txCtx, updateQ, userID, accountID, window, fraction, time.Now())
+		if err != nil {
+			return err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("read donation update result: %w", err)
+		}
+		if affected != 1 {
+			return fmt.Errorf("%w: user=%d account=%d window=%s", service.ErrAccountWindowNotMember, userID, accountID, window)
+		}
+		return nil
 	})
 }
 
@@ -1383,6 +1408,59 @@ func (r *userAccountWindowQuotaRepository) SetLimitForUserAccount(ctx context.Co
 			updated_at    = EXCLUDED.updated_at`
 	_, err := client.ExecContext(ctx, q, userID, accountID, window, limitPercent, time.Now())
 	return err
+}
+
+// SetLimitForUserAccountWithinCeiling 在账号行锁事务内重查 configured sum 后写入，
+// 消除两个管理员并发增额各自通过旧快照校验而共同突破 ceiling 的竞态。
+func (r *userAccountWindowQuotaRepository) SetLimitForUserAccountWithinCeiling(ctx context.Context, userID, accountID int64, window string, limitPercent, ceilingPercent float64) error {
+	if window == "" {
+		return fmt.Errorf("window_type is required")
+	}
+	return r.withWindowQuotaTx(ctx, func(txCtx context.Context, client *dbent.Client) error {
+		found, err := lockSharedAccountForWindowQuotaTx(txCtx, client, accountID)
+		if err != nil {
+			return fmt.Errorf("lock account %d before setting limit: %w", accountID, err)
+		}
+		if !found {
+			return fmt.Errorf("%w: account=%d", service.ErrAccountWindowInvalidMembers, accountID)
+		}
+
+		const sumQ = `SELECT COALESCE(SUM(limit_percent), 0),
+			COALESCE(MAX(limit_percent) FILTER (WHERE user_id = $3), 0)
+			FROM user_account_window_quotas
+			WHERE account_id = $1 AND window_type = $2 AND deleted_at IS NULL`
+		rows, err := client.QueryContext(txCtx, sumQ, accountID, window, userID)
+		if err != nil {
+			return fmt.Errorf("read account %d window %s configured sum: %w", accountID, window, err)
+		}
+		var configuredSum, currentLimit float64
+		if rows.Next() {
+			err = rows.Scan(&configuredSum, &currentLimit)
+		} else if rows.Err() != nil {
+			err = rows.Err()
+		} else {
+			err = fmt.Errorf("configured sum query returned no row")
+		}
+		_ = rows.Close()
+		if err != nil {
+			return fmt.Errorf("scan account %d window %s configured sum: %w", accountID, window, err)
+		}
+
+		prospectiveSum := configuredSum - currentLimit + limitPercent
+		if prospectiveSum > ceilingPercent+1e-9 && limitPercent > currentLimit+1e-9 {
+			return fmt.Errorf("%w: account=%d window=%s configured sum would be %.2f%% (current user %.2f%% -> %.2f%%), ceiling %.2f%%",
+				service.ErrAccountWindowCeilingExceeded, accountID, window, prospectiveSum, currentLimit, limitPercent, ceilingPercent)
+		}
+
+		const upsertQ = `INSERT INTO user_account_window_quotas
+			(user_id, account_id, window_type, limit_percent, attributed_percent, created_at, updated_at)
+			VALUES ($1, $2, $3, $4, 0, $5, $5)
+			ON CONFLICT (user_id, account_id, window_type) WHERE deleted_at IS NULL DO UPDATE SET
+				limit_percent = EXCLUDED.limit_percent,
+				updated_at    = EXCLUDED.updated_at`
+		_, err = client.ExecContext(txCtx, upsertQ, userID, accountID, window, limitPercent, time.Now())
+		return err
+	})
 }
 
 // ListAllWithUser 返回所有活跃配额行（JOIN users 带出邮箱/用户名），供管理端总览。
@@ -1456,6 +1534,13 @@ func (r *userAccountWindowQuotaRepository) GetMaxConfiguredSumForWindow(ctx cont
 func (r *userAccountWindowQuotaRepository) EqualizeActiveMemberLimits(ctx context.Context, accountID int64, ceiling5h, ceiling7d float64) ([]service.AccountWindowEqualizationResult, error) {
 	var results []service.AccountWindowEqualizationResult
 	err := r.withWindowQuotaTx(ctx, func(txCtx context.Context, client *dbent.Client) error {
+		found, err := lockSharedAccountForWindowQuotaTx(txCtx, client, accountID)
+		if err != nil {
+			return fmt.Errorf("lock account %d before equalizing limits: %w", accountID, err)
+		}
+		if !found {
+			return fmt.Errorf("%w: account=%d", service.ErrAccountWindowNoActiveMembers, accountID)
+		}
 		for _, item := range []struct {
 			window  string
 			ceiling float64
@@ -1748,6 +1833,27 @@ func (r *userAccountWindowQuotaRepository) SyncAccountMembers(ctx context.Contex
 		return nil, err
 	}
 	return results, nil
+}
+
+func lockSharedAccountForWindowQuotaTx(ctx context.Context, client *dbent.Client, accountID int64) (bool, error) {
+	const q = `SELECT id
+		FROM accounts
+		WHERE id = $1 AND deleted_at IS NULL
+		  AND COALESCE(extra->>'window_quota_shared', 'false') = 'true'
+		FOR UPDATE`
+	rows, err := client.QueryContext(ctx, q, accountID)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		return false, rows.Err()
+	}
+	var lockedID int64
+	if err := rows.Scan(&lockedID); err != nil {
+		return false, err
+	}
+	return lockedID == accountID, rows.Err()
 }
 
 func (r *userAccountWindowQuotaRepository) withWindowQuotaTx(ctx context.Context, fn func(context.Context, *dbent.Client) error) error {

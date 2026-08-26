@@ -383,6 +383,46 @@ func TestOpenAIGatewayServiceRecordUsage_AttributesWindowAfterUsageLogPersists(t
 	require.InDelta(t, 42, windowRepo.costCalls[0].officialPercent, 1e-9)
 }
 
+func TestOpenAIGatewayServiceRecordUsage_AttributesPersistedWindowUsageWhenBillingFails(t *testing.T) {
+	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+	billingRepo := &openAIRecordUsageBillingRepoStub{err: errors.New("billing unavailable")}
+	windowRepo := &stubWindowRepo{}
+	windowRepo.recomputeHook = func() {
+		require.Equal(t, 1, usageRepo.calls, "窗口归因必须发生在 usage_log 成功落库之后")
+	}
+	windowQuota, _ := newQuotaServiceWithMiniRedis(t, windowRepo)
+	svc := newOpenAIRecordUsageServiceWithBillingRepoForTest(
+		usageRepo,
+		billingRepo,
+		&openAIRecordUsageUserRepoStub{},
+		&openAIRecordUsageSubRepoStub{},
+		nil,
+	)
+	svc.accountWindowQuota = windowQuota
+
+	headers := http.Header{}
+	headers.Set("x-codex-primary-used-percent", "42")
+	headers.Set("x-codex-primary-reset-after-seconds", "3600")
+	headers.Set("x-codex-primary-window-minutes", "300")
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{
+			RequestID:       "resp_billing_failure_attribution",
+			Usage:           OpenAIUsage{InputTokens: 1200, OutputTokens: 300},
+			Model:           "gpt-5.1",
+			Duration:        time.Second,
+			ResponseHeaders: headers,
+		},
+		APIKey:  &APIKey{ID: 1000, Quota: 100, Group: &Group{RateMultiplier: 1}},
+		User:    &User{ID: 1},
+		Account: &Account{ID: 29, Type: AccountTypeOAuth, Platform: PlatformOpenAI, Extra: map[string]any{AccountExtraWindowQuotaShared: true}},
+	})
+
+	require.ErrorContains(t, err, "billing unavailable")
+	require.Equal(t, 1, usageRepo.calls)
+	require.Len(t, windowRepo.costCalls, 1)
+	require.InDelta(t, 42, windowRepo.costCalls[0].officialPercent, 1e-9)
+}
+
 func TestOpenAIGatewayServiceRecordUsage_SkipsWindowAttributionForPrivateOAuthAccount(t *testing.T) {
 	usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
 	billingRepo := &openAIRecordUsageBillingRepoStub{result: &UsageBillingApplyResult{Applied: true}}

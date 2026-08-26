@@ -288,3 +288,21 @@ func TestAccountWindowQuotaHandler_DonateRejectsBorrowedReclaim(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	require.Contains(t, w.Body.String(), service.ErrAccountWindowDonationInUse.Error())
 }
+
+func TestAccountWindowQuotaHandler_DonateRejectsNonMember(t *testing.T) {
+	repo := &accountWindowQuotaHandlerRepo{rows: []service.UserAccountWindowQuotaRecord{
+		{UserID: 1, AccountID: 7, WindowType: service.WindowType5h, LimitPercent: 23},
+	}}
+	h, _ := newAccountWindowQuotaHandlerTest(t, repo)
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/user/account-window-quotas/donate", strings.NewReader(`{"account_id":7,"window_type":"5h","fraction":1}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set(string(servermiddleware.ContextKeyUser), servermiddleware.AuthSubject{UserID: 999})
+
+	h.Donate(c)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), service.ErrAccountWindowNotMember.Error())
+}

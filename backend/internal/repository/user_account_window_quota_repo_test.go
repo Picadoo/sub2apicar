@@ -44,6 +44,12 @@ func newWindowQuotaRepoSQLMock(t *testing.T) (*userAccountWindowQuotaRepository,
 	return &userAccountWindowQuotaRepository{client: client}, mock
 }
 
+func expectSharedAccountWindowQuotaLock(mock sqlmock.Sqlmock, accountID int64) {
+	mock.ExpectQuery("SELECT id\\s+FROM accounts[\\s\\S]*FOR UPDATE").
+		WithArgs(accountID).
+		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(accountID))
+}
+
 func TestUserAccountWindowQuotaRepository_ResetWindowForAccountIfDueIsConditional(t *testing.T) {
 	dueAt := time.Date(2026, time.August, 2, 10, 0, 0, 0, time.UTC)
 
@@ -1071,6 +1077,7 @@ func TestUserAccountWindowQuotaRepository_GetAccountOfficialWindowPercentRejects
 func TestUserAccountWindowQuotaRepository_SetDonatePoolFractionRejectsBorrowedReclaim(t *testing.T) {
 	repo, mock := newWindowQuotaRepoSQLMock(t)
 	mock.ExpectBegin()
+	expectSharedAccountWindowQuotaLock(mock, 1)
 	mock.ExpectQuery("SELECT q\\.user_id[\\s\\S]*FOR UPDATE").
 		WithArgs(int64(1), service.WindowType5h).
 		WillReturnRows(sqlmock.NewRows([]string{"user_id", "account_id", "window_type", "limit_percent", "attributed_percent", "window_reset_at", "donate_pool_fraction"}).
@@ -1087,18 +1094,64 @@ func TestUserAccountWindowQuotaRepository_SetDonatePoolFractionAllowsUnusedRecla
 	repo, mock := newWindowQuotaRepoSQLMock(t)
 	minimum := 12.0 / 23.0
 	mock.ExpectBegin()
+	expectSharedAccountWindowQuotaLock(mock, 1)
 	mock.ExpectQuery("SELECT q\\.user_id[\\s\\S]*FOR UPDATE").
 		WithArgs(int64(1), service.WindowType5h).
 		WillReturnRows(sqlmock.NewRows([]string{"user_id", "account_id", "window_type", "limit_percent", "attributed_percent", "window_reset_at", "donate_pool_fraction"}).
 			AddRow(1, 1, service.WindowType5h, 23, 35, nil, 0).
 			AddRow(2, 1, service.WindowType5h, 23, 0, nil, 1))
-	mock.ExpectExec("INSERT INTO user_account_window_quotas").
-		WithArgs(int64(2), int64(1), service.WindowType5h, float64(23), minimum, sqlmock.AnyArg()).
+	mock.ExpectExec("UPDATE user_account_window_quotas\\s+SET donate_pool_fraction").
+		WithArgs(int64(2), int64(1), service.WindowType5h, minimum, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(1, 1))
 	mock.ExpectCommit()
 
 	err := repo.SetDonatePoolFraction(context.Background(), 2, 1, service.WindowType5h, minimum, 23)
 	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestUserAccountWindowQuotaRepository_SetDonatePoolFractionRejectsNonMemberWithoutInsert(t *testing.T) {
+	repo, mock := newWindowQuotaRepoSQLMock(t)
+	mock.ExpectBegin()
+	expectSharedAccountWindowQuotaLock(mock, 1)
+	mock.ExpectQuery("SELECT q\\.user_id[\\s\\S]*FOR UPDATE").
+		WithArgs(int64(1), service.WindowType5h).
+		WillReturnRows(sqlmock.NewRows([]string{"user_id", "account_id", "window_type", "limit_percent", "attributed_percent", "window_reset_at", "donate_pool_fraction"}).
+			AddRow(1, 1, service.WindowType5h, 23, 0, nil, 0))
+	mock.ExpectRollback()
+
+	err := repo.SetDonatePoolFraction(context.Background(), 999, 1, service.WindowType5h, 1, 23)
+	require.ErrorIs(t, err, service.ErrAccountWindowNotMember)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestUserAccountWindowQuotaRepository_SetLimitWithinCeilingRejectsConcurrentOversubscription(t *testing.T) {
+	repo, mock := newWindowQuotaRepoSQLMock(t)
+	mock.ExpectBegin()
+	expectSharedAccountWindowQuotaLock(mock, 7)
+	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(limit_percent\\), 0\\)[\\s\\S]*FILTER").
+		WithArgs(int64(7), service.WindowType5h, int64(2)).
+		WillReturnRows(sqlmock.NewRows([]string{"configured_sum", "current_limit"}).AddRow(90, 20))
+	mock.ExpectRollback()
+
+	err := repo.SetLimitForUserAccountWithinCeiling(context.Background(), 2, 7, service.WindowType5h, 30, 92)
+	require.ErrorIs(t, err, service.ErrAccountWindowCeilingExceeded)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestUserAccountWindowQuotaRepository_SetLimitWithinCeilingAllowsNonIncreasingRepair(t *testing.T) {
+	repo, mock := newWindowQuotaRepoSQLMock(t)
+	mock.ExpectBegin()
+	expectSharedAccountWindowQuotaLock(mock, 7)
+	mock.ExpectQuery("SELECT COALESCE\\(SUM\\(limit_percent\\), 0\\)[\\s\\S]*FILTER").
+		WithArgs(int64(7), service.WindowType5h, int64(2)).
+		WillReturnRows(sqlmock.NewRows([]string{"configured_sum", "current_limit"}).AddRow(110, 60))
+	mock.ExpectExec("INSERT INTO user_account_window_quotas").
+		WithArgs(int64(2), int64(7), service.WindowType5h, float64(50), sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(1, 1))
+	mock.ExpectCommit()
+
+	require.NoError(t, repo.SetLimitForUserAccountWithinCeiling(context.Background(), 2, 7, service.WindowType5h, 50, 92))
 	require.NoError(t, mock.ExpectationsWereMet())
 }
 
@@ -1220,6 +1273,7 @@ func TestUserAccountWindowQuotaRepository_SyncAccountMembersBaselinesNewMemberHi
 func TestUserAccountWindowQuotaRepository_EqualizeActiveMemberLimits_CommitsBothWindows(t *testing.T) {
 	repo, mock := newWindowQuotaRepoSQLMock(t)
 	mock.ExpectBegin()
+	expectSharedAccountWindowQuotaLock(mock, 7)
 	mock.ExpectQuery("SELECT q\\.user_id\\s+FROM user_account_window_quotas q\\s+JOIN accounts a").
 		WithArgs(int64(7), service.WindowType5h).
 		WillReturnRows(sqlmock.NewRows([]string{"user_id"}).AddRow(1).AddRow(2).AddRow(3))
@@ -1246,6 +1300,7 @@ func TestUserAccountWindowQuotaRepository_EqualizeActiveMemberLimits_CommitsBoth
 func TestUserAccountWindowQuotaRepository_EqualizeActiveMemberLimits_RollsBackWhenSecondWindowFails(t *testing.T) {
 	repo, mock := newWindowQuotaRepoSQLMock(t)
 	mock.ExpectBegin()
+	expectSharedAccountWindowQuotaLock(mock, 7)
 	mock.ExpectQuery("SELECT q\\.user_id\\s+FROM user_account_window_quotas q\\s+JOIN accounts a").
 		WithArgs(int64(7), service.WindowType5h).
 		WillReturnRows(sqlmock.NewRows([]string{"user_id"}).AddRow(1).AddRow(2))
@@ -1269,6 +1324,7 @@ func TestUserAccountWindowQuotaRepository_EqualizeActiveMemberLimits_RollsBackWh
 func TestUserAccountWindowQuotaRepository_EqualizeActiveMemberLimits_RollsBackWhenWindowHasNoMembers(t *testing.T) {
 	repo, mock := newWindowQuotaRepoSQLMock(t)
 	mock.ExpectBegin()
+	expectSharedAccountWindowQuotaLock(mock, 7)
 	mock.ExpectQuery("SELECT q\\.user_id\\s+FROM user_account_window_quotas q\\s+JOIN accounts a").
 		WithArgs(int64(7), service.WindowType5h).
 		WillReturnRows(sqlmock.NewRows([]string{"user_id"}))

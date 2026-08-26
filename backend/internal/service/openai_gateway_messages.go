@@ -33,8 +33,8 @@ func (s *OpenAIGatewayService) ForwardAsAnthropic(
 	promptCacheKey string,
 	defaultMappedModel string,
 ) (*OpenAIForwardResult, error) {
-	if s.enforceAccountWindowQuota(ctx, c, account) {
-		return nil, ErrUserAccountWindowQuotaExceeded
+	if err := s.CheckAccountWindowQuota(ctx, c, account); err != nil {
+		return nil, err
 	}
 	beginUpstreamResponseModelObservation(c)
 

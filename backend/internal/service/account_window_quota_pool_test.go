@@ -184,6 +184,17 @@ func TestSetDonateFraction_AllowsReclaimOnlyUnusedDonation(t *testing.T) {
 	}
 }
 
+func TestSetDonateFraction_RejectsNonMemberWithoutWrite(t *testing.T) {
+	repo := &stubWindowRepo{rows: []UserAccountWindowQuotaRecord{
+		awqRec(1, WindowType5h, 23, 0, 0),
+	}}
+	svc, _ := newQuotaServiceWithMiniRedis(t, repo)
+
+	err := svc.SetDonateFraction(context.Background(), 999, 1, WindowType5h, 1)
+	require.ErrorIs(t, err, ErrAccountWindowNotMember)
+	require.Empty(t, repo.donateCalls)
+}
+
 // 7d 打满的用户不计入 needy、也借不到救急池。
 func TestAccountWindowPool_SevenDayBlocksBorrow(t *testing.T) {
 	recs := []UserAccountWindowQuotaRecord{
@@ -255,6 +266,19 @@ type blockingWindowRepo struct {
 	firstEntered chan struct{}
 	releaseFirst chan struct{}
 	firstOnce    sync.Once
+}
+
+type blockingAtomicLimitRepo struct {
+	*stubWindowRepo
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (r *blockingAtomicLimitRepo) SetLimitForUserAccountWithinCeiling(context.Context, int64, int64, string, float64, float64) error {
+	r.once.Do(func() { close(r.entered) })
+	<-r.release
+	return nil
 }
 
 func (r *blockingWindowRepo) ApplyWindowSharesFromCheckpoint(_ context.Context, accountID int64, window string, candidate AccountWindowAttributionCheckpoint, resetAt *time.Time) (AccountWindowAttributionCheckpoint, bool, error) {
@@ -446,6 +470,15 @@ func TestBootstrapSharedAccountMembers_DoesNotOverwriteExistingMembers(t *testin
 	}
 }
 
+func TestBootstrapSharedAccountMembers_RequiresExplicitMembersWhenNoPeerExists(t *testing.T) {
+	repo := &stubWindowRepo{}
+	svc, _ := newQuotaServiceWithMiniRedis(t, repo)
+
+	_, err := svc.BootstrapSharedAccountMembers(context.Background(), 34)
+	require.ErrorIs(t, err, ErrAccountWindowNoActiveMembers)
+	require.Empty(t, repo.syncUserIDs)
+}
+
 func TestSetAccountMembers_RecomputesFromOfficialCheckpointUsingDollarPath(t *testing.T) {
 	repo := &stubWindowRepo{}
 	svc, mr := newQuotaServiceWithMiniRedis(t, repo)
@@ -634,6 +667,14 @@ func TestCheckUserAccountEligible_BlocksUnassignedSharedMember(t *testing.T) {
 	if eligible || window != WindowType5h {
 		t.Fatalf("unassigned user eligible=%v window=%q, want blocked on 5h", eligible, window)
 	}
+}
+
+func TestCheckUserAccountEligible_BlocksSharedAccountWithoutMembers(t *testing.T) {
+	svc := newStubQuotaService(t, nil)
+	eligible, window, resetAt := svc.CheckUserAccountEligible(context.Background(), 1, 1)
+	require.False(t, eligible)
+	require.Equal(t, WindowType5h, window)
+	require.Nil(t, resetAt)
 }
 
 // 顶满自己 5h 份额、但救急池有余 → 放行（借用救急池）。
@@ -971,6 +1012,46 @@ func TestSetLimitForUserAccount_OverallocatedAllowsNonIncreasingChanges(t *testi
 			}
 		})
 	}
+}
+
+func TestAccountWindowConfigurationMutationsSerializeAcrossServiceInstances(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb1 := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	rdb2 := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() {
+		_ = rdb1.Close()
+		_ = rdb2.Close()
+	})
+	blockingRepo := &blockingAtomicLimitRepo{
+		stubWindowRepo: &stubWindowRepo{},
+		entered:        make(chan struct{}),
+		release:        make(chan struct{}),
+	}
+	limitSvc := NewAccountWindowQuotaService(blockingRepo, rdb1)
+	ceilingSvc := NewAccountWindowQuotaService(&stubWindowRepo{}, rdb2)
+
+	limitDone := make(chan error, 1)
+	go func() {
+		limitDone <- limitSvc.SetLimitForUserAccount(context.Background(), 1, 7, WindowType5h, 23)
+	}()
+	<-blockingRepo.entered
+
+	ceilingDone := make(chan error, 1)
+	go func() {
+		ceilingDone <- ceilingSvc.SetTotalCeiling(context.Background(), WindowType5h, 91)
+	}()
+	select {
+	case err := <-ceilingDone:
+		t.Fatalf("ceiling mutation bypassed distributed configuration lock: %v", err)
+	case <-time.After(75 * time.Millisecond):
+	}
+
+	close(blockingRepo.release)
+	require.NoError(t, <-limitDone)
+	require.NoError(t, <-ceilingDone)
+	stored, err := mr.Get(accountWindowCeilingKey(WindowType5h))
+	require.NoError(t, err)
+	require.Equal(t, "91", stored)
 }
 
 func TestSetTotalCeiling_RejectsBelowExistingConfiguredSum(t *testing.T) {

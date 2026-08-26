@@ -146,6 +146,7 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
+	var lastWindowQuotaErr error
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 
 	// 分组利润控制：chat completions 文本入口请求级装门并固定 pricingAt。
@@ -188,7 +189,9 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 				h.handleStreamingAwareError(c, cls.Status, cls.ErrType, cls.Message, streamStarted)
 				return
 			} else {
-				if lastFailoverErr != nil {
+				if lastFailoverErr == nil && lastWindowQuotaErr != nil {
+					h.writeAccountWindowQuotaExceeded(c, lastWindowQuotaErr, streamStarted, false)
+				} else if lastFailoverErr != nil {
 					h.handleFailoverExhausted(c, lastFailoverErr, streamStarted)
 				} else {
 					h.handleStreamingAwareError(c, http.StatusBadGateway, "api_error", "Upstream request failed", streamStarted)
@@ -197,6 +200,10 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			}
 		}
 		if selection == nil || selection.Account == nil {
+			if lastFailoverErr == nil && lastWindowQuotaErr != nil {
+				h.writeAccountWindowQuotaExceeded(c, lastWindowQuotaErr, streamStarted, false)
+				return
+			}
 			cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel)
 			if !cls.ModelNotFound {
 				markOpsRoutingCapacityLimited(c)
@@ -205,6 +212,15 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			return
 		}
 		account := selection.Account
+		if quotaErr := h.gatewayService.CheckAccountWindowQuota(c.Request.Context(), c, account); quotaErr != nil {
+			if selection.Acquired && selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			failedAccountIDs[account.ID] = struct{}{}
+			lastWindowQuotaErr = quotaErr
+			reqLog.Debug("openai_chat_completions.account_window_quota_excluded", zap.Int64("account_id", account.ID), zap.Error(quotaErr))
+			continue
+		}
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
 		reqLog.Debug("openai_chat_completions.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
 		_ = scheduleDecision
@@ -298,10 +314,10 @@ func (h *OpenAIGatewayHandler) ChatCompletions(c *gin.Context) {
 			})
 		}
 		if err != nil {
-			// 用户在该账号上的窗口配额已耗尽：429 响应已在 ForwardAsChatCompletions 内写出。
-			// 客户端业务限制而非账号健康问题，不上报调度失败、不 failover、不二次写响应。
 			if errors.Is(err, service.ErrUserAccountWindowQuotaExceeded) {
-				return
+				failedAccountIDs[account.ID] = struct{}{}
+				lastWindowQuotaErr = err
+				continue
 			}
 			if result != nil && result.ImageCount > 0 {
 				reqLog.Warn("openai_chat_completions.forward_partial_error_with_image_result",

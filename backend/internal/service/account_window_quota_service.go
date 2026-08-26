@@ -9,6 +9,7 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -66,6 +67,9 @@ var ErrAccountWindowInvalidMembers = errors.New("account window member selection
 
 // ErrAccountWindowDonationInUse 表示用户试图收回已经被其他成员实际借用的救急池额度。
 var ErrAccountWindowDonationInUse = errors.New("donated account window quota is already in use")
+
+// ErrAccountWindowNotMember 表示用户不是该拼车账号指定窗口的活跃成员。
+var ErrAccountWindowNotMember = errors.New("user is not an active account window member")
 
 // AccountWindowDonationInUseError 带出当前窗口允许的最低捐赠比例，供 API 和前端提示。
 type AccountWindowDonationInUseError struct {
@@ -170,6 +174,12 @@ type UserAccountWindowQuotaRepository interface {
 	SyncAccountMembers(ctx context.Context, accountID int64, userIDs []int64, ceiling5h, ceiling7d float64) ([]AccountWindowEqualizationResult, error)
 }
 
+// accountWindowAtomicLimitSetter 在账号行锁事务内重查 configured sum 并写入 limit。
+// 生产仓储实现该能力；保留旧接口方法仅用于兼容轻量测试桩。
+type accountWindowAtomicLimitSetter interface {
+	SetLimitForUserAccountWithinCeiling(ctx context.Context, userID, accountID int64, window string, limitPercent, ceilingPercent float64) error
+}
+
 // sharedAccountIDReader / peerSharedAccountMemberReader 是新拼车账号初始化所需的可选仓储能力。
 // 保持主接口兼容现有测试桩；生产仓储实现这两个接口。
 type sharedAccountIDReader interface {
@@ -228,8 +238,9 @@ type accountWindowAttributionCheckpoint = AccountWindowAttributionCheckpoint
 // AccountWindowQuotaService 负责把账号级官方利用率增量分摊到发起请求的用户，
 // 并提供 23% 配额校验与窗口重置能力。
 type AccountWindowQuotaService struct {
-	repo UserAccountWindowQuotaRepository
-	rdb  *redis.Client
+	repo     UserAccountWindowQuotaRepository
+	rdb      *redis.Client
+	configMu sync.Mutex
 }
 
 // NewAccountWindowQuotaService 构造 AccountWindowQuotaService。
@@ -255,6 +266,51 @@ func AccountWindowAttributionCheckpointExtraKey(window string) string {
 
 func accountWindowAttributionLockKey(accountID int64, window string) string {
 	return "uawq:attribution-lock:" + strconv.FormatInt(accountID, 10) + ":" + window
+}
+
+func accountWindowConfigLockKey() string {
+	return "uawq:config-lock"
+}
+
+// acquireConfigLock 串行化 ceiling、limit、equalize 和成员同步。Redis 锁覆盖多实例，
+// 本地互斥锁覆盖无 Redis 的测试/降级环境；Redis 故障时拒绝配置写入，避免静默竞态。
+func (s *AccountWindowQuotaService) acquireConfigLock(ctx context.Context) (func(), error) {
+	if s == nil {
+		return nil, errors.New("account window quota service unavailable")
+	}
+	s.configMu.Lock()
+	if s.rdb == nil {
+		return s.configMu.Unlock, nil
+	}
+
+	key := accountWindowConfigLockKey()
+	token := fmt.Sprintf("%d:%p", time.Now().UnixNano(), s)
+	ticker := time.NewTicker(25 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		locked, err := s.rdb.SetNX(ctx, key, token, 2*time.Minute).Result()
+		if err != nil {
+			s.configMu.Unlock()
+			return nil, fmt.Errorf("acquire account window configuration lock: %w", err)
+		}
+		if locked {
+			return func() {
+				defer s.configMu.Unlock()
+				unlockCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				const releaseIfOwner = `if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) else return 0 end`
+				if err := s.rdb.Eval(unlockCtx, releaseIfOwner, []string{key}, token).Err(); err != nil {
+					slog.Warn("account_window_quota.config_unlock_failed", "error", err)
+				}
+			}, nil
+		}
+		select {
+		case <-ctx.Done():
+			s.configMu.Unlock()
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 // acquireAttributionLock serializes checkpoint selection, member-share recomputation,
@@ -944,7 +1000,7 @@ func (s *AccountWindowQuotaService) CheckUserAccountEligible(ctx context.Context
 	// 拼车账号已有显式成员时，未分配用户不得使用该账号，也不得靠后续归因自动混入成员列表。
 	_, has5hMembership := pv.base5h[userID]
 	_, has7dMembership := pv.limit7d[userID]
-	if len(records) > 0 && !has5hMembership && !has7dMembership {
+	if len(records) == 0 || (len(pv.base5h) > 0 && !has5hMembership) || (len(pv.limit7d) > 0 && !has7dMembership) {
 		return false, WindowType5h, nil
 	}
 
@@ -1203,6 +1259,11 @@ func (s *AccountWindowQuotaService) SetTotalCeiling(ctx context.Context, window 
 	if percent <= 0 || percent > 100 {
 		return fmt.Errorf("ceiling percent must be in (0,100], got %.2f", percent)
 	}
+	release, err := s.acquireConfigLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	maxConfigured, err := s.repo.GetMaxConfiguredSumForWindow(ctx, window)
 	if err != nil {
 		return fmt.Errorf("check existing configured sums before setting ceiling: %w", err)
@@ -1271,7 +1332,15 @@ func (s *AccountWindowQuotaService) SetLimitForUserAccount(ctx context.Context, 
 	if limitPercent < 0 {
 		limitPercent = 0
 	}
+	release, err := s.acquireConfigLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	ceiling := s.GetTotalCeiling(ctx, window)
+	if setter, ok := s.repo.(accountWindowAtomicLimitSetter); ok {
+		return setter.SetLimitForUserAccountWithinCeiling(ctx, userID, accountID, window, limitPercent, ceiling)
+	}
 	records, err := s.repo.ListByAccount(ctx, accountID)
 	if err != nil {
 		return fmt.Errorf("check account window configured sum before setting limit: %w", err)
@@ -1306,6 +1375,11 @@ func (s *AccountWindowQuotaService) EqualizeAccountActiveMemberLimits(ctx contex
 	if accountID <= 0 {
 		return nil, fmt.Errorf("account_id is required")
 	}
+	release, err := s.acquireConfigLock(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	results, err := s.repo.EqualizeActiveMemberLimits(
 		ctx,
 		accountID,
@@ -1336,14 +1410,14 @@ func (s *AccountWindowQuotaService) BootstrapSharedAccountMembers(ctx context.Co
 	}
 	reader, ok := s.repo.(peerSharedAccountMemberReader)
 	if !ok {
-		return nil, nil
+		return nil, fmt.Errorf("%w: account=%d has no member discovery support", ErrAccountWindowNoActiveMembers, accountID)
 	}
 	userIDs, err := reader.ListPeerSharedAccountMemberUserIDs(ctx, accountID)
 	if err != nil {
 		return nil, fmt.Errorf("list peer shared account members: %w", err)
 	}
 	if len(userIDs) == 0 {
-		return nil, nil
+		return nil, fmt.Errorf("%w: account=%d must inherit or explicitly configure members", ErrAccountWindowNoActiveMembers, accountID)
 	}
 	return s.SetAccountMembers(ctx, accountID, userIDs)
 }
@@ -1369,6 +1443,11 @@ func (s *AccountWindowQuotaService) SetAccountMembers(ctx context.Context, accou
 		normalized = append(normalized, userID)
 	}
 	sort.Slice(normalized, func(i, j int) bool { return normalized[i] < normalized[j] })
+	release, err := s.acquireConfigLock(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	return s.repo.SyncAccountMembers(
 		ctx,
 		accountID,
@@ -1396,6 +1475,16 @@ func (s *AccountWindowQuotaService) SetDonateFraction(ctx context.Context, userI
 		return fmt.Errorf("list account window quotas before donation update: %w", err)
 	}
 	records = effectiveWindowQuotaRecordsAt(records, time.Now())
+	isMember := false
+	for _, record := range records {
+		if record.UserID == userID && record.WindowType == window {
+			isMember = true
+			break
+		}
+	}
+	if !isMember {
+		return fmt.Errorf("%w: user=%d account=%d window=%s", ErrAccountWindowNotMember, userID, accountID, window)
+	}
 	if err := ValidateAccountWindowDonateFraction(records, userID, window, fraction); err != nil {
 		return err
 	}

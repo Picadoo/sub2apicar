@@ -492,6 +492,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
+	var lastWindowQuotaErr error
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	var passthroughFailoverState openAIPassthroughFailoverState
 
@@ -555,7 +556,9 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 				h.handleStreamingAwareError(c, cls.Status, cls.ErrType, cls.Message, streamStarted)
 				return
 			}
-			if lastFailoverErr != nil {
+			if lastFailoverErr == nil && lastWindowQuotaErr != nil {
+				h.writeAccountWindowQuotaExceeded(c, lastWindowQuotaErr, streamStarted, false)
+			} else if lastFailoverErr != nil {
 				h.handleFailoverExhausted(c, lastFailoverErr, streamStarted)
 			} else {
 				h.handleFailoverExhaustedSimple(c, 502, streamStarted)
@@ -563,6 +566,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			return
 		}
 		if selection == nil || selection.Account == nil {
+			if lastFailoverErr == nil && lastWindowQuotaErr != nil {
+				h.writeAccountWindowQuotaExceeded(c, lastWindowQuotaErr, streamStarted, false)
+				return
+			}
 			cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, reqModel, reqModel, requestPlatform)
 			if !cls.ModelNotFound {
 				markOpsRoutingCapacityLimited(c)
@@ -583,6 +590,15 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			zap.Float64("load_skew", scheduleDecision.LoadSkew),
 		)
 		account := selection.Account
+		if quotaErr := h.gatewayService.CheckAccountWindowQuota(c.Request.Context(), c, account); quotaErr != nil {
+			if selection.Acquired && selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			failedAccountIDs[account.ID] = struct{}{}
+			lastWindowQuotaErr = quotaErr
+			reqLog.Debug("openai.account_window_quota_excluded", zap.Int64("account_id", account.ID), zap.Error(quotaErr))
+			continue
+		}
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
 		reqLog.Debug("openai.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
 		setOpsSelectedAccount(c, account.ID, account.Platform)
@@ -679,10 +695,10 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			})
 		}
 		if err != nil {
-			// 用户在该账号上的窗口配额已耗尽：429 响应已在 Forward 内写出。
-			// 这是客户端业务限制而非账号健康问题，不上报调度失败、不触发 failover、不二次写响应。
 			if errors.Is(err, service.ErrUserAccountWindowQuotaExceeded) {
-				return
+				failedAccountIDs[account.ID] = struct{}{}
+				lastWindowQuotaErr = err
+				continue
 			}
 			if result != nil && result.ImageCount > 0 {
 				reqLog.Warn("openai.forward_partial_error_with_image_result",
@@ -1081,6 +1097,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
+	var lastWindowQuotaErr error
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	effectiveMappedModel := preferredMappedModel
 
@@ -1130,7 +1147,9 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					return
 				}
 			} else {
-				if lastFailoverErr != nil {
+				if lastFailoverErr == nil && lastWindowQuotaErr != nil {
+					h.writeAccountWindowQuotaExceeded(c, lastWindowQuotaErr, streamStarted, true)
+				} else if lastFailoverErr != nil {
 					h.handleAnthropicFailoverExhausted(c, lastFailoverErr, streamStarted)
 				} else {
 					h.anthropicStreamingAwareError(c, http.StatusBadGateway, "api_error", "Upstream request failed", streamStarted)
@@ -1139,6 +1158,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			}
 		}
 		if selection == nil || selection.Account == nil {
+			if lastFailoverErr == nil && lastWindowQuotaErr != nil {
+				h.writeAccountWindowQuotaExceeded(c, lastWindowQuotaErr, streamStarted, true)
+				return
+			}
 			cls := classifyOpenAICompatibleNoAccountErrorFromGin(c, h.gatewayService, apiKey, currentRoutingModel, reqModel)
 			if !cls.ModelNotFound {
 				markOpsRoutingCapacityLimited(c)
@@ -1147,6 +1170,15 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			return
 		}
 		account := selection.Account
+		if quotaErr := h.gatewayService.CheckAccountWindowQuota(c.Request.Context(), c, account); quotaErr != nil {
+			if selection.Acquired && selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			failedAccountIDs[account.ID] = struct{}{}
+			lastWindowQuotaErr = quotaErr
+			reqLog.Debug("openai_messages.account_window_quota_excluded", zap.Int64("account_id", account.ID), zap.Error(quotaErr))
+			continue
+		}
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
 		reqLog.Debug("openai_messages.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
 		_ = scheduleDecision
@@ -1242,10 +1274,10 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			})
 		}
 		if err != nil {
-			// 用户在该账号上的窗口配额已耗尽：429 响应已在 ForwardAsAnthropic 内写出。
-			// 客户端业务限制而非账号健康问题，不上报调度失败、不 failover、不二次写响应。
 			if errors.Is(err, service.ErrUserAccountWindowQuotaExceeded) {
-				return
+				failedAccountIDs[account.ID] = struct{}{}
+				lastWindowQuotaErr = err
+				continue
 			}
 			if result != nil && result.ImageCount > 0 {
 				reqLog.Warn("openai_messages.forward_partial_error_with_image_result",
@@ -1907,6 +1939,7 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 	profitVetoCount := 0
 	failedAccountIDs := make(map[int64]struct{})
 	var lastFailoverErr *service.UpstreamFailoverError
+	var lastWindowQuotaErr error
 	var oauth429FailoverState service.OpenAIOAuth429FailoverState
 	wsAttemptMessage := append([]byte(nil), firstMessage...)
 	handleWSFailover := func(account *service.Account, failoverErr *service.UpstreamFailoverError) bool {
@@ -1988,7 +2021,9 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				zap.Error(openAICompatibleSelectionErrorForLog(err, requestPlatform)),
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
-			if lastFailoverErr != nil {
+			if lastFailoverErr == nil && lastWindowQuotaErr != nil {
+				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "account window quota exceeded; reconnect after the official window resets")
+			} else if lastFailoverErr != nil {
 				closeOpenAIWSFailoverExhausted(wsConn, lastFailoverErr)
 			} else {
 				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "no available account")
@@ -1996,7 +2031,9 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 			return
 		}
 		if selection == nil || selection.Account == nil {
-			if lastFailoverErr != nil {
+			if lastFailoverErr == nil && lastWindowQuotaErr != nil {
+				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "account window quota exceeded; reconnect after the official window resets")
+			} else if lastFailoverErr != nil {
 				closeOpenAIWSFailoverExhausted(wsConn, lastFailoverErr)
 			} else {
 				closeOpenAIClientWS(wsConn, coderws.StatusTryAgainLater, "no available account")
@@ -2005,6 +2042,15 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 		}
 
 		account := selection.Account
+		if quotaErr := h.gatewayService.CheckAccountWindowQuota(ctx, c, account); quotaErr != nil {
+			if selection.Acquired && selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			failedAccountIDs[account.ID] = struct{}{}
+			lastWindowQuotaErr = quotaErr
+			reqLog.Debug("openai.websocket_account_window_quota_excluded", zap.Int64("account_id", account.ID), zap.Error(quotaErr))
+			continue
+		}
 		accountMaxConcurrency := account.Concurrency
 		if selection.WaitPlan != nil && selection.WaitPlan.MaxConcurrency > 0 {
 			accountMaxConcurrency = selection.WaitPlan.MaxConcurrency
@@ -2174,6 +2220,9 @@ func (h *OpenAIGatewayHandler) ResponsesWebSocket(c *gin.Context) {
 				// turn==1 的会话屏蔽已由握手层检查覆盖；连接内 flag 只拦截后续 turn。
 				if cyberBlockedThisConn {
 					return service.NewOpenAIWSClientCloseError(coderws.StatusPolicyViolation, cyberSessionBlockedClientMsg, nil)
+				}
+				if quotaErr := h.gatewayService.CheckAccountWindowQuota(ctx, c, account); quotaErr != nil {
+					return service.NewOpenAIWSClientCloseError(coderws.StatusTryAgainLater, "account window quota exceeded; reconnect after the official window resets", quotaErr)
 				}
 				// 长连接跨峰谷/倍率刷新防护：每个 turn 按当前时刻重装门并复核
 				// 当前账号，越线即要求客户端重连重选（连接绑定单一上游账号，
@@ -2727,6 +2776,40 @@ func (h *OpenAIGatewayHandler) mapUpstreamError(statusCode int) (int, string, st
 	default:
 		return http.StatusBadGateway, "upstream_error", "Upstream request failed"
 	}
+}
+
+func (h *OpenAIGatewayHandler) writeAccountWindowQuotaExceeded(c *gin.Context, quotaErr error, streamStarted, anthropic bool) {
+	var detail *service.UserAccountWindowQuotaExceededError
+	window := service.WindowType5h
+	if errors.As(quotaErr, &detail) && detail != nil {
+		if detail.Window != "" {
+			window = detail.Window
+		}
+		if detail.ResetAt != nil {
+			retryAfter := int(time.Until(*detail.ResetAt).Seconds())
+			if retryAfter < 1 {
+				retryAfter = 1
+			}
+			c.Header("Retry-After", strconv.Itoa(retryAfter))
+		}
+	}
+
+	if service.StopOpenAICompactSSEKeepaliveCommitted(c) {
+		streamStarted = true
+	}
+	service.StopOpenAIImagesJSONKeepaliveCommitted(c)
+	if !streamStarted {
+		service.WriteAccountWindowQuotaExceeded(c, quotaErr)
+		return
+	}
+
+	service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonWindowQuotaExceeded)
+	message := fmt.Sprintf("You have reached your %s window usage limit on this account; access resumes after the official window resets.", window)
+	if anthropic {
+		h.anthropicStreamingAwareError(c, http.StatusTooManyRequests, "rate_limit_error", message, true)
+		return
+	}
+	h.handleStreamingAwareErrorWithCode(c, http.StatusTooManyRequests, "rate_limit_error", "user_account_window_quota_exceeded", message, true, false)
 }
 
 // handleStreamingAwareError handles errors that may occur after streaming has started

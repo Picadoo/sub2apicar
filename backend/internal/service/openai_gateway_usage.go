@@ -466,7 +466,14 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 
 	if billingErr != nil {
 		usageLog.ActualCost = 0
-		writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.openai_gateway")
+		if sharedWindowQuota {
+			writeState := writeUsageLogWithState(ctx, s.usageLogRepo, usageLog, "service.openai_gateway")
+			if writeState.Persisted {
+				s.attributeCodexUsageSnapshotAfterLog(ctx, user.ID, account.ID, result.ResponseHeaders, result.ResponseHeadersObservedAt, usageLog, writeState.Inserted)
+			}
+		} else {
+			_ = writeUsageLogBestEffort(ctx, s.usageLogRepo, usageLog, "service.openai_gateway")
+		}
 		return billingErr
 	}
 	if sharedWindowQuota {
