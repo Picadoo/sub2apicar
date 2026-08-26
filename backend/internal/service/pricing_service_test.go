@@ -41,6 +41,18 @@ func TestPricingNonEmptyInvalidRemoteURLStillReturnsValidationError(t *testing.T
 	require.Contains(t, err.Error(), "invalid pricing url")
 }
 
+func TestPricingEmbeddedFallbackSupportsStandaloneBinary(t *testing.T) {
+	dataDir := t.TempDir()
+	svc := NewPricingService(&config.Config{Pricing: config.PricingConfig{
+		DataDir:      dataDir,
+		FallbackFile: filepath.Join(dataDir, "missing", "model-pricing.json"),
+	}}, nil)
+
+	require.NoError(t, svc.useFallbackPricing())
+	require.FileExists(t, svc.getPricingFilePath())
+	require.NotNil(t, svc.GetModelPricing("codex-auto-review"))
+}
+
 func TestParsePricingData_ParsesPriorityAndServiceTierFields(t *testing.T) {
 	svc := &PricingService{}
 	body := []byte(`{
