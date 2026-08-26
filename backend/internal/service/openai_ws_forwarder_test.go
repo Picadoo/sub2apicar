@@ -161,6 +161,24 @@ func TestOpenAIWSErrorEvent_ServerErrorRecordsModelTransient(t *testing.T) {
 	require.True(t, svc.isOpenAIAccountModelRuntimeBlocked(account, "gpt-5.5"))
 }
 
+func TestOpenAIWSFailureAccountSideEffectsOnce_DeduplicatesErrorFailedPair(t *testing.T) {
+	svc := &OpenAIGatewayService{}
+	svc.rateLimitService = NewRateLimitService(transientCooldownAccountRepo{}, nil, &config.Config{}, nil, nil)
+	account := &Account{ID: 5204, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	errorEvent := []byte(`{"type":"error","error":{"code":"server_error","type":"server_error","message":"Internal error"}}`)
+	failedEvent := []byte(`{"type":"response.failed","response":{"error":{"code":"server_error","message":"Internal error"}}}`)
+	observedAt := time.Now()
+
+	applied := false
+	require.True(t, svc.handleOpenAIWSFailureAccountSideEffectsOnceAt(&applied, context.Background(), account, "gpt-5.5", nil, errorEvent, observedAt))
+	require.True(t, svc.handleOpenAIWSFailureAccountSideEffectsOnceAt(&applied, context.Background(), account, "gpt-5.5", nil, failedEvent, observedAt))
+	require.False(t, svc.isOpenAIAccountModelRuntimeBlocked(account, "gpt-5.5"), "one upstream failure must count once")
+
+	nextFailureApplied := false
+	require.True(t, svc.handleOpenAIWSFailureAccountSideEffectsOnceAt(&nextFailureApplied, context.Background(), account, "gpt-5.5", nil, failedEvent, observedAt.Add(time.Second)))
+	require.True(t, svc.isOpenAIAccountModelRuntimeBlocked(account, "gpt-5.5"), "a second distinct failure should trigger cooldown")
+}
+
 func TestOpenAIWSPayloadTransientStatus_Explicit529IsNotModelTransient(t *testing.T) {
 	payload := []byte(`{"type":"response.failed","response":{"error":{"status_code":529,"code":"server_error","message":"overloaded"}}}`)
 

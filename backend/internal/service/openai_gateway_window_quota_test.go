@@ -48,6 +48,10 @@ func TestOpenAIGatewayWindowQuota_AllHTTPForwardEntrypointsFailBeforeUpstream(t 
 			_, err := s.ForwardAlphaSearch(context.Background(), c, account, []byte(`{"model":"gpt-5"}`))
 			return err
 		}},
+		{name: "embeddings", call: func(s *OpenAIGatewayService, c *gin.Context, account *Account) error {
+			_, err := s.ForwardEmbeddings(context.Background(), c, account, []byte(`{"model":"text-embedding-3-small"}`), "")
+			return err
+		}},
 		{name: "oauth images", call: func(s *OpenAIGatewayService, c *gin.Context, account *Account) error {
 			_, err := s.ForwardImages(context.Background(), c, account, nil, &OpenAIImagesRequest{}, "")
 			return err

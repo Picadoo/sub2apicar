@@ -1,3 +1,11 @@
 allowBuilds:
   esbuild: true
   vue-demi: true
+
+# pnpm reads root overrides from the workspace file when one exists. Keep this
+# in sync with package.json so frozen installs validate the official lockfile.
+overrides:
+  js-cookie: 3.0.7
+  form-data@<4.0.6: ">=4.0.6"
+  postcss@<8.5.18: ">=8.5.18"
+  dompurify@<3.4.14: ">=3.4.14"

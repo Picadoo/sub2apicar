@@ -158,7 +158,7 @@ func (s *OpenAIGatewayService) bufferChatCompletionsAsAnthropic(
 		BillingModel:              billingModel,
 		UpstreamModel:             upstreamModel,
 		ReasoningEffort:           reasoningEffort,
-		ServiceTier:               serviceTier,
+		ServiceTier:               resolvedOpenAIUpstreamServiceTier(c, serviceTier),
 		Stream:                    false,
 		Duration:                  time.Since(startTime),
 		ResponseHeaders:           resp.Header.Clone(),
@@ -206,7 +206,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 		}
 	}
 
-	scan := s.scanCCStream(resp, "openai messages chat fallback", requestID, startTime, emitChunk)
+	scan := s.scanCCStream(c, resp, "openai messages chat fallback", requestID, startTime, emitChunk)
 	usage := scan.Usage
 
 	if scan.Err != nil {
@@ -220,7 +220,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 			BillingModel:              billingModel,
 			UpstreamModel:             upstreamModel,
 			ReasoningEffort:           reasoningEffort,
-			ServiceTier:               serviceTier,
+			ServiceTier:               resolvedOpenAIUpstreamServiceTier(c, serviceTier),
 			Stream:                    true,
 			Duration:                  time.Since(startTime),
 			FirstTokenMs:              scan.FirstTokenMs,
@@ -257,7 +257,7 @@ func (s *OpenAIGatewayService) streamChatCompletionsAsAnthropic(
 		BillingModel:              billingModel,
 		UpstreamModel:             upstreamModel,
 		ReasoningEffort:           reasoningEffort,
-		ServiceTier:               serviceTier,
+		ServiceTier:               resolvedOpenAIUpstreamServiceTier(c, serviceTier),
 		Stream:                    true,
 		Duration:                  time.Since(startTime),
 		FirstTokenMs:              scan.FirstTokenMs,

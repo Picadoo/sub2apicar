@@ -742,6 +742,9 @@ func (s *AccountUsageService) getOpenAIUsage(ctx context.Context, account *Accou
 						if account.IsWindowQuotaShared() {
 							s.syncOpenAICodexOfficialSnapshot(ctx, account.ID, snapshot)
 						}
+						if account.ParentAccountID != nil {
+							notifyOpenAIAutoReset(*account.ParentAccountID)
+						}
 						if usage.UpdatedAt == nil {
 							usage.UpdatedAt = &observedAt
 						}
@@ -966,7 +969,9 @@ func (s *AccountUsageService) persistOpenAICodexProbeSnapshot(accountID int64, u
 	go func() {
 		updateCtx, updateCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer updateCancel()
-		_, _ = writer.UpdateCodexUsageSnapshotIfNewer(updateCtx, accountID, observedAt, updates)
+		if updated, err := writer.UpdateCodexUsageSnapshotIfNewer(updateCtx, accountID, observedAt, updates); err == nil && updated {
+			notifyOpenAIAutoReset(accountID)
+		}
 	}()
 }
 
