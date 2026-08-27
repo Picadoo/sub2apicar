@@ -30,14 +30,14 @@
               data-testid="current-window-availability"
             >
               <div>
-                <div class="text-[10px] text-gray-500 dark:text-gray-400">
+                <div class="text-[11px] text-gray-500 dark:text-gray-400">
                   {{ t('dashboard.accountWindowQuota.availableNow') }}
                 </div>
                 <div class="font-mono text-xl font-semibold text-gray-900 dark:text-white">
                   {{ formatPctValue(availableNow(w)) }}
                 </div>
               </div>
-              <p class="max-w-[62%] text-right text-[10px] leading-snug text-gray-500 dark:text-gray-400">
+              <p class="max-w-[62%] text-right text-[11px] leading-snug text-gray-400 dark:text-gray-500">
                 {{ hasOfficialSnapshot(w)
                   ? t('dashboard.accountWindowQuota.availableSharedHint')
                   : t('dashboard.accountWindowQuota.availableEstimateHint') }}
@@ -45,7 +45,7 @@
             </div>
 
             <div
-              class="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[10px] text-gray-500 dark:text-gray-400"
+              class="grid grid-cols-2 gap-x-3 gap-y-1.5 text-[11px] text-gray-500 dark:text-gray-400"
               data-testid="window-quota-metrics"
             >
               <span>
@@ -77,13 +77,17 @@
               />
             </div>
             <!-- 借用救急池中（已用超过自己基础份额，且有人捐了） -->
-            <p v-if="isBorrowing(w)" class="text-[10px] font-medium text-blue-600 dark:text-blue-400">
+            <p v-if="isBorrowing(w)" class="text-[11px] font-medium text-blue-600 dark:text-blue-400">
               {{ t('dashboard.accountWindowQuota.borrowing', { pct: formatPct(borrowingBoost(w)) }) }}
             </p>
-            <p class="text-[10px] leading-snug text-gray-400" data-testid="account-attribution-breakdown">
+            <p
+              v-if="attributionExplanation(w)"
+              class="text-[11px] leading-snug text-gray-400"
+              data-testid="account-attribution-breakdown"
+            >
               {{ attributionExplanation(w) }}
             </p>
-            <p v-if="w.window_reset_at" class="text-[10px] text-gray-400">
+            <p v-if="w.window_reset_at" class="text-[11px] text-gray-400">
               {{ t('dashboard.accountWindowQuota.resetsAt', { time: formatResetTime(w.window_reset_at) }) }}
             </p>
 
@@ -106,7 +110,7 @@
                 @input="onDonateInput(w, $event)"
                 @change="onDonateCommit(w)"
               />
-              <p class="mt-0.5 text-[10px] text-gray-500 dark:text-gray-400">
+              <p class="mt-0.5 text-[11px] text-gray-500 dark:text-gray-400">
                 {{ t('dashboard.accountWindowQuota.donateHint', {
                   donate: formatPct(donatePct[dKey(w)] ?? 0),
                   keep: formatPct(100 - (donatePct[dKey(w)] ?? 0)),
@@ -116,13 +120,13 @@
               </p>
               <p
                 v-if="minDonatePct(w) > 0"
-                class="mt-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+                class="mt-0.5 text-[11px] font-medium text-amber-600 dark:text-amber-400"
               >
                 {{ t('dashboard.accountWindowQuota.lockedDonationHint', { pct: formatPct(minDonatePct(w)) }) }}
               </p>
               <p
-                class="mt-0.5 text-[10px] leading-snug"
-                :class="w.window_type === '7d' ? 'font-medium text-amber-600 dark:text-amber-400' : 'text-gray-400'"
+                class="mt-0.5 text-[11px] leading-snug"
+                :class="w.window_type === '7d' ? 'text-amber-600/80 dark:text-amber-400/80' : 'text-gray-400'"
               >
                 {{ w.window_type === '7d'
                   ? t('dashboard.accountWindowQuota.donateNote7d')
@@ -144,7 +148,7 @@
                 <div class="mb-1 truncate font-medium text-gray-700 dark:text-gray-200">
                   {{ member.name }}
                 </div>
-                <div class="space-y-1 font-mono text-[10px] text-gray-500 dark:text-gray-400">
+                <div class="space-y-1 font-mono text-[11px] text-gray-500 dark:text-gray-400">
                   <div>5h: {{ memberQuota(member.w5h) }}</div>
                   <div>7d: {{ memberQuota(member.w7d) }}</div>
                 </div>
@@ -272,7 +276,7 @@ function limitsDiffer(w: AccountWindowQuotaItem): boolean {
   return effective !== null && base !== null && Math.abs(effective - base) > 0.01
 }
 
-function attributionExplanation(w: AccountWindowQuotaItem): string {
+function attributionExplanation(w: AccountWindowQuotaItem): string | null {
   // force 模式：官方用量几乎全部来自站外，成员归因恒为 0，给出区别于普通未归因的明确提示。
   if (w.force_unattributed) {
     const official = finiteNumber(w.account_used_percent)
@@ -289,9 +293,8 @@ function attributionExplanation(w: AccountWindowQuotaItem): string {
   if (!hasOfficialSnapshot(w)) {
     return t('dashboard.accountWindowQuota.snapshotMissing')
   }
-  return t('dashboard.accountWindowQuota.attributionSynced', {
-    pct: formatPctValue(w.account_attributed_percent),
-  })
+  // 一切正常（官方快照在、无未归因）时不再显示解释行，保持卡片简洁。
+  return null
 }
 
 // 是否正在借用救急池：有效上限高于基础上限且归因已用已超出基础份额（5h / 7d 通用）。
