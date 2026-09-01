@@ -170,38 +170,39 @@
           <!-- Account pool: the key's group and the quota state of each account. -->
           <section
             v-if="accountGroups.length > 0"
-            class="fade-up overflow-hidden rounded-2xl border border-gray-200 bg-white/90 backdrop-blur-sm dark:border-dark-700 dark:bg-dark-900/90"
+            class="fade-up overflow-hidden rounded-xl border border-gray-200 bg-white/90 backdrop-blur-sm dark:border-dark-700 dark:bg-dark-900/90"
           >
-            <div class="flex flex-col gap-4 border-b border-gray-200 px-6 py-5 dark:border-dark-700 sm:flex-row sm:items-center sm:justify-between">
+            <div class="flex flex-col gap-4 border-b border-gray-200 px-5 py-5 dark:border-dark-700 sm:flex-row sm:items-center sm:justify-between sm:px-6">
               <div class="flex min-w-0 items-start gap-3">
-                <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary-500/10 text-primary-500">
+                <div class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary-500/10 text-primary-500">
                   <Icon name="server" size="md" />
                 </div>
                 <div class="min-w-0">
-                  <h2 class="text-base font-semibold text-gray-900 dark:text-white">{{ t('keyUsage.accountPool') }}</h2>
+                  <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <h2 class="text-base font-semibold text-gray-900 dark:text-white">{{ t('keyUsage.accountPool') }}</h2>
+                    <span v-if="accountGroups.length === 1" class="max-w-full truncate text-sm font-medium text-primary-600 dark:text-primary-300">
+                      {{ accountGroups[0].name }}
+                    </span>
+                  </div>
                   <p class="mt-1 text-xs text-gray-500 dark:text-dark-400">{{ t('keyUsage.accountPoolDescription') }}</p>
                 </div>
               </div>
-              <div class="flex shrink-0 flex-wrap items-center gap-2 text-xs">
-                <span class="max-w-full truncate rounded-md bg-gray-100 px-2.5 py-1 font-medium text-gray-700 dark:bg-dark-800 dark:text-dark-200">
-                  {{ accountGroups[0].name }}
-                </span>
-                <span class="text-gray-500 dark:text-dark-400">
-                  {{ accountCount }} {{ t('keyUsage.accounts') }}
-                </span>
+              <div class="flex shrink-0 items-baseline gap-2 sm:text-right">
+                <span class="text-lg font-semibold tabular-nums text-gray-900 dark:text-white">{{ accountCount }}</span>
+                <span class="text-xs text-gray-500 dark:text-dark-400">{{ t('keyUsage.accounts') }}</span>
               </div>
             </div>
 
             <div v-for="group in accountGroups" :key="group.id">
-              <div v-if="accountGroups.length > 1" class="flex items-center gap-2 border-b border-gray-100 px-6 py-3 text-xs text-gray-500 dark:border-dark-800 dark:text-dark-400">
+              <div v-if="accountGroups.length > 1" class="flex items-center gap-2 border-b border-gray-100 bg-gray-50/70 px-5 py-3 text-xs text-gray-500 dark:border-dark-800 dark:bg-dark-950/40 dark:text-dark-400 sm:px-6">
                 <span class="font-medium text-gray-700 dark:text-dark-200">{{ group.name }}</span>
                 <span>{{ group.account_count }} {{ t('keyUsage.accounts') }}</span>
               </div>
 
               <div v-if="group.accounts.length > 0" class="divide-y divide-gray-100 dark:divide-dark-800">
-                <article v-for="account in group.accounts" :key="account.id" class="px-6 py-5">
-                  <div class="flex flex-col gap-5 lg:flex-row lg:items-start">
-                    <div class="min-w-0 lg:w-60 lg:shrink-0">
+                <article v-for="account in group.accounts" :key="account.id" class="px-5 py-5 sm:px-6">
+                  <div class="grid gap-5 lg:grid-cols-[minmax(15rem,0.9fr)_minmax(0,2.1fr)] lg:gap-8">
+                    <div class="min-w-0 lg:pt-1">
                       <div class="flex items-center gap-2">
                         <span class="rounded-md bg-primary-500/10 px-2 py-1 text-xs font-semibold tabular-nums text-primary-600 dark:text-primary-300">
                           #{{ account.id }}
@@ -230,82 +231,85 @@
                       </div>
                     </div>
 
-                    <div class="min-w-0 flex-1">
-                      <div class="grid gap-3 sm:grid-cols-2">
+                    <div class="min-w-0">
+                      <div v-if="accountWindowCount(account) > 0" class="grid gap-3 md:grid-cols-2">
                         <template v-for="window in accountWindowOptions" :key="window.key">
                           <div
                             v-if="accountWindowFor(account, window.key)"
-                            class="rounded-xl border border-gray-200 bg-gray-50/80 p-4 dark:border-dark-700 dark:bg-dark-950/60"
+                            class="border-l-2 border-primary-500/60 bg-gray-50/80 px-4 py-4 dark:bg-dark-950/60"
+                            :class="accountWindowCount(account) === 1 ? 'md:col-span-2' : ''"
                           >
                             <div class="flex items-center justify-between gap-3">
                               <span class="text-xs font-semibold text-gray-700 dark:text-dark-200">{{ window.label }}</span>
-                              <span class="text-[11px] font-medium uppercase tracking-wider text-gray-400 dark:text-dark-500">{{ t('keyUsage.official') }}</span>
+                              <span class="text-[11px] font-medium text-gray-400 dark:text-dark-500">{{ t('keyUsage.official') }}</span>
                             </div>
 
                             <template v-if="getOfficialRemaining(accountWindowFor(account, window.key)) != null">
-                              <div class="mt-3 flex items-end justify-between gap-3">
-                                <div>
-                                  <div class="text-2xl font-semibold tabular-nums text-gray-900 dark:text-white">
-                                    {{ formatPercent(getOfficialRemaining(accountWindowFor(account, window.key))) }}
+                              <div class="mt-3 grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+                                <div class="min-w-0">
+                                  <div class="flex items-baseline justify-between gap-3">
+                                    <span class="text-[11px] text-gray-500 dark:text-dark-400">{{ t('keyUsage.officialRemaining') }}</span>
+                                    <span class="text-2xl font-semibold tabular-nums text-gray-900 dark:text-white">
+                                      {{ formatPercent(getOfficialRemaining(accountWindowFor(account, window.key))) }}
+                                    </span>
                                   </div>
-                                  <div class="mt-0.5 text-[11px] text-gray-500 dark:text-dark-400">{{ t('keyUsage.remaining') }}</div>
+                                  <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-gray-200 dark:bg-dark-800">
+                                    <div
+                                      class="h-full rounded-full bg-primary-500 transition-all"
+                                      :style="{ width: `${getOfficialRemaining(accountWindowFor(account, window.key)) ?? 0}%` }"
+                                    ></div>
+                                  </div>
+                                  <div class="mt-2 flex min-h-4 items-center justify-between gap-2 text-[11px] text-gray-400 dark:text-dark-500">
+                                    <span v-if="accountWindowFor(account, window.key)?.official_reset_at">
+                                      {{ t('keyUsage.resetsIn') }} {{ formatResetTime(accountWindowFor(account, window.key)?.official_reset_at) }}
+                                    </span>
+                                    <span v-else>{{ t('keyUsage.snapshotOnly') }}</span>
+                                    <span v-if="accountWindowFor(account, window.key)?.official_observed_at" class="truncate">
+                                      {{ t('keyUsage.updatedAt') }} {{ formatDateTime(accountWindowFor(account, window.key)?.official_observed_at) }}
+                                    </span>
+                                  </div>
                                 </div>
-                                <div class="text-right text-xs text-gray-500 dark:text-dark-400">
-                                  <div>{{ t('keyUsage.used') }}</div>
-                                  <div class="mt-0.5 font-semibold tabular-nums text-gray-700 dark:text-dark-200">
+                                <div class="border-t border-gray-200 pt-3 text-left sm:border-l sm:border-t-0 sm:pl-4 sm:pt-0 sm:text-right">
+                                  <div class="text-[11px] text-gray-500 dark:text-dark-400">{{ t('keyUsage.officialUsed') }}</div>
+                                  <div class="mt-0.5 text-sm font-semibold tabular-nums text-gray-700 dark:text-dark-200">
                                     {{ formatPercent(getOfficialUsed(accountWindowFor(account, window.key))) }}
                                   </div>
                                 </div>
                               </div>
-                              <div class="mt-3 h-1.5 overflow-hidden rounded-full bg-gray-200 dark:bg-dark-800">
-                                <div
-                                  class="h-full rounded-full bg-primary-500 transition-all"
-                                  :style="{ width: `${getOfficialRemaining(accountWindowFor(account, window.key)) ?? 0}%` }"
-                                ></div>
-                              </div>
-                              <div class="mt-2 flex min-h-4 items-center justify-between gap-2 text-[11px] text-gray-400 dark:text-dark-500">
-                                <span v-if="accountWindowFor(account, window.key)?.official_reset_at">
-                                  {{ t('keyUsage.resetsIn') }} {{ formatResetTime(accountWindowFor(account, window.key)?.official_reset_at) }}
-                                </span>
-                                <span v-else>{{ t('keyUsage.snapshotOnly') }}</span>
-                                <span v-if="accountWindowFor(account, window.key)?.official_observed_at" class="truncate">
-                                  {{ t('keyUsage.updatedAt') }} {{ formatDateTime(accountWindowFor(account, window.key)?.official_observed_at) }}
-                                </span>
-                              </div>
                             </template>
-                            <div v-else class="mt-4 rounded-lg border border-dashed border-gray-300 px-3 py-3 text-xs text-gray-500 dark:border-dark-700 dark:text-dark-400">
+                            <div v-else class="mt-3 border-t border-dashed border-gray-300 pt-3 text-xs text-gray-500 dark:border-dark-700 dark:text-dark-400">
                               {{ t('keyUsage.noOfficialSnapshot') }}
                             </div>
 
-                            <div v-if="hasUserQuota(accountWindowFor(account, window.key))" class="mt-3 border-t border-gray-200 pt-3 dark:border-dark-700">
+                            <div v-if="hasUserQuota(accountWindowFor(account, window.key))" class="mt-4 border-t border-gray-200 pt-3 dark:border-dark-700">
                               <div class="flex items-center justify-between gap-3 text-xs">
                                 <span class="font-medium text-gray-600 dark:text-dark-300">{{ t('keyUsage.yourSharedQuota') }}</span>
                                 <span class="font-semibold tabular-nums text-emerald-600 dark:text-emerald-300">
                                   {{ formatPercent(accountWindowFor(account, window.key)?.user_remaining_percent) }} {{ t('keyUsage.remaining') }}
                                 </span>
                               </div>
-                              <div class="mt-1 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[11px] text-gray-500 dark:text-dark-400">
+                              <div class="mt-1 grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-gray-500 dark:text-dark-400">
                                 <span>{{ t('keyUsage.used') }} {{ formatPercent(accountWindowFor(account, window.key)?.user_used_percent) }}</span>
                                 <span>{{ t('keyUsage.limit') }} {{ formatPercent(accountWindowFor(account, window.key)?.user_effective_limit_percent ?? accountWindowFor(account, window.key)?.user_limit_percent) }}</span>
-                              </div>
-                              <div v-if="accountWindowFor(account, window.key)?.user_pool_available_percent != null" class="mt-1 text-[11px] text-gray-500 dark:text-dark-400">
-                                {{ t('keyUsage.poolAvailable') }} {{ formatPercent(accountWindowFor(account, window.key)?.user_pool_available_percent) }}
-                              </div>
-                              <div v-if="accountWindowFor(account, window.key)?.user_force_unattributed" class="mt-2 text-[11px] text-amber-600 dark:text-amber-300">
-                                {{ t('keyUsage.forceUnattributed') }}
+                                <span v-if="accountWindowFor(account, window.key)?.user_pool_available_percent != null">
+                                  {{ t('keyUsage.poolAvailable') }} {{ formatPercent(accountWindowFor(account, window.key)?.user_pool_available_percent) }}
+                                </span>
+                                <span v-if="accountWindowFor(account, window.key)?.user_force_unattributed" class="col-span-2 text-amber-600 dark:text-amber-300">
+                                  {{ t('keyUsage.forceUnattributed') }}
+                                </span>
                               </div>
                             </div>
                           </div>
                         </template>
                       </div>
 
-                      <div v-if="localQuotaItems(account).length > 0" class="mt-3 rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900">
+                      <div v-if="localQuotaItems(account).length > 0" class="mt-4 border-t border-gray-200 pt-4 dark:border-dark-700">
                         <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                           <span class="text-xs font-semibold text-gray-700 dark:text-dark-200">{{ t('keyUsage.localAccountQuota') }}</span>
                           <span class="text-[11px] text-gray-400 dark:text-dark-500">{{ t('keyUsage.localQuotaHint') }}</span>
                         </div>
-                        <div class="mt-3 grid gap-3 sm:grid-cols-3">
-                          <div v-for="quota in localQuotaItems(account)" :key="quota.key" class="min-w-0">
+                        <div class="mt-3 flex flex-wrap gap-x-8 gap-y-3">
+                          <div v-for="quota in localQuotaItems(account)" :key="quota.key" class="min-w-[8rem]">
                             <div class="flex items-center justify-between gap-2 text-[11px] text-gray-500 dark:text-dark-400">
                               <span>{{ quota.label }}</span>
                               <span class="font-semibold tabular-nums" :class="quotaValueClass(quota.remaining, quota.limit)">
@@ -761,6 +765,13 @@ const accountGroups = computed<UsageAccountGroup[]>(() => {
 })
 
 const accountCount = computed(() => accountGroups.value.reduce((total, group) => total + group.accounts.length, 0))
+
+function accountWindowCount(account: UsageAccount): number {
+  return accountWindowOptions.value.reduce(
+    (count, window) => count + (accountWindowFor(account, window.key) ? 1 : 0),
+    0,
+  )
+}
 
 function accountWindowFor(account: UsageAccount, key: AccountWindowKey): UsageAccountWindow | null {
   const window = account.windows?.[key]

@@ -48,6 +48,8 @@ const messages: Record<string, string> = {
   'keyUsage.accountWindow5h': '5-hour window',
   'keyUsage.accountWindow7d': '7-day window',
   'keyUsage.official': 'Official',
+  'keyUsage.officialRemaining': 'Official remaining',
+  'keyUsage.officialUsed': 'Official used',
   'keyUsage.remaining': 'remaining',
   'keyUsage.resetsIn': 'Resets in',
   'keyUsage.snapshotOnly': 'Snapshot only',
@@ -260,9 +262,12 @@ describe('KeyUsageView daily detail', () => {
     expect(text).toContain('暄')
     expect(text).toContain('1322942653@qq.com')
     expect(text).toContain('57.5%')
+    expect(text).toContain('Official remaining')
+    expect(text).toContain('Official used')
     expect(text).toContain('Your shared quota')
     expect(text).toContain('19%')
     expect(text).toContain('$65.00')
+    expect(wrapper.find('[class~="md:col-span-2"]').exists()).toBe(true)
     expect(text).toContain('Date')
     expect(text).toContain('Cache Read')
     expect(text).toContain('Cache Write')

@@ -159,6 +159,8 @@ export default {
     accountWindow5h: '5 小时窗口',
     accountWindow7d: '7 天窗口',
     official: '官方',
+    officialRemaining: '官方剩余',
+    officialUsed: '官方已用',
     remaining: '剩余',
     resetsIn: '重置',
     snapshotOnly: '仅有额度快照',

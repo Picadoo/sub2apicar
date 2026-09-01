@@ -159,6 +159,8 @@ export default {
     accountWindow5h: '5-hour window',
     accountWindow7d: '7-day window',
     official: 'Official',
+    officialRemaining: 'Official remaining',
+    officialUsed: 'Official used',
     remaining: 'remaining',
     resetsIn: 'Resets in',
     snapshotOnly: 'Snapshot only',
