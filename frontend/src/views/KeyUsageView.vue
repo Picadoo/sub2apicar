@@ -7,7 +7,7 @@
           <div class="h-10 w-10 overflow-hidden rounded-xl shadow-md">
             <img :src="siteLogo || '/logo.svg'" alt="Logo" class="h-full w-full object-contain" />
           </div>
-          <span class="text-lg font-semibold tracking-tight text-gray-900 dark:text-white">{{ siteName }}</span>
+          <span class="text-lg font-semibold text-gray-900 dark:text-white">{{ siteName }}</span>
         </router-link>
         <div class="flex items-center gap-3">
           <LocaleSwitcher />
@@ -34,10 +34,10 @@
     </header>
 
     <!-- Main Content -->
-    <main class="flex-1 w-full max-w-5xl mx-auto px-6 py-12">
+    <main class="flex-1 w-full max-w-6xl mx-auto px-6 py-12">
       <!-- Hero -->
       <div class="text-center mb-12">
-        <h1 class="text-3xl sm:text-4xl font-bold tracking-tight mb-3 text-gray-900 dark:text-white">
+        <h1 class="text-3xl sm:text-4xl font-bold mb-3 text-gray-900 dark:text-white">
           {{ t('keyUsage.title') }}
         </h1>
         <p class="text-gray-500 dark:text-dark-400 text-base max-w-md mx-auto">
@@ -166,6 +166,170 @@
               <span class="text-xs text-gray-500 dark:text-dark-400">{{ statusInfo.statusText }}</span>
             </div>
           </div>
+
+          <!-- Account pool: the key's group and the quota state of each account. -->
+          <section
+            v-if="accountGroups.length > 0"
+            class="fade-up overflow-hidden rounded-2xl border border-gray-200 bg-white/90 backdrop-blur-sm dark:border-dark-700 dark:bg-dark-900/90"
+          >
+            <div class="flex flex-col gap-4 border-b border-gray-200 px-6 py-5 dark:border-dark-700 sm:flex-row sm:items-center sm:justify-between">
+              <div class="flex min-w-0 items-start gap-3">
+                <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary-500/10 text-primary-500">
+                  <Icon name="server" size="md" />
+                </div>
+                <div class="min-w-0">
+                  <h2 class="text-base font-semibold text-gray-900 dark:text-white">{{ t('keyUsage.accountPool') }}</h2>
+                  <p class="mt-1 text-xs text-gray-500 dark:text-dark-400">{{ t('keyUsage.accountPoolDescription') }}</p>
+                </div>
+              </div>
+              <div class="flex shrink-0 flex-wrap items-center gap-2 text-xs">
+                <span class="max-w-full truncate rounded-md bg-gray-100 px-2.5 py-1 font-medium text-gray-700 dark:bg-dark-800 dark:text-dark-200">
+                  {{ accountGroups[0].name }}
+                </span>
+                <span class="text-gray-500 dark:text-dark-400">
+                  {{ accountCount }} {{ t('keyUsage.accounts') }}
+                </span>
+              </div>
+            </div>
+
+            <div v-for="group in accountGroups" :key="group.id">
+              <div v-if="accountGroups.length > 1" class="flex items-center gap-2 border-b border-gray-100 px-6 py-3 text-xs text-gray-500 dark:border-dark-800 dark:text-dark-400">
+                <span class="font-medium text-gray-700 dark:text-dark-200">{{ group.name }}</span>
+                <span>{{ group.account_count }} {{ t('keyUsage.accounts') }}</span>
+              </div>
+
+              <div v-if="group.accounts.length > 0" class="divide-y divide-gray-100 dark:divide-dark-800">
+                <article v-for="account in group.accounts" :key="account.id" class="px-6 py-5">
+                  <div class="flex flex-col gap-5 lg:flex-row lg:items-start">
+                    <div class="min-w-0 lg:w-60 lg:shrink-0">
+                      <div class="flex items-center gap-2">
+                        <span class="rounded-md bg-primary-500/10 px-2 py-1 text-xs font-semibold tabular-nums text-primary-600 dark:text-primary-300">
+                          #{{ account.id }}
+                        </span>
+                        <h3 class="min-w-0 truncate text-sm font-semibold text-gray-900 dark:text-white">
+                          {{ account.name || t('keyUsage.unnamedAccount') }}
+                        </h3>
+                      </div>
+                      <div v-if="account.email" class="mt-2 flex items-center gap-1.5 text-xs text-gray-500 dark:text-dark-400">
+                        <Icon name="mail" size="xs" />
+                        <span class="truncate">{{ account.email }}</span>
+                      </div>
+                      <div class="mt-3 flex flex-wrap items-center gap-1.5">
+                        <span class="rounded-md bg-gray-100 px-2 py-1 text-[11px] text-gray-600 dark:bg-dark-800 dark:text-dark-300">
+                          {{ accountPlatformLabel(account.platform) }}
+                        </span>
+                        <span class="rounded-md bg-gray-100 px-2 py-1 text-[11px] text-gray-600 dark:bg-dark-800 dark:text-dark-300">
+                          {{ accountTypeLabel(account.type) }}
+                        </span>
+                        <span class="rounded-md px-2 py-1 text-[11px] font-medium" :class="accountStatusClass(account.status)">
+                          {{ accountStatusLabel(account.status) }}
+                        </span>
+                        <span v-if="account.shared" class="rounded-md bg-sky-500/10 px-2 py-1 text-[11px] font-medium text-sky-600 dark:text-sky-300">
+                          {{ t('keyUsage.sharedPool') }}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div class="min-w-0 flex-1">
+                      <div class="grid gap-3 sm:grid-cols-2">
+                        <template v-for="window in accountWindowOptions" :key="window.key">
+                          <div
+                            v-if="accountWindowFor(account, window.key)"
+                            class="rounded-xl border border-gray-200 bg-gray-50/80 p-4 dark:border-dark-700 dark:bg-dark-950/60"
+                          >
+                            <div class="flex items-center justify-between gap-3">
+                              <span class="text-xs font-semibold text-gray-700 dark:text-dark-200">{{ window.label }}</span>
+                              <span class="text-[11px] font-medium uppercase tracking-wider text-gray-400 dark:text-dark-500">{{ t('keyUsage.official') }}</span>
+                            </div>
+
+                            <template v-if="getOfficialRemaining(accountWindowFor(account, window.key)) != null">
+                              <div class="mt-3 flex items-end justify-between gap-3">
+                                <div>
+                                  <div class="text-2xl font-semibold tabular-nums text-gray-900 dark:text-white">
+                                    {{ formatPercent(getOfficialRemaining(accountWindowFor(account, window.key))) }}
+                                  </div>
+                                  <div class="mt-0.5 text-[11px] text-gray-500 dark:text-dark-400">{{ t('keyUsage.remaining') }}</div>
+                                </div>
+                                <div class="text-right text-xs text-gray-500 dark:text-dark-400">
+                                  <div>{{ t('keyUsage.used') }}</div>
+                                  <div class="mt-0.5 font-semibold tabular-nums text-gray-700 dark:text-dark-200">
+                                    {{ formatPercent(getOfficialUsed(accountWindowFor(account, window.key))) }}
+                                  </div>
+                                </div>
+                              </div>
+                              <div class="mt-3 h-1.5 overflow-hidden rounded-full bg-gray-200 dark:bg-dark-800">
+                                <div
+                                  class="h-full rounded-full bg-primary-500 transition-all"
+                                  :style="{ width: `${getOfficialRemaining(accountWindowFor(account, window.key)) ?? 0}%` }"
+                                ></div>
+                              </div>
+                              <div class="mt-2 flex min-h-4 items-center justify-between gap-2 text-[11px] text-gray-400 dark:text-dark-500">
+                                <span v-if="accountWindowFor(account, window.key)?.official_reset_at">
+                                  {{ t('keyUsage.resetsIn') }} {{ formatResetTime(accountWindowFor(account, window.key)?.official_reset_at) }}
+                                </span>
+                                <span v-else>{{ t('keyUsage.snapshotOnly') }}</span>
+                                <span v-if="accountWindowFor(account, window.key)?.official_observed_at" class="truncate">
+                                  {{ t('keyUsage.updatedAt') }} {{ formatDateTime(accountWindowFor(account, window.key)?.official_observed_at) }}
+                                </span>
+                              </div>
+                            </template>
+                            <div v-else class="mt-4 rounded-lg border border-dashed border-gray-300 px-3 py-3 text-xs text-gray-500 dark:border-dark-700 dark:text-dark-400">
+                              {{ t('keyUsage.noOfficialSnapshot') }}
+                            </div>
+
+                            <div v-if="hasUserQuota(accountWindowFor(account, window.key))" class="mt-3 border-t border-gray-200 pt-3 dark:border-dark-700">
+                              <div class="flex items-center justify-between gap-3 text-xs">
+                                <span class="font-medium text-gray-600 dark:text-dark-300">{{ t('keyUsage.yourSharedQuota') }}</span>
+                                <span class="font-semibold tabular-nums text-emerald-600 dark:text-emerald-300">
+                                  {{ formatPercent(accountWindowFor(account, window.key)?.user_remaining_percent) }} {{ t('keyUsage.remaining') }}
+                                </span>
+                              </div>
+                              <div class="mt-1 flex flex-wrap items-center justify-between gap-x-3 gap-y-1 text-[11px] text-gray-500 dark:text-dark-400">
+                                <span>{{ t('keyUsage.used') }} {{ formatPercent(accountWindowFor(account, window.key)?.user_used_percent) }}</span>
+                                <span>{{ t('keyUsage.limit') }} {{ formatPercent(accountWindowFor(account, window.key)?.user_effective_limit_percent ?? accountWindowFor(account, window.key)?.user_limit_percent) }}</span>
+                              </div>
+                              <div v-if="accountWindowFor(account, window.key)?.user_pool_available_percent != null" class="mt-1 text-[11px] text-gray-500 dark:text-dark-400">
+                                {{ t('keyUsage.poolAvailable') }} {{ formatPercent(accountWindowFor(account, window.key)?.user_pool_available_percent) }}
+                              </div>
+                              <div v-if="accountWindowFor(account, window.key)?.user_force_unattributed" class="mt-2 text-[11px] text-amber-600 dark:text-amber-300">
+                                {{ t('keyUsage.forceUnattributed') }}
+                              </div>
+                            </div>
+                          </div>
+                        </template>
+                      </div>
+
+                      <div v-if="localQuotaItems(account).length > 0" class="mt-3 rounded-xl border border-gray-200 bg-white p-4 dark:border-dark-700 dark:bg-dark-900">
+                        <div class="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                          <span class="text-xs font-semibold text-gray-700 dark:text-dark-200">{{ t('keyUsage.localAccountQuota') }}</span>
+                          <span class="text-[11px] text-gray-400 dark:text-dark-500">{{ t('keyUsage.localQuotaHint') }}</span>
+                        </div>
+                        <div class="mt-3 grid gap-3 sm:grid-cols-3">
+                          <div v-for="quota in localQuotaItems(account)" :key="quota.key" class="min-w-0">
+                            <div class="flex items-center justify-between gap-2 text-[11px] text-gray-500 dark:text-dark-400">
+                              <span>{{ quota.label }}</span>
+                              <span class="font-semibold tabular-nums" :class="quotaValueClass(quota.remaining, quota.limit)">
+                                {{ usd(quota.remaining) }}
+                              </span>
+                            </div>
+                            <div class="mt-1 text-xs tabular-nums text-gray-700 dark:text-dark-200">
+                              {{ usd(quota.used) }} / {{ usd(quota.limit) }}
+                            </div>
+                            <div v-if="quota.resetAt" class="mt-1 text-[11px] text-gray-400 dark:text-dark-500">
+                              {{ t('keyUsage.resetsIn') }} {{ formatResetTime(quota.resetAt) }}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </article>
+              </div>
+              <div v-else class="px-6 py-8 text-center text-sm text-gray-500 dark:text-dark-400">
+                {{ t('keyUsage.noAccounts') }}
+              </div>
+            </div>
+          </section>
 
           <!-- Ring Cards Grid -->
           <div v-if="ringItems.length > 0" :class="ringGridClass">
@@ -461,6 +625,56 @@ const resultData = ref<any>(null)
 const now = ref(new Date())
 let resetTimer: ReturnType<typeof setInterval> | null = null
 
+type AccountWindowKey = '5h' | '7d'
+
+interface UsageAccountWindow {
+  official_used_percent?: number
+  official_remaining_percent?: number
+  official_unattributed_percent?: number
+  official_reset_at?: string | null
+  official_observed_at?: string | null
+  user_limit_percent?: number
+  user_effective_limit_percent?: number
+  user_used_percent?: number
+  user_remaining_percent?: number
+  user_pool_available_percent?: number
+  user_reset_at?: string | null
+  user_force_unattributed?: boolean
+}
+
+interface UsageQuotaDimension {
+  limit: number
+  used: number
+  remaining: number
+  reset_at?: string | null
+  unit: string
+}
+
+interface UsageAccount {
+  id: number
+  name: string
+  email?: string
+  platform: string
+  type: string
+  status: string
+  schedulable: boolean
+  shared: boolean
+  windows?: Partial<Record<AccountWindowKey, UsageAccountWindow>>
+  local_quota?: {
+    total?: UsageQuotaDimension
+    daily?: UsageQuotaDimension
+    weekly?: UsageQuotaDimension
+  }
+}
+
+interface UsageAccountGroup {
+  id: number
+  name: string
+  platform: string
+  account_count: number
+  accounts: UsageAccount[]
+}
+
 // ==================== Date Range State ====================
 
 type DateRangeKey = 'today' | '7d' | '30d' | 'custom'
@@ -521,6 +735,160 @@ function setDailyUsageDays(days: 7 | 30 | 90) {
   if (resultData.value && apiKey.value.trim()) {
     queryKey()
   }
+}
+
+const accountWindowOptions = computed<{ key: AccountWindowKey; label: string }[]>(() => [
+  { key: '5h', label: t('keyUsage.accountWindow5h') },
+  { key: '7d', label: t('keyUsage.accountWindow7d') },
+])
+
+const accountGroups = computed<UsageAccountGroup[]>(() => {
+  const groups = resultData.value?.account_groups
+  if (!Array.isArray(groups)) return []
+
+  return groups
+    .filter((group): group is Record<string, unknown> => Boolean(group && typeof group === 'object'))
+    .map((group) => {
+      const accounts = Array.isArray(group.accounts) ? group.accounts as UsageAccount[] : []
+      return {
+        id: Number(group.id) || 0,
+        name: typeof group.name === 'string' && group.name.trim() ? group.name : t('keyUsage.unknownGroup'),
+        platform: typeof group.platform === 'string' ? group.platform : '',
+        account_count: typeof group.account_count === 'number' ? group.account_count : accounts.length,
+        accounts,
+      }
+    })
+})
+
+const accountCount = computed(() => accountGroups.value.reduce((total, group) => total + group.accounts.length, 0))
+
+function accountWindowFor(account: UsageAccount, key: AccountWindowKey): UsageAccountWindow | null {
+  const window = account.windows?.[key]
+  return window && typeof window === 'object' ? window : null
+}
+
+function clampPercent(value: number): number {
+  if (!Number.isFinite(value)) return 0
+  return Math.max(0, Math.min(100, value))
+}
+
+function getOfficialUsed(window: UsageAccountWindow | null): number | null {
+  if (!window) return null
+  if (typeof window.official_used_percent === 'number' && Number.isFinite(window.official_used_percent)) {
+    return clampPercent(window.official_used_percent)
+  }
+  if (typeof window.official_remaining_percent === 'number' && Number.isFinite(window.official_remaining_percent)) {
+    return clampPercent(100 - window.official_remaining_percent)
+  }
+  return null
+}
+
+function getOfficialRemaining(window: UsageAccountWindow | null): number | null {
+  if (!window) return null
+  if (typeof window.official_remaining_percent === 'number' && Number.isFinite(window.official_remaining_percent)) {
+    return clampPercent(window.official_remaining_percent)
+  }
+  if (typeof window.official_used_percent === 'number' && Number.isFinite(window.official_used_percent)) {
+    return clampPercent(100 - window.official_used_percent)
+  }
+  return null
+}
+
+function hasUserQuota(window: UsageAccountWindow | null): boolean {
+  if (!window) return false
+  return [
+    window.user_limit_percent,
+    window.user_effective_limit_percent,
+    window.user_used_percent,
+    window.user_remaining_percent,
+  ].some((value) => typeof value === 'number' && Number.isFinite(value))
+}
+
+function localQuotaItems(account: UsageAccount): Array<{
+  key: string
+  label: string
+  limit: number
+  used: number
+  remaining: number
+  resetAt?: string | null
+}> {
+  const localQuota = account.local_quota
+  if (!localQuota) return []
+
+  const items: Array<{
+    key: string
+    label: string
+    limit: number
+    used: number
+    remaining: number
+    resetAt?: string | null
+  }> = []
+  const dimensions = [
+    { key: 'total', label: t('keyUsage.localTotal'), value: localQuota.total },
+    { key: 'daily', label: t('keyUsage.localDaily'), value: localQuota.daily },
+    { key: 'weekly', label: t('keyUsage.localWeekly'), value: localQuota.weekly },
+  ]
+
+  for (const dimension of dimensions) {
+    if (!dimension.value || typeof dimension.value.limit !== 'number' || dimension.value.limit <= 0) continue
+    items.push({
+      key: dimension.key,
+      label: dimension.label,
+      limit: dimension.value.limit,
+      used: dimension.value.used,
+      remaining: dimension.value.remaining,
+      resetAt: dimension.value.reset_at,
+    })
+  }
+  return items
+}
+
+function quotaValueClass(remaining: number, limit: number): string {
+  if (remaining <= 0) return 'text-rose-500'
+  if (limit > 0 && remaining < limit * 0.1) return 'text-amber-500'
+  return 'text-emerald-600 dark:text-emerald-300'
+}
+
+function accountPlatformLabel(platform: string): string {
+  const labels: Record<string, string> = {
+    anthropic: t('keyUsage.platformAnthropic'),
+    openai: t('keyUsage.platformOpenAI'),
+    gemini: t('keyUsage.platformGemini'),
+    antigravity: t('keyUsage.platformAntigravity'),
+    grok: t('keyUsage.platformGrok'),
+    kimi: t('keyUsage.platformKimi'),
+    zhipu: t('keyUsage.platformZhipu'),
+    deepseek: t('keyUsage.platformDeepseek'),
+  }
+  return labels[platform] || platform || t('keyUsage.unknown')
+}
+
+function accountTypeLabel(type: string): string {
+  const labels: Record<string, string> = {
+    oauth: t('keyUsage.accountTypeOAuth'),
+    'setup-token': t('keyUsage.accountTypeSetupToken'),
+    apikey: t('keyUsage.accountTypeApiKey'),
+    upstream: t('keyUsage.accountTypeUpstream'),
+    bedrock: t('keyUsage.accountTypeBedrock'),
+    service_account: t('keyUsage.accountTypeServiceAccount'),
+  }
+  return labels[type] || type || t('keyUsage.unknown')
+}
+
+function accountStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    active: t('keyUsage.accountStatusActive'),
+    disabled: t('keyUsage.accountStatusDisabled'),
+    error: t('keyUsage.accountStatusError'),
+    expired: t('keyUsage.accountStatusExpired'),
+  }
+  return labels[status] || status || t('keyUsage.unknown')
+}
+
+function accountStatusClass(status: string): string {
+  if (status === 'active') return 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300'
+  if (status === 'disabled') return 'bg-gray-200 text-gray-600 dark:bg-dark-800 dark:text-dark-300'
+  return 'bg-rose-500/10 text-rose-600 dark:text-rose-300'
 }
 
 // ==================== Ring Animation ====================
@@ -834,6 +1202,12 @@ function usd(value: number | null | undefined): string {
   return '$' + Number(value).toFixed(2)
 }
 
+function formatPercent(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '-'
+  const loc = locale.value === 'zh' ? 'zh-CN' : 'en-US'
+  return `${clampPercent(value).toLocaleString(loc, { maximumFractionDigits: 1 })}%`
+}
+
 function fmtNum(val: number | null | undefined): string {
   if (val == null) return '-'
   return val.toLocaleString()
@@ -842,8 +1216,17 @@ function fmtNum(val: number | null | undefined): string {
 function formatDate(iso: string | null | undefined): string {
   if (!iso) return '-'
   const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '-'
   const loc = locale.value === 'zh' ? 'zh-CN' : 'en-US'
   return d.toLocaleDateString(loc, { year: 'numeric', month: 'long', day: 'numeric' })
+}
+
+function formatDateTime(iso: string | null | undefined): string {
+  if (!iso) return '-'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '-'
+  const loc = locale.value === 'zh' ? 'zh-CN' : 'en-US'
+  return d.toLocaleString(loc, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 
 function getBrowserTimezone(): string {
@@ -857,8 +1240,9 @@ function getBrowserTimezone(): string {
 // ==================== API Query ====================
 
 async function fetchUsage(key: string) {
-  const dateParams = getDateParams()
-  const url = buildGatewayUrl('/v1/usage') + (dateParams ? '?' + dateParams : '')
+  const params = new URLSearchParams(getDateParams())
+  params.set('include_accounts', 'true')
+  const url = buildGatewayUrl('/v1/usage') + '?' + params.toString()
   const res = await fetch(url, {
     headers: { 'Authorization': 'Bearer ' + key },
   })
@@ -998,6 +1382,6 @@ onUnmounted(() => {
 /* Tabular nums */
 .tabular-nums {
   font-variant-numeric: tabular-nums;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
 }
 </style>

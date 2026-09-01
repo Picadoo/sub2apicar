@@ -38,6 +38,34 @@ const messages: Record<string, string> = {
   'keyUsage.cost': 'Cost',
   'keyUsage.quotaMode': 'Key Quota Mode',
   'keyUsage.walletBalance': 'Wallet Balance',
+  'keyUsage.accountPool': 'Account Pool',
+  'keyUsage.accountPoolDescription': 'Accounts and quota snapshots in this API key\'s group',
+  'keyUsage.accounts': 'accounts',
+  'keyUsage.unnamedAccount': 'Unnamed account',
+  'keyUsage.unknownGroup': 'Unnamed group',
+  'keyUsage.unknown': 'Unknown',
+  'keyUsage.sharedPool': 'Shared pool',
+  'keyUsage.accountWindow5h': '5-hour window',
+  'keyUsage.accountWindow7d': '7-day window',
+  'keyUsage.official': 'Official',
+  'keyUsage.remaining': 'remaining',
+  'keyUsage.resetsIn': 'Resets in',
+  'keyUsage.snapshotOnly': 'Snapshot only',
+  'keyUsage.updatedAt': 'Updated',
+  'keyUsage.noOfficialSnapshot': 'No official quota snapshot',
+  'keyUsage.yourSharedQuota': 'Your shared quota',
+  'keyUsage.limit': 'Limit',
+  'keyUsage.poolAvailable': 'Pool available',
+  'keyUsage.forceUnattributed': 'Official usage is not attributed to members',
+  'keyUsage.localAccountQuota': 'Local account quota',
+  'keyUsage.localQuotaHint': 'Account configuration (USD)',
+  'keyUsage.localTotal': 'Total',
+  'keyUsage.localDaily': 'Daily',
+  'keyUsage.localWeekly': 'Weekly',
+  'keyUsage.noAccounts': 'No accounts are available in this group',
+  'keyUsage.platformOpenAI': 'OpenAI',
+  'keyUsage.accountTypeOAuth': 'OAuth',
+  'keyUsage.accountStatusActive': 'Active',
   'keyUsage.totalQuota': 'Total Quota',
   'keyUsage.limit5h': '5-Hour Limit',
   'keyUsage.limitDaily': 'Daily Limit',
@@ -122,6 +150,39 @@ describe('KeyUsageView daily detail', () => {
           remaining: 9,
           unit: 'USD',
         },
+        account_groups: [
+          {
+            id: 7,
+            name: 'OpenAI shared',
+            platform: 'openai',
+            account_count: 1,
+            accounts: [
+              {
+                id: 51,
+                name: '暄',
+                email: '1322942653@qq.com',
+                platform: 'openai',
+                type: 'oauth',
+                status: 'active',
+                schedulable: true,
+                shared: true,
+                windows: {
+                  '7d': {
+                    official_used_percent: 42.5,
+                    official_remaining_percent: 57.5,
+                    user_effective_limit_percent: 28,
+                    user_used_percent: 9,
+                    user_remaining_percent: 19,
+                    user_pool_available_percent: 6,
+                  },
+                },
+                local_quota: {
+                  weekly: { limit: 100, used: 35, remaining: 65, unit: 'USD' },
+                },
+              },
+            ],
+          },
+        ],
         usage: {
           today: {
             requests: 1,
@@ -193,6 +254,15 @@ describe('KeyUsageView daily detail', () => {
 
     const text = wrapper.text()
     expect(text).toContain('Daily Detail')
+    expect(text).toContain('Account Pool')
+    expect(text).toContain('OpenAI shared')
+    expect(text).toContain('#51')
+    expect(text).toContain('暄')
+    expect(text).toContain('1322942653@qq.com')
+    expect(text).toContain('57.5%')
+    expect(text).toContain('Your shared quota')
+    expect(text).toContain('19%')
+    expect(text).toContain('$65.00')
     expect(text).toContain('Date')
     expect(text).toContain('Cache Read')
     expect(text).toContain('Cache Write')

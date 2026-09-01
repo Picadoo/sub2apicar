@@ -320,16 +320,18 @@ func buildLocalAccountQuota(account *service.Account, now time.Time) *keyUsageLo
 	}
 
 	dailyUsed := account.GetQuotaDailyUsed()
-	if account.IsDailyQuotaPeriodExpired() {
+	dailyResetAt := keyUsageQuotaResetAt(account, "daily", now)
+	if dailyResetAt == nil {
 		dailyUsed = 0
 	}
-	quota.Daily = buildLocalQuotaDimension(account.GetQuotaDailyLimit(), dailyUsed, keyUsageQuotaResetAt(account, "daily", now))
+	quota.Daily = buildLocalQuotaDimension(account.GetQuotaDailyLimit(), dailyUsed, dailyResetAt)
 
 	weeklyUsed := account.GetQuotaWeeklyUsed()
-	if account.IsWeeklyQuotaPeriodExpired() {
+	weeklyResetAt := keyUsageQuotaResetAt(account, "weekly", now)
+	if weeklyResetAt == nil {
 		weeklyUsed = 0
 	}
-	quota.Weekly = buildLocalQuotaDimension(account.GetQuotaWeeklyLimit(), weeklyUsed, keyUsageQuotaResetAt(account, "weekly", now))
+	quota.Weekly = buildLocalQuotaDimension(account.GetQuotaWeeklyLimit(), weeklyUsed, weeklyResetAt)
 
 	if quota.Total == nil && quota.Daily == nil && quota.Weekly == nil {
 		return nil

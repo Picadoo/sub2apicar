@@ -10,7 +10,10 @@ import (
 )
 
 func TestBuildKeyUsageAccountUsesDisplaySafeFields(t *testing.T) {
-	now := time.Date(2026, time.July, 15, 12, 0, 0, 0, time.UTC)
+	// The account quota model evaluates rolling windows against time.Now(). Keep
+	// the fixture inside its active window so the assertion is independent of
+	// the date on which the test is run.
+	now := time.Now().UTC().Truncate(time.Second)
 	resetAt := now.Add(3 * time.Hour)
 	account := &service.Account{
 		ID:       51,
