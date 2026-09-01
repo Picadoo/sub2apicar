@@ -1270,7 +1270,20 @@ func currentGrokBillingWindow(billing *xai.BillingSummary, weekly bool, now time
 	}
 	start, startErr := parseTime(strings.TrimSpace(startRaw))
 	end, endErr := parseTime(strings.TrimSpace(endRaw))
-	if startErr != nil || endErr != nil || now.Before(start) || !now.Before(end) {
+	if startErr != nil || endErr != nil {
+		return time.Time{}, false
+	}
+	// xAI can reset a paid account's quota before the official billing period
+	// boundary. Keep the official period intact and only move local usage_logs
+	// accounting to the observed/operator-confirmed reset point.
+	if weekly {
+		if localRaw := strings.TrimSpace(billing.LocalUsagePeriodStart); localRaw != "" {
+			if localStart, err := parseTime(localRaw); err == nil && localStart.After(start) {
+				start = localStart
+			}
+		}
+	}
+	if now.Before(start) || !now.Before(end) {
 		return time.Time{}, false
 	}
 	return start, true

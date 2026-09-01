@@ -143,15 +143,16 @@ func TestBuildBillingSummaryWeeklyDoesNotInheritMonthlyPeriodEnd(t *testing.T) {
 func TestMergeBillingProbeResultRetainsFailedWindow(t *testing.T) {
 	t.Parallel()
 	previous := &BillingSummary{
-		PeriodType:        "weekly",
-		UsagePercent:      floatPointer(100),
-		PeriodEnd:         "2026-07-16T00:00:00Z",
-		MonthlyLimitCents: floatPointer(15000),
-		UsedPercent:       floatPointer(20),
-		BillingPeriodEnd:  "2026-08-01T00:00:00Z",
-		WeeklyUpdatedAt:   "2026-07-10T00:00:00Z",
-		MonthlyUpdatedAt:  "2026-07-10T00:00:00Z",
-		FailedWindows:     []string{"monthly"},
+		PeriodType:            "weekly",
+		UsagePercent:          floatPointer(100),
+		PeriodEnd:             "2026-07-16T00:00:00Z",
+		LocalUsagePeriodStart: "2026-07-12T00:00:00Z",
+		MonthlyLimitCents:     floatPointer(15000),
+		UsedPercent:           floatPointer(20),
+		BillingPeriodEnd:      "2026-08-01T00:00:00Z",
+		WeeklyUpdatedAt:       "2026-07-10T00:00:00Z",
+		MonthlyUpdatedAt:      "2026-07-10T00:00:00Z",
+		FailedWindows:         []string{"monthly"},
 	}
 	monthly := &BillingSummary{
 		PeriodType:        "monthly",
@@ -164,6 +165,7 @@ func TestMergeBillingProbeResultRetainsFailedWindow(t *testing.T) {
 	require.Equal(t, "weekly", merged.PeriodType)
 	require.InDelta(t, 100, *merged.UsagePercent, 1e-9)
 	require.Equal(t, previous.WeeklyUpdatedAt, merged.WeeklyUpdatedAt)
+	require.Equal(t, previous.LocalUsagePeriodStart, merged.LocalUsagePeriodStart)
 	require.InDelta(t, 30, *merged.UsedPercent, 1e-9)
 	require.NotEqual(t, previous.MonthlyUpdatedAt, merged.MonthlyUpdatedAt)
 	require.True(t, merged.Partial)

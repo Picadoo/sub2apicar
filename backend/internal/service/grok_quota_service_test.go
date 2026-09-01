@@ -900,6 +900,22 @@ func TestGrokLocalUsageForQuotaSelectsFreeOrPaidWindows(t *testing.T) {
 			now.Add(-13 * 24 * time.Hour),
 		}, repo.startTimes)
 	})
+
+	t.Run("paid weekly usage honors local reset baseline without changing official window", func(t *testing.T) {
+		usagePercent := 25.0
+		paidBilling := *billing
+		paidBilling.UsagePercent = &usagePercent
+		localStart := now.Add(-2 * time.Hour)
+		paidBilling.LocalUsagePeriodStart = localStart.Format(time.RFC3339)
+		repo := &grokQuotaUsageLogRepo{stats: &usagestats.AccountStats{Tokens: 500_000}}
+
+		_, weekly, monthly := grokLocalUsageForQuota(context.Background(), repo, 57, &paidBilling, now)
+
+		require.Nil(t, monthly)
+		require.NotNil(t, weekly)
+		require.Equal(t, []time.Time{localStart}, repo.startTimes)
+		require.Equal(t, billing.PeriodStart, paidBilling.PeriodStart)
+	})
 }
 
 func TestGrokLocalUsageForBillingOnlyReturnsAvailableWindows(t *testing.T) {
