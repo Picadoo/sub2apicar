@@ -47,6 +47,8 @@ type GatewayHandler struct {
 	billingCacheService       *service.BillingCacheService
 	usageService              *service.UsageService
 	apiKeyService             *service.APIKeyService
+	accountRepo               service.AccountRepository
+	accountWindowQuotaService *service.AccountWindowQuotaService
 	usageRecordWorkerPool     *service.UsageRecordWorkerPool
 	errorPassthroughService   *service.ErrorPassthroughService
 	contentModerationService  *service.ContentModerationService
@@ -1730,6 +1732,7 @@ func (h *GatewayHandler) usageQuotaLimited(c *gin.Context, ctx context.Context, 
 	if modelStats != nil {
 		resp["model_stats"] = modelStats
 	}
+	h.appendAPIKeyAccountGroups(c, ctx, apiKey, apiKey.UserID, resp)
 
 	c.JSON(http.StatusOK, resp)
 }
@@ -1771,6 +1774,7 @@ func (h *GatewayHandler) usageUnrestricted(c *gin.Context, ctx context.Context, 
 		if modelStats != nil {
 			resp["model_stats"] = modelStats
 		}
+		h.appendAPIKeyAccountGroups(c, ctx, apiKey, subject.UserID, resp)
 		c.JSON(http.StatusOK, resp)
 		return
 	}
@@ -1799,6 +1803,7 @@ func (h *GatewayHandler) usageUnrestricted(c *gin.Context, ctx context.Context, 
 	if modelStats != nil {
 		resp["model_stats"] = modelStats
 	}
+	h.appendAPIKeyAccountGroups(c, ctx, apiKey, subject.UserID, resp)
 	c.JSON(http.StatusOK, resp)
 }
 
