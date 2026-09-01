@@ -2154,9 +2154,10 @@ func (s *RateLimitService) RecoverAccountState(ctx context.Context, accountID in
 	}
 	if result.ClearedError || result.ClearedRateLimit {
 		s.ResetOpenAI403Counter(ctx, accountID)
-		if result.ClearedError && !result.ClearedRateLimit {
-			s.notifyAccountSchedulingBlockCleared(accountID)
-		}
+	}
+	if !result.ClearedRateLimit {
+		// The scheduler blocker is process-local and can outlive the persisted state.
+		s.notifyAccountSchedulingBlockCleared(accountID)
 	}
 
 	return result, nil

@@ -40,7 +40,8 @@ func (r *resetAccountQuotaRepoStub) ClearRateLimit(context.Context, int64) error
 
 func TestResetAccountQuota_ClearsSchedulerRateLimitWithoutClearingOverload(t *testing.T) {
 	repo := &resetAccountQuotaRepoStub{account: &Account{ID: 42}, overloaded: true}
-	svc := &adminServiceImpl{accountRepo: repo}
+	blocker := &runtimeBlockRecorder{}
+	svc := &adminServiceImpl{accountRepo: repo, runtimeBlocker: blocker}
 
 	err := svc.ResetAccountQuota(context.Background(), 42)
 
@@ -49,6 +50,7 @@ func TestResetAccountQuota_ClearsSchedulerRateLimitWithoutClearingOverload(t *te
 	require.Zero(t, repo.clearRateLimitCalls)
 	require.Equal(t, []string{"reset_quota_and_clear_rate_limit_cooldown"}, repo.callOrder)
 	require.True(t, repo.overloaded, "quota reset must preserve an unrelated overload block")
+	require.Equal(t, []int64{42}, blocker.clearedIDs)
 }
 
 func TestResetAccountQuota_PreservesLookupAndSparkShadowShortCircuits(t *testing.T) {
