@@ -32,6 +32,10 @@ func (s *openAIQuotaQueryStub) CacheResetCreditsSnapshot(_ context.Context, _ in
 	return nil
 }
 
+func (s *openAIQuotaQueryStub) CachePostResetSnapshot(_ context.Context, _ int64, _ *service.OpenAIQuotaUsage) error {
+	return nil
+}
+
 type accountWindowQuotaSyncStub struct {
 	accountID int64
 	snapshot  *service.OpenAICodexUsageSnapshot

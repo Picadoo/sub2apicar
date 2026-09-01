@@ -37,6 +37,8 @@ type OpenAIOAuthHandler struct {
 type openAIQuotaService interface {
 	openAIQuotaQuerier
 	CacheResetCreditsSnapshot(ctx context.Context, accountID int64, credits *service.OpenAIRateLimitResetCredits) error
+	CachePostResetSnapshot(ctx context.Context, accountID int64, usage *service.OpenAIQuotaUsage) error
+	ResetCredit(ctx context.Context, accountID int64) (*service.OpenAIQuotaResetResult, error)
 }
 
 type openAIAccountStateRecoverer interface {
