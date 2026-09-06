@@ -138,6 +138,7 @@ func (s *OpenAIGatewayService) ForwardAlphaSearch(ctx context.Context, c *gin.Co
 		WebSearchCalls:            1,
 		ResponseHeaders:           resp.Header.Clone(),
 		ResponseHeadersObservedAt: HTTPUpstreamResponseHeadersObservedAt(resp),
+		UpstreamHeaders:           resp.Header,
 	}, nil
 }
 
@@ -224,6 +225,7 @@ func (s *OpenAIGatewayService) forwardAlphaSearchViaResponsesWebSearch(
 		ResponseHeadersObservedAt: HTTPUpstreamResponseHeadersObservedAt(resp),
 		Duration:                  time.Since(upstreamStart),
 		WebSearchCalls:            1,
+		UpstreamHeaders:           resp.Header,
 	}, nil
 }
 
