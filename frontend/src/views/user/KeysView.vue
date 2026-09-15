@@ -174,7 +174,7 @@
             </div>
           </template>
 
-          <template #cell-current_concurrency="{ value }">
+          <template #cell-current_concurrency="{ value, row }">
             <span
               :class="[
                 'inline-flex min-w-8 items-center justify-center rounded px-2 py-1 text-sm font-semibold tabular-nums',
@@ -183,7 +183,7 @@
                   : 'bg-gray-100 text-gray-500 dark:bg-dark-700 dark:text-dark-400'
               ]"
             >
-              {{ value ?? 0 }}
+              {{ value ?? 0 }}<span v-if="row.max_concurrency > 0" class="ml-1 font-normal">/ {{ row.max_concurrency }}</span>
             </span>
           </template>
 
@@ -593,6 +593,21 @@
               <p class="input-hint">{{ t('keys.ipBlacklistHint') }}</p>
             </div>
           </div>
+        </div>
+
+        <div class="space-y-3">
+          <label for="key-max-concurrency" class="input-label">{{ t('keys.maxConcurrency') }}</label>
+          <input
+            id="key-max-concurrency"
+            v-model.number="formData.max_concurrency"
+            type="number"
+            min="0"
+            max="2147483647"
+            step="1"
+            class="input"
+            placeholder="0"
+          />
+          <p class="input-hint">{{ t('keys.maxConcurrencyHint') }}</p>
         </div>
 
         <!-- Quota Limit Section -->
@@ -1341,6 +1356,7 @@ const formData = ref({
   quota: null as number | null,
   // Rate limit settings
   enable_rate_limit: false,
+  max_concurrency: 0,
   rate_limit_5h: null as number | null,
   rate_limit_1d: null as number | null,
   rate_limit_7d: null as number | null,
@@ -1573,6 +1589,7 @@ const editKey = (key: ApiKey) => {
     enable_quota: key.quota > 0,
     quota: key.quota > 0 ? key.quota : null,
     enable_rate_limit: (key.rate_limit_5h > 0) || (key.rate_limit_1d > 0) || (key.rate_limit_7d > 0),
+    max_concurrency: key.max_concurrency || 0,
     rate_limit_5h: key.rate_limit_5h || null,
     rate_limit_1d: key.rate_limit_1d || null,
     rate_limit_7d: key.rate_limit_7d || null,
@@ -1725,6 +1742,7 @@ const handleSubmit = async () => {
         ip_blacklist: ipBlacklist,
         quota: quota,
         expires_at: expiresAt,
+        max_concurrency: formData.value.max_concurrency || 0,
         rate_limit_5h: rateLimitData.rate_limit_5h,
         rate_limit_1d: rateLimitData.rate_limit_1d,
         rate_limit_7d: rateLimitData.rate_limit_7d,
@@ -1744,7 +1762,8 @@ const handleSubmit = async () => {
         ipBlacklist,
         quota,
         expiresInDays,
-        rateLimitData
+        rateLimitData,
+        formData.value.max_concurrency || 0
       )
       appStore.showSuccess(t('keys.keyCreatedSuccess'))
       // Only advance tour if active, on submit step, and creation succeeded
@@ -1799,6 +1818,7 @@ const closeModals = () => {
     enable_quota: false,
     quota: null,
     enable_rate_limit: false,
+    max_concurrency: 0,
     rate_limit_5h: null,
     rate_limit_1d: null,
     rate_limit_7d: null,

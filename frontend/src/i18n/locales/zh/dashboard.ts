@@ -124,6 +124,8 @@ export default {
     apiKey: 'API 密钥',
     group: '分组',
     currentConcurrency: '当前并发',
+    maxConcurrency: '并发上限',
+    maxConcurrencyHint: '同一密钥最多同时处理的请求数；0 表示不额外限制。用户和账号并发上限仍然生效，超出此上限返回 429。',
     noGroup: '无分组',
     searchGroup: '搜索分组...',
     noGroupFound: '未找到匹配的分组',

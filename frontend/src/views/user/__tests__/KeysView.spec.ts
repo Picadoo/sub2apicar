@@ -4,6 +4,7 @@ import { nextTick } from 'vue'
 
 import type { ApiKey } from '@/types'
 import KeysView from '../KeysView.vue'
+import { keysAPI } from '@/api'
 
 const {
   listKeys,
@@ -106,6 +107,7 @@ vi.mock('vue-i18n', async () => {
 })
 
 const createApiKey = (): ApiKey => ({
+  max_concurrency: 0,
   id: 1,
   user_id: 1,
   key: 'sk-test-key',
@@ -223,7 +225,7 @@ const mountView = async () => {
         TablePageLayout: TablePageLayoutStub,
         DataTable: DataTableStub,
         Pagination: PaginationStub,
-        BaseDialog: true,
+        BaseDialog: { props: ['show'], template: '<div v-if="show"><slot /><slot name="footer" /></div>' },
         ConfirmDialog: true,
         EmptyState: true,
         Select: SelectStub,
@@ -392,6 +394,39 @@ describe('user KeysView column settings', () => {
     const wrapper = await mountView()
 
     expect(wrapper.get('[data-test="current-concurrency"]').text()).toBe('3')
+  })
+
+  it('renders the configured key concurrency limit beside current usage', async () => {
+    listKeys.mockResolvedValueOnce({
+      items: [{ ...createApiKey(), max_concurrency: 5 }],
+      total: 1, page: 1, page_size: 20, pages: 1,
+    })
+    const wrapper = await mountView()
+    expect(wrapper.get('[data-test="current-concurrency"]').text()).toBe('3/ 5')
+    wrapper.unmount()
+  })
+
+  it('submits a key concurrency limit on create and resets it to unlimited on edit', async () => {
+    const wrapper = await mountView()
+    try {
+      await getButtonByText(wrapper, 'Create API Key').trigger('click')
+      await wrapper.get('[data-tour="key-form-name"]').setValue('limited key')
+      const groupSelect = wrapper.get('#key-form').findComponent({ name: 'Select' })
+      groupSelect.vm.$emit('update:modelValue', 1)
+      await wrapper.get('#key-max-concurrency').setValue('2')
+      await wrapper.get('#key-form').trigger('submit')
+      await flushPromises()
+      expect(vi.mocked(keysAPI.create).mock.calls.at(-1)?.[8]).toBe(2)
+
+      const vm = wrapper.vm as unknown as { editKey: (key: ApiKey) => void }
+      vm.editKey({ ...createApiKey(), group_id: 1, max_concurrency: 2 })
+      await nextTick()
+      expect((wrapper.get('#key-max-concurrency').element as HTMLInputElement).value).toBe('2')
+      await wrapper.get('#key-max-concurrency').setValue('0')
+      await wrapper.get('#key-form').trigger('submit')
+      await flushPromises()
+      expect(keysAPI.update).toHaveBeenLastCalledWith(1, expect.objectContaining({ max_concurrency: 0 }))
+    } finally { wrapper.unmount() }
   })
 
   it('marks current concurrency as sortable', async () => {

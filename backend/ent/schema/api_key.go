@@ -58,6 +58,11 @@ func (APIKey) Fields() []ent.Field {
 			Optional().
 			Comment("Blocked IPs/CIDRs"),
 
+		field.Int("max_concurrency").
+			Default(0).
+			NonNegative().
+			Comment("Maximum concurrent requests for this API key (0 = unlimited)"),
+
 		// ========== Quota fields ==========
 		// Quota limit in USD (0 = unlimited)
 		field.Float("quota").
