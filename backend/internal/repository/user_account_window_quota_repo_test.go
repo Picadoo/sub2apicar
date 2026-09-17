@@ -887,7 +887,7 @@ func TestUserAccountWindowQuotaRepository_GetByUserAccountWindowRequiresSharedAc
 	repo, mock := newWindowQuotaRepoSQLMock(t)
 	mock.ExpectQuery("FROM user_account_window_quotas q\\s+JOIN accounts a ON a\\.id = q\\.account_id[\\s\\S]*COALESCE\\(a\\.extra->>'window_quota_shared', 'false'\\) = 'true'").
 		WithArgs(int64(1), int64(7), service.WindowType5h).
-		WillReturnRows(sqlmock.NewRows([]string{"user_id", "account_id", "window_type", "limit_percent", "attributed_percent", "window_reset_at", "donate_pool_fraction"}))
+		WillReturnRows(sqlmock.NewRows([]string{"user_id", "account_id", "window_type", "limit_percent", "attributed_percent", "window_reset_at", "donate_pool_fraction", "shared_pool_mode"}))
 
 	row, err := repo.GetByUserAccountWindow(context.Background(), 1, 7, service.WindowType5h)
 	require.NoError(t, err)
@@ -899,12 +899,13 @@ func TestUserAccountWindowQuotaRepository_ListByUserExcludesPrivateAndSoftDelete
 	repo, mock := newWindowQuotaRepoSQLMock(t)
 	mock.ExpectQuery("FROM user_account_window_quotas q\\s+JOIN accounts a ON a\\.id = q\\.account_id\\s+WHERE q\\.user_id = \\$1 AND q\\.deleted_at IS NULL AND a\\.deleted_at IS NULL\\s+AND COALESCE\\(a\\.extra->>'window_quota_shared', 'false'\\) = 'true'").
 		WithArgs(int64(1)).
-		WillReturnRows(sqlmock.NewRows([]string{"user_id", "account_id", "window_type", "limit_percent", "attributed_percent", "window_reset_at", "donate_pool_fraction"}).
-			AddRow(1, 7, service.WindowType5h, 46, 5, nil, 0))
+		WillReturnRows(sqlmock.NewRows([]string{"user_id", "account_id", "window_type", "limit_percent", "attributed_percent", "window_reset_at", "donate_pool_fraction", "shared_pool_mode"}).
+			AddRow(1, 7, service.WindowType5h, 46, 5, nil, 0, true))
 
 	rows, err := repo.ListByUser(context.Background(), 1)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
+	require.True(t, rows[0].SharedPoolMode)
 	require.Equal(t, int64(7), rows[0].AccountID)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -912,12 +913,13 @@ func TestUserAccountWindowQuotaRepository_ListByUserExcludesPrivateAndSoftDelete
 func TestUserAccountWindowQuotaRepository_ListAllWithUserExcludesPrivateAndSoftDeletedAccounts(t *testing.T) {
 	repo, mock := newWindowQuotaRepoSQLMock(t)
 	mock.ExpectQuery("JOIN users u ON u\\.id = q\\.user_id\\s+JOIN accounts a ON a\\.id = q\\.account_id\\s+WHERE q\\.deleted_at IS NULL AND u\\.deleted_at IS NULL AND a\\.deleted_at IS NULL\\s+AND COALESCE\\(a\\.extra->>'window_quota_shared', 'false'\\) = 'true'").
-		WillReturnRows(sqlmock.NewRows([]string{"user_id", "email", "username", "account_id", "window_type", "limit_percent", "attributed_percent", "window_reset_at", "donate_pool_fraction"}).
-			AddRow(1, "a@example.com", "Alice", 7, service.WindowType5h, 46, 5, nil, 0))
+		WillReturnRows(sqlmock.NewRows([]string{"user_id", "email", "username", "account_id", "window_type", "limit_percent", "attributed_percent", "window_reset_at", "donate_pool_fraction", "shared_pool_mode"}).
+			AddRow(1, "a@example.com", "Alice", 7, service.WindowType5h, 46, 5, nil, 0, true))
 
 	rows, err := repo.ListAllWithUser(context.Background())
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
+	require.True(t, rows[0].SharedPoolMode)
 	require.Equal(t, int64(7), rows[0].AccountID)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
@@ -1080,9 +1082,9 @@ func TestUserAccountWindowQuotaRepository_SetDonatePoolFractionRejectsBorrowedRe
 	expectSharedAccountWindowQuotaLock(mock, 1)
 	mock.ExpectQuery("SELECT q\\.user_id[\\s\\S]*FOR UPDATE").
 		WithArgs(int64(1), service.WindowType5h).
-		WillReturnRows(sqlmock.NewRows([]string{"user_id", "account_id", "window_type", "limit_percent", "attributed_percent", "window_reset_at", "donate_pool_fraction"}).
-			AddRow(1, 1, service.WindowType5h, 23, 35, nil, 0).
-			AddRow(2, 1, service.WindowType5h, 23, 0, nil, 1))
+		WillReturnRows(sqlmock.NewRows([]string{"user_id", "account_id", "window_type", "limit_percent", "attributed_percent", "window_reset_at", "donate_pool_fraction", "shared_pool_mode"}).
+			AddRow(1, 1, service.WindowType5h, 23, 35, nil, 0, false).
+			AddRow(2, 1, service.WindowType5h, 23, 0, nil, 1, false))
 	mock.ExpectRollback()
 
 	err := repo.SetDonatePoolFraction(context.Background(), 2, 1, service.WindowType5h, 0, 23)
@@ -1097,9 +1099,9 @@ func TestUserAccountWindowQuotaRepository_SetDonatePoolFractionAllowsUnusedRecla
 	expectSharedAccountWindowQuotaLock(mock, 1)
 	mock.ExpectQuery("SELECT q\\.user_id[\\s\\S]*FOR UPDATE").
 		WithArgs(int64(1), service.WindowType5h).
-		WillReturnRows(sqlmock.NewRows([]string{"user_id", "account_id", "window_type", "limit_percent", "attributed_percent", "window_reset_at", "donate_pool_fraction"}).
-			AddRow(1, 1, service.WindowType5h, 23, 35, nil, 0).
-			AddRow(2, 1, service.WindowType5h, 23, 0, nil, 1))
+		WillReturnRows(sqlmock.NewRows([]string{"user_id", "account_id", "window_type", "limit_percent", "attributed_percent", "window_reset_at", "donate_pool_fraction", "shared_pool_mode"}).
+			AddRow(1, 1, service.WindowType5h, 23, 35, nil, 0, false).
+			AddRow(2, 1, service.WindowType5h, 23, 0, nil, 1, false))
 	mock.ExpectExec("UPDATE user_account_window_quotas\\s+SET donate_pool_fraction").
 		WithArgs(int64(2), int64(1), service.WindowType5h, minimum, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(1, 1))
@@ -1116,8 +1118,8 @@ func TestUserAccountWindowQuotaRepository_SetDonatePoolFractionRejectsNonMemberW
 	expectSharedAccountWindowQuotaLock(mock, 1)
 	mock.ExpectQuery("SELECT q\\.user_id[\\s\\S]*FOR UPDATE").
 		WithArgs(int64(1), service.WindowType5h).
-		WillReturnRows(sqlmock.NewRows([]string{"user_id", "account_id", "window_type", "limit_percent", "attributed_percent", "window_reset_at", "donate_pool_fraction"}).
-			AddRow(1, 1, service.WindowType5h, 23, 0, nil, 0))
+		WillReturnRows(sqlmock.NewRows([]string{"user_id", "account_id", "window_type", "limit_percent", "attributed_percent", "window_reset_at", "donate_pool_fraction", "shared_pool_mode"}).
+			AddRow(1, 1, service.WindowType5h, 23, 0, nil, 0, false))
 	mock.ExpectRollback()
 
 	err := repo.SetDonatePoolFraction(context.Background(), 999, 1, service.WindowType5h, 1, 23)

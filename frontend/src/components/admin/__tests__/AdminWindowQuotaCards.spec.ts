@@ -6,6 +6,7 @@ const apiMocks = vi.hoisted(() => ({
   rebalance: vi.fn(),
   setMembers: vi.fn(),
   setLimit: vi.fn(),
+  setSharedPool: vi.fn(),
   listUsers: vi.fn(),
   getCeilings: vi.fn(),
   setSeats: vi.fn(),
@@ -21,6 +22,7 @@ vi.mock('@/api/accountWindowQuota', () => ({
   rebalanceAccountWindowQuotas: apiMocks.rebalance,
   setAccountWindowMembers: apiMocks.setMembers,
   setAccountWindowLimit: apiMocks.setLimit,
+  setAccountSharedPoolMode: apiMocks.setSharedPool,
   getAccountWindowCeilings: apiMocks.getCeilings,
   setAccountWindowSeats: apiMocks.setSeats,
   setAccountWindowCeiling: apiMocks.setCeiling,
@@ -172,6 +174,41 @@ const memberOverview = {
 }
 
 describe('AdminWindowQuotaOverviewCard', () => {
+  it('toggles shared pool for one account and restores personal-cap display', async () => {
+    apiMocks.getOverview.mockResolvedValue(JSON.parse(JSON.stringify(overview)))
+    apiMocks.setSharedPool.mockResolvedValueOnce({ account_id: 7, shared_pool_mode: true })
+      .mockResolvedValueOnce({ account_id: 7, shared_pool_mode: false })
+    const wrapper = mount(AdminWindowQuotaOverviewCard)
+    await flushPromises()
+    const toggle = wrapper.get('[data-testid="shared-pool-toggle-7"]')
+    expect(toggle.attributes('aria-checked')).toBe('false')
+    await toggle.trigger('click')
+    await flushPromises()
+    expect(apiMocks.setSharedPool).toHaveBeenNthCalledWith(1, 7, true)
+    expect(toggle.attributes('aria-checked')).toBe('true')
+    expect(wrapper.text()).toContain('admin.windowQuotaOverview.sharedPoolActive')
+    await toggle.trigger('click')
+    await flushPromises()
+    expect(apiMocks.setSharedPool).toHaveBeenNthCalledWith(2, 7, false)
+    expect(toggle.attributes('aria-checked')).toBe('false')
+    expect(wrapper.text()).not.toContain('admin.windowQuotaOverview.sharedPoolActive')
+    expect(apiMocks.setLimit).not.toHaveBeenCalled()
+    expect(apiMocks.rebalance).not.toHaveBeenCalled()
+  })
+
+  it('shows persisted mode without member rows and keeps it enabled if disabling fails', async () => {
+    apiMocks.getOverview.mockResolvedValue({ enabled: true, account_ids: [7], shared_pool_account_ids: [7], rows: [], summaries: [] })
+    apiMocks.setSharedPool.mockRejectedValueOnce(new Error('offline'))
+    const wrapper = mount(AdminWindowQuotaOverviewCard)
+    await flushPromises()
+    const toggle = wrapper.get('[data-testid="shared-pool-toggle-7"]')
+    expect(toggle.attributes('aria-checked')).toBe('true')
+    await toggle.trigger('click')
+    await flushPromises()
+    expect(toggle.attributes('aria-checked')).toBe('true')
+    expect(storeMocks.showError).toHaveBeenCalledWith('admin.windowQuotaOverview.sharedPoolFailed')
+  })
+
   beforeEach(() => {
     vi.clearAllMocks()
     apiMocks.getOverview.mockResolvedValue(overview)

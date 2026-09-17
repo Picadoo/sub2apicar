@@ -50,6 +50,7 @@ type keyUsageAccountWindow struct {
 	UserPoolAvailablePercent  *float64   `json:"user_pool_available_percent,omitempty"`
 	UserResetAt               *time.Time `json:"user_reset_at,omitempty"`
 	UserForceUnattributed     bool       `json:"user_force_unattributed,omitempty"`
+	UserSharedPoolMode        bool       `json:"user_shared_pool_mode,omitempty"`
 }
 
 type keyUsageLocalQuota struct {
@@ -195,6 +196,17 @@ func applyUserWindowView(window *keyUsageAccountWindow, view service.UserWindowQ
 	window.UserPoolAvailablePercent = &poolAvailable
 	window.UserResetAt = view.WindowResetAt
 	window.UserForceUnattributed = view.ForceUnattributed
+	window.UserSharedPoolMode = view.SharedPoolMode
+	if view.SharedPoolMode {
+		// Personal caps are suspended; report only known shared headroom.
+		window.UserEffectiveLimitPercent = nil
+		window.UserRemainingPercent = nil
+		window.UserPoolAvailablePercent = nil
+		if view.AccountUsedPercent != nil {
+			headroom := math.Max(0, view.CeilingPercent-*view.AccountUsedPercent)
+			window.UserRemainingPercent = &headroom
+		}
+	}
 }
 
 func buildStoredAccountWindow(account *service.Account, windowType string, now time.Time) (*keyUsageAccountWindow, bool) {

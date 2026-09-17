@@ -283,14 +283,15 @@
 
                             <div v-if="hasUserQuota(accountWindowFor(account, window.key))" class="mt-4 border-t border-gray-200 pt-3 dark:border-dark-700">
                               <div class="flex items-center justify-between gap-3 text-xs">
-                                <span class="font-medium text-gray-600 dark:text-dark-300">{{ t('keyUsage.yourSharedQuota') }}</span>
+                                <span class="font-medium text-gray-600 dark:text-dark-300">{{ accountWindowFor(account, window.key)?.user_shared_pool_mode ? t('dashboard.accountWindowQuota.sharedPoolMode') : t('keyUsage.yourSharedQuota') }}</span>
                                 <span class="font-semibold tabular-nums text-emerald-600 dark:text-emerald-300">
                                   {{ formatPercent(accountWindowFor(account, window.key)?.user_remaining_percent) }} {{ t('keyUsage.remaining') }}
                                 </span>
                               </div>
                               <div class="mt-1 grid grid-cols-2 gap-x-4 gap-y-1 text-[11px] text-gray-500 dark:text-dark-400">
                                 <span>{{ t('keyUsage.used') }} {{ formatPercent(accountWindowFor(account, window.key)?.user_used_percent) }}</span>
-                                <span>{{ t('keyUsage.limit') }} {{ formatPercent(accountWindowFor(account, window.key)?.user_effective_limit_percent ?? accountWindowFor(account, window.key)?.user_limit_percent) }}</span>
+                                <span v-if="accountWindowFor(account, window.key)?.user_shared_pool_mode">{{ t('dashboard.accountWindowQuota.personalLimitSuspended') }}</span>
+                                <span v-else>{{ t('keyUsage.limit') }} {{ formatPercent(accountWindowFor(account, window.key)?.user_effective_limit_percent ?? accountWindowFor(account, window.key)?.user_limit_percent) }}</span>
                                 <span v-if="accountWindowFor(account, window.key)?.user_pool_available_percent != null">
                                   {{ t('keyUsage.poolAvailable') }} {{ formatPercent(accountWindowFor(account, window.key)?.user_pool_available_percent) }}
                                 </span>
@@ -646,6 +647,7 @@ interface UsageAccountWindow {
   user_pool_available_percent?: number
   user_reset_at?: string | null
   user_force_unattributed?: boolean
+  user_shared_pool_mode?: boolean
 }
 
 interface UsageQuotaDimension {

@@ -3,6 +3,7 @@ package routes
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/handler"
@@ -47,6 +48,11 @@ func TestAccountWindowQuotaRoutes_OverviewIsAdminOnlyAndEqualizeIsRegistered(t *
 	require.True(t, registered[http.MethodGet+" /api/v1/admin/account-window-quotas/overview"])
 	require.True(t, registered[http.MethodPost+" /api/v1/admin/account-window-quotas/accounts/:id/equalize"])
 	require.True(t, registered[http.MethodPut+" /api/v1/admin/account-window-quotas/accounts/:id/members"])
+	require.True(t, registered[http.MethodPut+" /api/v1/admin/account-window-quotas/accounts/:id/shared-pool"])
+	modeReq := httptest.NewRequest(http.MethodPut, "/api/v1/admin/account-window-quotas/accounts/7/shared-pool", strings.NewReader(`{"enabled":true}`))
+	modeW := httptest.NewRecorder()
+	router.ServeHTTP(modeW, modeReq)
+	require.Equal(t, http.StatusForbidden, modeW.Code)
 
 	userReq := httptest.NewRequest(http.MethodGet, "/api/v1/user/account-window-quotas/overview", nil)
 	userW := httptest.NewRecorder()

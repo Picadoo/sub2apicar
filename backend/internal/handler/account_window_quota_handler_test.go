@@ -24,6 +24,10 @@ type accountWindowQuotaHandlerRepo struct {
 	equalizeResults  []service.AccountWindowEqualizationResult
 	equalizeErr      error
 	sharedAccountIDs []int64
+	sharedPoolIDs    []int64
+	modeAccount      int64
+	modeEnabled      bool
+	modeErr          error
 	official5h       *float64
 	official7d       *float64
 }
@@ -66,6 +70,47 @@ func (r *accountWindowQuotaHandlerRepo) SyncAccountMembers(context.Context, int6
 }
 func (r *accountWindowQuotaHandlerRepo) ListSharedAccountIDs(context.Context) ([]int64, error) {
 	return append([]int64(nil), r.sharedAccountIDs...), nil
+}
+
+func (r *accountWindowQuotaHandlerRepo) ListSharedPoolAccountIDs(context.Context) ([]int64, error) {
+	return r.sharedPoolIDs, nil
+}
+
+func (r *accountWindowQuotaHandlerRepo) SetAccountSharedPoolMode(_ context.Context, accountID int64, enabled bool) error {
+	r.modeAccount, r.modeEnabled = accountID, enabled
+	return r.modeErr
+}
+
+func TestAccountWindowQuotaHandler_SharedPoolModeValidation(t *testing.T) {
+	for _, body := range []string{`{}`, `{"enabled":null}`, `{"enabled":"true"}`} {
+		repo := &accountWindowQuotaHandlerRepo{}
+		h, _ := newAccountWindowQuotaHandlerTest(t, repo)
+		w := performAccountWindowQuotaRequest(t, http.MethodPut, "/", body, h.AdminSetSharedPoolMode, gin.Param{Key: "id", Value: "7"})
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Zero(t, repo.modeAccount)
+	}
+	for _, enabled := range []bool{true, false} {
+		repo := &accountWindowQuotaHandlerRepo{}
+		h, _ := newAccountWindowQuotaHandlerTest(t, repo)
+		body, err := json.Marshal(map[string]bool{"enabled": enabled})
+		require.NoError(t, err)
+		w := performAccountWindowQuotaRequest(t, http.MethodPut, "/", string(body), h.AdminSetSharedPoolMode, gin.Param{Key: "id", Value: "7"})
+		require.Equal(t, http.StatusOK, w.Code)
+		require.Equal(t, int64(7), repo.modeAccount)
+		require.Equal(t, enabled, repo.modeEnabled)
+		require.Equal(t, enabled, decodeAccountWindowQuotaResponse(t, w)["shared_pool_mode"])
+	}
+	repo := &accountWindowQuotaHandlerRepo{modeErr: service.ErrAccountWindowInvalidMembers}
+	h, _ := newAccountWindowQuotaHandlerTest(t, repo)
+	w := performAccountWindowQuotaRequest(t, http.MethodPut, "/", `{"enabled":true}`, h.AdminSetSharedPoolMode, gin.Param{Key: "id", Value: "7"})
+	require.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestAccountWindowQuotaHandler_SharedPoolModeVisibleWithoutMembers(t *testing.T) {
+	h, _ := newAccountWindowQuotaHandlerTest(t, &accountWindowQuotaHandlerRepo{sharedAccountIDs: []int64{7}, sharedPoolIDs: []int64{7}})
+	w := performAccountWindowQuotaRequest(t, http.MethodGet, "/", "", h.AdminOverview)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, []any{float64(7)}, decodeAccountWindowQuotaResponse(t, w)["shared_pool_account_ids"])
 }
 func (r *accountWindowQuotaHandlerRepo) GetAccountOfficialWindowPercent(_ context.Context, _ int64, window string) (float64, bool, error) {
 	value := r.official5h

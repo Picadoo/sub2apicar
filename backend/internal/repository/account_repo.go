@@ -646,7 +646,8 @@ func lockAndMergeAccountProbeExtra(
 			extra -> 'upstream_billing_probe',
 			extra -> 'ollama_cloud_usage_session',
 			extra -> 'ollama_cloud_usage_auto_refresh',
-			extra -> 'ollama_cloud_usage_snapshot'
+			extra -> 'ollama_cloud_usage_snapshot',
+			extra -> 'window_quota_shared_pool_mode'
 		FROM accounts
 		WHERE id = $1 AND deleted_at IS NULL
 		FOR NO KEY UPDATE
@@ -672,6 +673,7 @@ func lockAndMergeAccountProbeExtra(
 		currentOllamaSession         []byte
 		currentOllamaAutoRefresh     []byte
 		currentOllamaSnapshot        []byte
+		currentSharedPoolMode        []byte
 	)
 	if err := rows.Scan(
 		&identityUnchanged,
@@ -683,6 +685,7 @@ func lockAndMergeAccountProbeExtra(
 		&currentOllamaSession,
 		&currentOllamaAutoRefresh,
 		&currentOllamaSnapshot,
+		&currentSharedPoolMode,
 	); err != nil {
 		return nil, err
 	}
@@ -691,6 +694,15 @@ func lockAndMergeAccountProbeExtra(
 	}
 
 	extra := copyJSONMap(normalizeJSONMap(account.Extra))
+	// Only the dedicated shared-pool switch may change this flag. An unrelated
+	// account edit can carry an older Extra snapshot and must preserve the value
+	// read under the account row lock, including an explicit false.
+	delete(extra, service.AccountWindowSharedPoolModeExtraKey)
+	if value, present, err := decodeAccountExtraJSON(currentSharedPoolMode); err != nil {
+		return nil, err
+	} else if present {
+		extra[service.AccountWindowSharedPoolModeExtraKey] = value
+	}
 	for _, key := range []string{
 		service.UpstreamBillingProbeEnabledExtraKey,
 		service.UpstreamBillingRateSyncEnabledExtraKey,

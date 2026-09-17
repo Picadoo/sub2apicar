@@ -885,7 +885,8 @@ func (r *userAccountWindowQuotaRepository) ResetWindowForAccountIfDue(ctx contex
 func (r *userAccountWindowQuotaRepository) GetByUserAccountWindow(ctx context.Context, userID, accountID int64, window string) (*service.UserAccountWindowQuotaRecord, error) {
 	client := clientFromContext(ctx, r.client)
 	const q = `SELECT q.user_id, q.account_id, q.window_type, q.limit_percent, q.attributed_percent,
-			q.window_reset_at, COALESCE(q.donate_pool_fraction, 0)
+			q.window_reset_at, COALESCE(q.donate_pool_fraction, 0),
+			COALESCE(a.extra->>'window_quota_shared_pool_mode', 'false') = 'true'
 		FROM user_account_window_quotas q
 		JOIN accounts a ON a.id = q.account_id
 		WHERE q.user_id = $1 AND q.account_id = $2 AND q.window_type = $3
@@ -914,6 +915,7 @@ func (r *userAccountWindowQuotaRepository) GetByUserAccountWindow(ctx context.Co
 		&rec.AttributedPercent,
 		&resetAt,
 		&rec.DonatePoolFraction,
+		&rec.SharedPoolMode,
 	); err != nil {
 		return nil, err
 	}
@@ -927,7 +929,8 @@ func (r *userAccountWindowQuotaRepository) GetByUserAccountWindow(ctx context.Co
 // ListByUser 返回用户在所有账号所有窗口的活跃配额（裸 SQL 以带出 donate_pool_fraction）。
 func (r *userAccountWindowQuotaRepository) ListByUser(ctx context.Context, userID int64) ([]service.UserAccountWindowQuotaRecord, error) {
 	client := clientFromContext(ctx, r.client)
-	const q = `SELECT q.user_id, q.account_id, q.window_type, q.limit_percent, q.attributed_percent, q.window_reset_at, COALESCE(q.donate_pool_fraction, 0)
+	const q = `SELECT q.user_id, q.account_id, q.window_type, q.limit_percent, q.attributed_percent, q.window_reset_at, COALESCE(q.donate_pool_fraction, 0),
+		COALESCE(a.extra->>'window_quota_shared_pool_mode', 'false') = 'true'
 		FROM user_account_window_quotas q
 		JOIN accounts a ON a.id = q.account_id
 		WHERE q.user_id = $1 AND q.deleted_at IS NULL AND a.deleted_at IS NULL
@@ -943,7 +946,7 @@ func (r *userAccountWindowQuotaRepository) ListByUser(ctx context.Context, userI
 // ListByAccount 返回共享且未删除账号下的活跃配额；历史 private 行不能继续参与网关预检。
 func (r *userAccountWindowQuotaRepository) ListByAccount(ctx context.Context, accountID int64) ([]service.UserAccountWindowQuotaRecord, error) {
 	const q = `SELECT q.user_id, q.account_id, q.window_type, q.limit_percent, q.attributed_percent, q.window_reset_at,
-		COALESCE(q.donate_pool_fraction, 0)
+		COALESCE(q.donate_pool_fraction, 0), COALESCE(a.extra->>'window_quota_shared_pool_mode', 'false') = 'true'
 		FROM user_account_window_quotas q
 		JOIN accounts a ON a.id = q.account_id
 		WHERE q.account_id = $1 AND q.deleted_at IS NULL AND a.deleted_at IS NULL
@@ -980,6 +983,48 @@ func (r *userAccountWindowQuotaRepository) ListSharedAccountIDs(ctx context.Cont
 		accountIDs = append(accountIDs, accountID)
 	}
 	return accountIDs, rows.Err()
+}
+
+// SetAccountSharedPoolMode changes only this account flag. JSONB merge preserves
+// attribution checkpoints and concurrent writes to other account extra fields.
+func (r *userAccountWindowQuotaRepository) SetAccountSharedPoolMode(ctx context.Context, accountID int64, enabled bool) error {
+	result, err := clientFromContext(ctx, r.client).ExecContext(ctx, `UPDATE accounts
+		SET extra = COALESCE(extra, '{}'::jsonb) || jsonb_build_object($2::text, $3::boolean), updated_at = NOW()
+		WHERE id = $1 AND deleted_at IS NULL
+		  AND platform = 'openai'
+		  AND COALESCE(extra->>'window_quota_shared', 'false') = 'true'`,
+		accountID, service.AccountWindowSharedPoolModeExtraKey, enabled)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return service.ErrAccountWindowInvalidMembers
+	}
+	return nil
+}
+
+func (r *userAccountWindowQuotaRepository) ListSharedPoolAccountIDs(ctx context.Context) ([]int64, error) {
+	rows, err := clientFromContext(ctx, r.client).QueryContext(ctx, `SELECT id FROM accounts
+		WHERE deleted_at IS NULL AND platform = 'openai'
+		  AND COALESCE(extra->>'window_quota_shared', 'false') = 'true'
+		  AND COALESCE(extra->>$1, 'false') = 'true' ORDER BY id`, service.AccountWindowSharedPoolModeExtraKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]int64, 0)
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // IsAccountWindowForceUnattributed 读取账号是否处于「官方用量强制未归因」模式。
@@ -1290,7 +1335,7 @@ func scanWindowQuotaRecords(rows *sql.Rows) ([]service.UserAccountWindowQuotaRec
 	for rows.Next() {
 		var rec service.UserAccountWindowQuotaRecord
 		var resetAt sql.NullTime
-		if err := rows.Scan(&rec.UserID, &rec.AccountID, &rec.WindowType, &rec.LimitPercent, &rec.AttributedPercent, &resetAt, &rec.DonatePoolFraction); err != nil {
+		if err := rows.Scan(&rec.UserID, &rec.AccountID, &rec.WindowType, &rec.LimitPercent, &rec.AttributedPercent, &resetAt, &rec.DonatePoolFraction, &rec.SharedPoolMode); err != nil {
 			return nil, err
 		}
 		if resetAt.Valid {
@@ -1316,7 +1361,8 @@ func (r *userAccountWindowQuotaRepository) SetDonatePoolFraction(ctx context.Con
 		if !found {
 			return fmt.Errorf("%w: account=%d", service.ErrAccountWindowNotMember, accountID)
 		}
-		const lockQ = `SELECT q.user_id, q.account_id, q.window_type, q.limit_percent, q.attributed_percent, q.window_reset_at, COALESCE(q.donate_pool_fraction, 0)
+		const lockQ = `SELECT q.user_id, q.account_id, q.window_type, q.limit_percent, q.attributed_percent, q.window_reset_at, COALESCE(q.donate_pool_fraction, 0),
+			COALESCE(a.extra->>'window_quota_shared_pool_mode', 'false') = 'true'
 			FROM user_account_window_quotas q
 			JOIN accounts a ON a.id = q.account_id
 			WHERE q.account_id = $1 AND q.window_type = $2
@@ -1468,7 +1514,7 @@ func (r *userAccountWindowQuotaRepository) ListAllWithUser(ctx context.Context) 
 	client := clientFromContext(ctx, r.client)
 	const q = `SELECT q.user_id, COALESCE(u.email, ''), COALESCE(u.username, ''),
 			q.account_id, q.window_type, q.limit_percent, q.attributed_percent, q.window_reset_at,
-			COALESCE(q.donate_pool_fraction, 0)
+			COALESCE(q.donate_pool_fraction, 0), COALESCE(a.extra->>'window_quota_shared_pool_mode', 'false') = 'true'
 		FROM user_account_window_quotas q
 		JOIN users u ON u.id = q.user_id
 		JOIN accounts a ON a.id = q.account_id
@@ -1485,7 +1531,7 @@ func (r *userAccountWindowQuotaRepository) ListAllWithUser(ctx context.Context) 
 	for rows.Next() {
 		var rec service.AdminWindowQuotaOverviewRow
 		var resetAt sql.NullTime
-		if err := rows.Scan(&rec.UserID, &rec.Email, &rec.Username, &rec.AccountID, &rec.WindowType, &rec.LimitPercent, &rec.AttributedPercent, &resetAt, &rec.DonatePoolFraction); err != nil {
+		if err := rows.Scan(&rec.UserID, &rec.Email, &rec.Username, &rec.AccountID, &rec.WindowType, &rec.LimitPercent, &rec.AttributedPercent, &resetAt, &rec.DonatePoolFraction, &rec.SharedPoolMode); err != nil {
 			return nil, err
 		}
 		if resetAt.Valid {

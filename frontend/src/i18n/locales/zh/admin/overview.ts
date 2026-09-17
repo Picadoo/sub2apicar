@@ -838,6 +838,13 @@ export default {
     },
 
     windowQuotaOverview: {
+      sharedPoolSwitch: '账号 #{id} 共享池模式',
+      enableSharedPool: '开启共享池',
+      disableSharedPool: '关闭共享池',
+      sharedPoolActive: '共享池已开启 · 个人限额暂停',
+      sharedPoolHint: '开启后，组员共用该账号 5h / 7d 余量，无需捐赠，仍受账号安全线限制。开关不清零统计；手动关闭后按原配置和累计用量恢复个人限额。',
+      sharedPoolSaved: '共享池模式已保存',
+      sharedPoolFailed: '共享池模式保存失败',
       title: '窗口配额总览（Codex）',
       subtitle: '各成员对每个账号 5h / 7d 窗口的占用',
       account: '账号 #{id}',

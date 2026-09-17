@@ -25,6 +25,27 @@ vi.mock('vue-i18n', async () => {
 import AccountWindowQuotaCard from '../AccountWindowQuotaCard.vue'
 
 describe('AccountWindowQuotaCard', () => {
+  it.each([80, undefined])('uses shared account headroom and hides donation controls (official=%s)', async (official) => {
+    apiMocks.getMy.mockResolvedValue({
+      enabled: true,
+      windows: [{
+        account_id: 7, window_type: '7d', shared_pool_mode: true,
+        limit_percent: 23, effective_limit_percent: 23, used_percent: 30,
+        remaining_percent: 0, donate_fraction: 1, pool_available_percent: 0,
+        account_used_percent: official, ceiling_percent: 92,
+      }],
+      members: [{ user_id: 1, username: 'Alice', account_id: 7, window_type: '7d', shared_pool_mode: true, used_percent: 30 }],
+    })
+    const wrapper = mount(AccountWindowQuotaCard)
+    await flushPromises()
+    expect(wrapper.text()).toContain('dashboard.accountWindowQuota.sharedPoolMode')
+    expect(wrapper.text()).toContain('dashboard.accountWindowQuota.personalLimitSuspended')
+    expect(wrapper.get('[data-testid="current-window-availability"]').text()).toContain(official === undefined ? '--' : '12%')
+    expect(wrapper.find('input[type="range"]').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('dashboard.accountWindowQuota.borrowing')
+    expect(wrapper.text()).toContain('30%')
+  })
+
   it('shows every member quota for the current shared account', async () => {
     apiMocks.getMy.mockResolvedValue({
       enabled: true,

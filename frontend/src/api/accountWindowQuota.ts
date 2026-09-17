@@ -8,6 +8,8 @@
 import { apiClient } from './client'
 
 export interface AccountWindowQuotaItem {
+  /** Personal caps are suspended; use official account headroom instead. */
+  shared_pool_mode?: boolean
   account_id: number
   window_type: string // '5h' | '7d'
   limit_percent: number
@@ -120,6 +122,7 @@ export async function setAccountWindowDonate(payload: SetAccountWindowDonatePayl
 }
 
 export interface AdminWindowQuotaOverviewItem {
+  shared_pool_mode?: boolean
   user_id: number
   email: string
   username: string
@@ -140,6 +143,7 @@ export interface AdminWindowQuotaOverviewItem {
 }
 
 export interface AdminWindowQuotaSummary {
+  shared_pool_mode?: boolean
   account_id: number
   window_type: string
   member_count: number
@@ -158,6 +162,7 @@ export interface AdminWindowQuotaSummary {
 }
 
 export interface AdminWindowQuotaOverviewResponse {
+  shared_pool_account_ids?: number[]
   enabled: boolean
   rows: AdminWindowQuotaOverviewItem[]
   summaries: AdminWindowQuotaSummary[]
@@ -226,6 +231,7 @@ export async function rebalanceAccountWindowQuotas(
 }
 
 export const accountWindowQuotaAPI = {
+  setAccountSharedPoolMode,
   getMyAccountWindowQuotas,
   getUserAccountWindowQuotas,
   getAccountWindowQuotaOverview,
@@ -239,3 +245,12 @@ export const accountWindowQuotaAPI = {
 }
 
 export default accountWindowQuotaAPI
+
+/** 管理员手动开关账号共享池；不重置用量或个人配置。 */
+export async function setAccountSharedPoolMode(accountId: number, enabled: boolean): Promise<{ account_id: number; shared_pool_mode: boolean }> {
+  const { data } = await apiClient.put<{ account_id: number; shared_pool_mode: boolean }>(
+    `/admin/account-window-quotas/accounts/${accountId}/shared-pool`,
+    { enabled },
+  )
+  return data
+}

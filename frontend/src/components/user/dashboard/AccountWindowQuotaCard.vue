@@ -14,6 +14,9 @@
           <span class="text-sm font-semibold text-gray-900 dark:text-white">
             {{ t('dashboard.accountWindowQuota.account', { id: g.accountId }) }}
           </span>
+          <span v-if="g.windows.some((w) => w.shared_pool_mode)" class="text-xs font-medium text-blue-600 dark:text-blue-400">
+            {{ t('dashboard.accountWindowQuota.sharedPoolMode') }}
+          </span>
         </div>
         <div class="space-y-3">
           <div
@@ -38,7 +41,9 @@
                 </div>
               </div>
               <p class="max-w-[62%] text-right text-[11px] leading-snug text-gray-400 dark:text-gray-500">
-                {{ hasOfficialSnapshot(w)
+                {{ w.shared_pool_mode
+                  ? t('dashboard.accountWindowQuota.sharedPoolHint')
+                  : hasOfficialSnapshot(w)
                   ? t('dashboard.accountWindowQuota.availableSharedHint')
                   : t('dashboard.accountWindowQuota.availableEstimateHint') }}
               </p>
@@ -62,8 +67,8 @@
               </span>
               <span>
                 {{ t('dashboard.accountWindowQuota.personalLimit') }}
-                <strong class="font-mono font-medium text-gray-700 dark:text-gray-200">{{ formatPctValue(effLimit(w)) }}</strong>
-                <small v-if="limitsDiffer(w)" class="ml-1 text-gray-400">
+                <strong class="font-mono font-medium text-gray-700 dark:text-gray-200">{{ w.shared_pool_mode ? t('dashboard.accountWindowQuota.personalLimitSuspended') : formatPctValue(effLimit(w)) }}</strong>
+                <small v-if="!w.shared_pool_mode && limitsDiffer(w)" class="ml-1 text-gray-400">
                   {{ t('dashboard.accountWindowQuota.baseShare', { pct: formatPctValue(w.limit_percent) }) }}
                 </small>
               </span>
@@ -92,7 +97,7 @@
             </p>
 
             <!-- 自愿救急池：捐赠滑块 + 池剩余（5h / 7d 各自独立，谁愿意给谁才给） -->
-            <div class="mt-1.5 rounded-md bg-gray-50 px-2 py-1.5 dark:bg-dark-700/40">
+            <div v-if="!w.shared_pool_mode" class="mt-1.5 rounded-md bg-gray-50 px-2 py-1.5 dark:bg-dark-700/40">
               <div class="mb-1 flex items-center justify-between text-[11px]">
                 <span class="font-medium text-gray-600 dark:text-gray-300">{{ t('dashboard.accountWindowQuota.poolTitle') }}</span>
                 <span class="font-mono text-gray-500 dark:text-gray-400">
@@ -264,6 +269,7 @@ function hasOfficialSnapshot(w: AccountWindowQuotaItem): boolean {
 // 当前真实上限同时受个人额度和账号官方安全余量约束。
 // 账号余量属于全体成员及外部使用共享，不再展示误导性的个人“剩余 24%”。
 function availableNow(w: AccountWindowQuotaItem): number | null {
+  if (w.shared_pool_mode) return accountHeadroom(w)
   const personal = personalRemaining(w)
   if (personal === null) return null
   const account = accountHeadroom(w)
@@ -299,6 +305,7 @@ function attributionExplanation(w: AccountWindowQuotaItem): string | null {
 
 // 是否正在借用救急池：有效上限高于基础上限且归因已用已超出基础份额（5h / 7d 通用）。
 function isBorrowing(w: AccountWindowQuotaItem): boolean {
+  if (w.shared_pool_mode) return false
   const effective = effLimit(w)
   const base = finiteNumber(w.limit_percent)
   const attributed = finiteNumber(w.used_percent)
@@ -351,6 +358,9 @@ function formatPctValue(n: unknown): string {
 }
 
 function memberQuota(item?: AdminWindowQuotaOverviewItem): string {
+  if (item?.shared_pool_mode) {
+    return `${t('dashboard.accountWindowQuota.siteAttributed')} ${formatPctValue(item.used_percent)} / ${t('dashboard.accountWindowQuota.sharedPoolMode')}`
+  }
   const effective = finiteNumber(item?.effective_limit_percent)
   const base = finiteNumber(item?.limit_percent)
   const personalLimit = effective !== null && effective >= 0 ? effective : base

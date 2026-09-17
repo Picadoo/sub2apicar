@@ -124,6 +124,27 @@ describe('UserPlatformQuotaModal', () => {
     expect(table.text()).toContain('admin.users.windowQuota.unattributed 2%')
   })
 
+  it('共享池模式显示公共余额并保留原有基础限额', async () => {
+    apiMocks.getUserAccountWindowQuotas.mockResolvedValueOnce({
+      enabled: true,
+      windows: [{
+        account_id: 7, window_type: '7d', shared_pool_mode: true,
+        limit_percent: 23, used_percent: 30, remaining_percent: 0,
+        donate_fraction: 0, effective_limit_percent: 23, pool_available_percent: 0,
+        account_used_percent: 80, ceiling_percent: 92,
+        account_attributed_percent: 80, account_unattributed_percent: 0,
+      }],
+    })
+    const w = await mountAndOpen()
+    const table = w.get('[data-testid="window-quota-table"]')
+    expect(w.text()).toContain('dashboard.accountWindowQuota.sharedPoolMode')
+    expect(table.text()).toContain('dashboard.accountWindowQuota.personalLimitSuspended')
+    expect(table.text()).toContain('30%')
+    expect(table.text()).toContain('12%')
+    expect((table.get('input').element as HTMLInputElement).value).toBe('23')
+    w.unmount()
+  })
+
   it('窗口配额无效数值显示破折号，真实 0 仍显示为 0', async () => {
     apiMocks.getUserAccountWindowQuotas.mockResolvedValueOnce({
       enabled: true,

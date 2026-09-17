@@ -32,6 +32,9 @@ export default {
       disabled: 'Disabled',
     },
     accountWindowQuota: {
+      sharedPoolMode: 'Shared pool mode',
+      sharedPoolHint: 'Members share account headroom without donations until the admin turns this off',
+      personalLimitSuspended: 'Personal cap suspended',
       title: 'Official Window Quota',
       subtitle: 'Based on official account headroom',
       account: 'Account #{id}',

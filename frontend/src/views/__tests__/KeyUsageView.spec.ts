@@ -289,6 +289,31 @@ describe('KeyUsageView daily detail', () => {
     wrapper.unmount()
   })
 
+  it('shows shared account headroom with personal limits suspended', async () => {
+    const payload = await (await fetch('/fixture')).json()
+    const quota = payload.account_groups[0].accounts[0].windows['7d']
+    quota.user_shared_pool_mode = true
+    quota.user_limit_percent = 23
+    quota.user_remaining_percent = 49.5
+    delete quota.user_effective_limit_percent
+    delete quota.user_pool_available_percent
+    vi.mocked(fetch).mockResolvedValue({ ok: true, json: async () => payload } as Response)
+    const wrapper = mount(KeyUsageView, {
+      global: { stubs: {
+        RouterLink: { template: '<a><slot /></a>' }, LocaleSwitcher: true, Icon: true,
+      } },
+    })
+    await wrapper.find('input').setValue('sk-test-key')
+    await wrapper.find('input').trigger('keydown.enter')
+    await flushPromises()
+    await nextTick()
+    expect(wrapper.text()).toContain('dashboard.accountWindowQuota.sharedPoolMode')
+    expect(wrapper.text()).toContain('dashboard.accountWindowQuota.personalLimitSuspended')
+    expect(wrapper.text()).toContain('49.5%')
+    expect(wrapper.text()).not.toContain('Your shared quota')
+    wrapper.unmount()
+  })
+
   it('queries the current local calendar date near midnight', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date(2026, 6, 13, 0, 30))

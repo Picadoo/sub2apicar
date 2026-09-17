@@ -124,6 +124,9 @@
             >
               <div class="mb-2 text-sm font-semibold text-gray-900 dark:text-white">
                 {{ t('admin.users.windowQuota.account', { id: g.accountId }) }}
+                <span v-if="g.windows.some((w) => w.shared_pool_mode)" class="ml-2 text-xs font-medium text-blue-600 dark:text-blue-400">
+                  {{ t('dashboard.accountWindowQuota.sharedPoolMode') }}
+                </span>
               </div>
               <table class="min-w-full text-sm" data-testid="window-quota-table">
                 <thead>
@@ -148,8 +151,8 @@
                         <span class="text-xs text-gray-400">%</span>
                       </div>
                     </td>
-                    <td class="px-2 py-1.5 font-mono text-xs text-gray-500">{{ formatPctValue(effectiveLimit(w)) }}</td>
-                    <td class="px-2 py-1.5 font-mono text-xs text-gray-500">{{ formatPctValue(w.remaining_percent) }}</td>
+                    <td class="px-2 py-1.5 font-mono text-xs text-gray-500">{{ w.shared_pool_mode ? t('dashboard.accountWindowQuota.personalLimitSuspended') : formatPctValue(effectiveLimit(w)) }}</td>
+                    <td class="px-2 py-1.5 font-mono text-xs text-gray-500">{{ formatPctValue(windowRemaining(w)) }}</td>
                     <td class="px-2 py-1.5 text-[11px] text-gray-500">
                       <div>
                         {{ t('admin.users.windowQuota.official') }}
@@ -407,6 +410,12 @@ function formatPctValue(n: unknown): string {
 function effectiveLimit(windowQuota: AccountWindowQuotaItem): number | null {
   const effective = finiteNumber(windowQuota.effective_limit_percent)
   return effective !== null && effective >= 0 ? effective : null
+}
+function windowRemaining(windowQuota: AccountWindowQuotaItem): number | null {
+  if (!windowQuota.shared_pool_mode) return finiteNumber(windowQuota.remaining_percent)
+  const official = finiteNumber(windowQuota.account_used_percent)
+  const ceiling = finiteNumber(windowQuota.ceiling_percent)
+  return official === null || ceiling === null ? null : Math.max(0, ceiling - official)
 }
 function formatReset(iso: string | null | undefined): string {
   if (!iso) return '-'

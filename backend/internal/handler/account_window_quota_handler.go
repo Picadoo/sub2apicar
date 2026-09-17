@@ -25,6 +25,7 @@ func NewAccountWindowQuotaHandler(quota *service.AccountWindowQuotaService) *Acc
 }
 
 type accountWindowQuotaItem struct {
+	SharedPoolMode             bool     `json:"shared_pool_mode"`
 	AccountID                  int64    `json:"account_id"`
 	WindowType                 string   `json:"window_type"`
 	LimitPercent               float64  `json:"limit_percent"`
@@ -87,6 +88,7 @@ func buildWindowItemsFromViews(views []service.UserWindowQuotaView, now time.Tim
 			remaining = 0
 		}
 		item := accountWindowQuotaItem{
+			SharedPoolMode:             v.SharedPoolMode,
 			AccountID:                  v.AccountID,
 			WindowType:                 v.WindowType,
 			LimitPercent:               v.LimitPercent,
@@ -137,6 +139,7 @@ func (h *AccountWindowQuotaHandler) AdminGetUserWindows(c *gin.Context) {
 }
 
 type adminWindowQuotaOverviewItem struct {
+	SharedPoolMode        bool    `json:"shared_pool_mode"`
 	UserID                int64   `json:"user_id"`
 	Email                 string  `json:"email"`
 	Username              string  `json:"username"`
@@ -153,6 +156,7 @@ type adminWindowQuotaOverviewItem struct {
 }
 
 type adminWindowQuotaSummaryItem struct {
+	SharedPoolMode       bool     `json:"shared_pool_mode"`
 	AccountID            int64    `json:"account_id"`
 	WindowType           string   `json:"window_type"`
 	MemberCount          int      `json:"member_count"`
@@ -178,6 +182,7 @@ func buildOverviewItems(records []service.AdminWindowQuotaOverviewRow, now time.
 			remaining = 0
 		}
 		item := adminWindowQuotaOverviewItem{
+			SharedPoolMode:        r.SharedPoolMode,
 			UserID:                r.UserID,
 			Email:                 r.Email,
 			Username:              r.Username,
@@ -208,6 +213,7 @@ func buildSummaryItems(records []service.AdminWindowQuotaSummary) []adminWindowQ
 	summaries := make([]adminWindowQuotaSummaryItem, 0, len(records))
 	for _, summary := range records {
 		summaries = append(summaries, adminWindowQuotaSummaryItem{
+			SharedPoolMode:       summary.SharedPoolMode,
 			AccountID:            summary.AccountID,
 			WindowType:           summary.WindowType,
 			MemberCount:          summary.MemberCount,
@@ -244,12 +250,48 @@ func (h *AccountWindowQuotaHandler) AdminOverview(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
+	sharedPoolIDs, err := h.quota.ListSharedPoolAccountIDs(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
 	response.Success(c, gin.H{
-		"enabled":     true,
-		"rows":        buildOverviewItems(records, time.Now()),
-		"summaries":   buildSummaryItems(summaryRecords),
-		"account_ids": accountIDs,
+		"enabled":                 true,
+		"rows":                    buildOverviewItems(records, time.Now()),
+		"summaries":               buildSummaryItems(summaryRecords),
+		"account_ids":             accountIDs,
+		"shared_pool_account_ids": sharedPoolIDs,
 	})
+}
+
+// AdminSetSharedPoolMode manually enables or disables shared use of both windows.
+// PUT /api/v1/admin/account-window-quotas/accounts/:id/shared-pool
+func (h *AccountWindowQuotaHandler) AdminSetSharedPoolMode(c *gin.Context) {
+	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || accountID <= 0 {
+		response.BadRequest(c, "invalid account id")
+		return
+	}
+	var req struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.Enabled == nil {
+		response.BadRequest(c, "enabled must be a boolean")
+		return
+	}
+	if h.quota == nil || !h.quota.Enabled() {
+		response.BadRequest(c, "account window quota is not enabled")
+		return
+	}
+	if err := h.quota.SetAccountSharedPoolMode(c.Request.Context(), accountID, *req.Enabled); err != nil {
+		if errors.Is(err, service.ErrAccountWindowInvalidMembers) {
+			response.BadRequest(c, "account is not an active shared account")
+			return
+		}
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"account_id": accountID, "shared_pool_mode": *req.Enabled})
 }
 
 type setAccountWindowLimitRequest struct {

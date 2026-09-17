@@ -54,7 +54,22 @@
               {{ t('admin.windowQuotaOverview.overallocatedWarning') }}
             </p>
           </div>
-          <div class="flex gap-2">
+          <div class="flex flex-wrap gap-2">
+            <button
+              type="button"
+              role="switch"
+              :aria-checked="sharedPoolAccountIds.includes(g.accountId)"
+              :aria-label="t('admin.windowQuotaOverview.sharedPoolSwitch', { id: g.accountId })"
+              class="btn btn-sm"
+              :class="sharedPoolAccountIds.includes(g.accountId) ? 'btn-primary' : 'btn-secondary'"
+              :disabled="savingSharedPool !== null"
+              :data-testid="`shared-pool-toggle-${g.accountId}`"
+              @click="toggleSharedPool(g.accountId)"
+            >
+              {{ sharedPoolAccountIds.includes(g.accountId)
+                ? t('admin.windowQuotaOverview.disableSharedPool')
+                : t('admin.windowQuotaOverview.enableSharedPool') }}
+            </button>
             <button type="button" class="btn btn-secondary btn-sm" @click="openMemberEditor(g)">
               {{ t('admin.windowQuotaOverview.manageMembers') }}
             </button>
@@ -68,6 +83,13 @@
             </button>
           </div>
         </div>
+
+        <p class="mb-3 text-xs text-gray-500 dark:text-gray-400" :data-testid="`shared-pool-status-${g.accountId}`">
+          <strong v-if="sharedPoolAccountIds.includes(g.accountId)" class="text-blue-600 dark:text-blue-400">
+            {{ t('admin.windowQuotaOverview.sharedPoolActive') }}
+          </strong>
+          {{ t('admin.windowQuotaOverview.sharedPoolHint') }}
+        </p>
 
         <div
           v-if="previewAccountId === g.accountId"
@@ -319,6 +341,7 @@ import {
   setAccountWindowLimit,
   setAccountWindowMembers,
   rebalanceAccountWindowQuotas,
+  setAccountSharedPoolMode,
   type AdminWindowQuotaSummary,
   type AdminWindowQuotaOverviewItem,
   type AdminWindowQuotaOverviewResponse,
@@ -331,6 +354,8 @@ const enabled = ref(false)
 const rows = ref<AdminWindowQuotaOverviewItem[]>([])
 const summaries = ref<AdminWindowQuotaSummary[]>([])
 const sharedAccountIds = ref<number[]>([])
+const sharedPoolAccountIds = ref<number[]>([])
+const savingSharedPool = ref<number | null>(null)
 const previewAccountId = ref<number | null>(null)
 const rebalancingAccountId = ref<number | null>(null)
 const memberEditorAccountId = ref<number | null>(null)
@@ -640,6 +665,28 @@ function applyOverviewData(data: AdminWindowQuotaOverviewResponse) {
   rows.value = data.rows ?? []
   summaries.value = data.summaries ?? []
   sharedAccountIds.value = data.account_ids ?? []
+  sharedPoolAccountIds.value = data.shared_pool_account_ids ?? []
+}
+
+async function toggleSharedPool(accountId: number) {
+  if (savingSharedPool.value !== null) return
+  savingSharedPool.value = accountId
+  try {
+    const result = await setAccountSharedPoolMode(accountId, !sharedPoolAccountIds.value.includes(accountId))
+    sharedPoolAccountIds.value = sharedPoolAccountIds.value.filter((id) => id !== accountId)
+    if (result.shared_pool_mode) sharedPoolAccountIds.value.push(accountId)
+    for (const row of rows.value) {
+      if (row.account_id === accountId) row.shared_pool_mode = result.shared_pool_mode
+    }
+    for (const summary of summaries.value) {
+      if (summary.account_id === accountId) summary.shared_pool_mode = result.shared_pool_mode
+    }
+    appStore.showSuccess(t('admin.windowQuotaOverview.sharedPoolSaved'))
+  } catch (error: any) {
+    appStore.showError(error?.response?.data?.message || t('admin.windowQuotaOverview.sharedPoolFailed'))
+  } finally {
+    savingSharedPool.value = null
+  }
 }
 
 async function saveMembers(accountId: number) {
@@ -717,6 +764,7 @@ async function load() {
     rows.value = []
     summaries.value = []
     sharedAccountIds.value = []
+    sharedPoolAccountIds.value = []
   }
 }
 
@@ -742,6 +790,13 @@ const WindowCell: FunctionalComponent<{
 }> = (props) => {
   const it = props.item
   if (!it) return h('span', { class: 'text-xs text-gray-400' }, '—')
+  if (it.shared_pool_mode) {
+    return h('div', { class: 'space-y-1 text-xs text-blue-600 dark:text-blue-400' }, [
+      h('div', t('admin.windowQuotaOverview.sharedPoolActive')),
+      h('div', `${t('admin.windowQuotaOverview.attributed')} ${fmtPct(it.used_percent)}`),
+      h('div', { class: 'text-gray-500' }, `${t('admin.windowQuotaOverview.baseLimit')} ${fmtPct(it.limit_percent)}`),
+    ])
+  }
   const base = finiteNumber(it.limit_percent)
   // 0 是合法有效上限；缺失或非有限数保持未知，不能回落成基础上限。
   const effRaw = finiteNumber(it.effective_limit_percent)

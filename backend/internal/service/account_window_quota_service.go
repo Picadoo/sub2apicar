@@ -23,6 +23,8 @@ const (
 	// AccountWindowForceUnattributedExtraKey 标记账号官方额度还会被中转站外部来源消耗。
 	// 启用后，官方增量全部记为未归因，绝不使用中转站 usage log 将其分配给成员。
 	AccountWindowForceUnattributedExtraKey = "window_quota_force_unattributed"
+	// Shared pool mode suspends personal caps without changing membership or usage.
+	AccountWindowSharedPoolModeExtraKey = "window_quota_shared_pool_mode"
 
 	// v4 checkpoint 持久化官方窗口、前向 usage_log 游标和待结算美元 basis。
 	// 成员历史 attributed_percent 只增量推进，刷新或迟到日志不得触发整窗重分。
@@ -89,6 +91,7 @@ var accountWindowTypes = []string{WindowType5h, WindowType7d}
 
 // UserAccountWindowQuotaRecord 是 user × account × window 维度配额台账的传输结构体。
 type UserAccountWindowQuotaRecord struct {
+	SharedPoolMode    bool
 	UserID            int64
 	AccountID         int64
 	WindowType        string
@@ -101,6 +104,7 @@ type UserAccountWindowQuotaRecord struct {
 
 // AdminWindowQuotaOverviewRow 是管理端总览用的配额行（带用户邮箱/用户名）。
 type AdminWindowQuotaOverviewRow struct {
+	SharedPoolMode        bool
 	UserID                int64
 	Email                 string
 	Username              string
@@ -116,6 +120,7 @@ type AdminWindowQuotaOverviewRow struct {
 
 // AdminWindowQuotaSummary 是管理端按账号、窗口聚合的配置/用量诊断。
 type AdminWindowQuotaSummary struct {
+	SharedPoolMode       bool
 	AccountID            int64
 	WindowType           string
 	MemberCount          int
@@ -200,6 +205,32 @@ type accountWindowOfficialUsageReader interface {
 // 可选能力：测试桩可实现它返回 true 以覆盖 force 场景；生产仓储实现。
 type accountWindowForceUnattributedReader interface {
 	IsAccountWindowForceUnattributed(ctx context.Context, accountID int64) (bool, error)
+}
+
+type accountWindowSharedPoolManager interface {
+	SetAccountSharedPoolMode(ctx context.Context, accountID int64, enabled bool) error
+	ListSharedPoolAccountIDs(ctx context.Context) ([]int64, error)
+}
+
+func (s *AccountWindowQuotaService) SetAccountSharedPoolMode(ctx context.Context, accountID int64, enabled bool) error {
+	if !s.Enabled() || accountID <= 0 {
+		return ErrAccountWindowInvalidMembers
+	}
+	manager, ok := s.repo.(accountWindowSharedPoolManager)
+	if !ok {
+		return errors.New("account shared pool mode is unavailable")
+	}
+	return manager.SetAccountSharedPoolMode(ctx, accountID, enabled)
+}
+
+func (s *AccountWindowQuotaService) ListSharedPoolAccountIDs(ctx context.Context) ([]int64, error) {
+	if !s.Enabled() {
+		return nil, nil
+	}
+	if manager, ok := s.repo.(accountWindowSharedPoolManager); ok {
+		return manager.ListSharedPoolAccountIDs(ctx)
+	}
+	return nil, nil
 }
 
 // AccountWindowUsageLogRef 描述一次已经持久化的 usage_log。
@@ -1012,6 +1043,11 @@ func (s *AccountWindowQuotaService) CheckUserAccountEligible(ctx context.Context
 	if official5h, found := s.resolveAccountWindowOfficialPercent(ctx, accountID, WindowType5h); found && official5h+windowQuotaEpsilon >= ceiling5h {
 		return false, WindowType5h, pv.reset5h[userID]
 	}
+	// The account flag is read with the member rows, so toggles need no cache
+	// invalidation. Membership and both official ceilings remain mandatory.
+	if records[0].SharedPoolMode {
+		return true, "", nil
+	}
 
 	// 1) 7d：自己份额 + 自愿 7d 救急池（捐赠者受自留上限约束）。
 	//    无人捐赠时 effective7dLimit == 基础上限，即纯铁底线，谁也动不了你没捐的份额。
@@ -1180,6 +1216,7 @@ func (s *AccountWindowQuotaService) ListAllForAdmin(ctx context.Context) ([]Admi
 			unattributedPtr = &unattributed
 		}
 		summaries = append(summaries, AdminWindowQuotaSummary{
+			SharedPoolMode:       row.SharedPoolMode,
 			AccountID:            row.AccountID,
 			WindowType:           row.WindowType,
 			MemberCount:          pv.memberCount(row.WindowType),
@@ -1493,6 +1530,7 @@ func (s *AccountWindowQuotaService) SetDonateFraction(ctx context.Context, userI
 
 // UserWindowQuotaView 是用户侧展示用的窗口配额（含救急池信息）。
 type UserWindowQuotaView struct {
+	SharedPoolMode             bool
 	AccountID                  int64
 	WindowType                 string
 	LimitPercent               float64 // 基础上限（本人 limit_percent）
@@ -1558,6 +1596,7 @@ func (s *AccountWindowQuotaService) ListUserWindowsWithPool(ctx context.Context,
 			pvCache[r.AccountID] = pv
 		}
 		v := UserWindowQuotaView{
+			SharedPoolMode:        r.SharedPoolMode,
 			AccountID:             r.AccountID,
 			WindowType:            r.WindowType,
 			LimitPercent:          r.LimitPercent,
