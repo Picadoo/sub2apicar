@@ -241,18 +241,34 @@ func newOpenAIModelMappedBodyCache(body []byte, replace openAIModelBodyReplaceFu
 	}
 }
 
-func usageRecordContext(parent context.Context, base context.Context) context.Context {
+type usageRecordContextValues struct {
+	clientRequestID string
+	requestID       string
+}
+
+func snapshotUsageRecordContext(parent context.Context) usageRecordContextValues {
+	if parent == nil {
+		return usageRecordContextValues{}
+	}
+	values := usageRecordContextValues{}
+	if clientRequestID, _ := parent.Value(ctxkey.ClientRequestID).(string); strings.TrimSpace(clientRequestID) != "" {
+		values.clientRequestID = strings.TrimSpace(clientRequestID)
+	}
+	if requestID, _ := parent.Value(ctxkey.RequestID).(string); strings.TrimSpace(requestID) != "" {
+		values.requestID = strings.TrimSpace(requestID)
+	}
+	return values
+}
+
+func usageRecordContext(base context.Context, values usageRecordContextValues) context.Context {
 	if base == nil {
 		base = context.Background()
 	}
-	if parent == nil {
-		return base
+	if values.clientRequestID != "" {
+		base = context.WithValue(base, ctxkey.ClientRequestID, values.clientRequestID)
 	}
-	if clientRequestID, _ := parent.Value(ctxkey.ClientRequestID).(string); strings.TrimSpace(clientRequestID) != "" {
-		base = context.WithValue(base, ctxkey.ClientRequestID, strings.TrimSpace(clientRequestID))
-	}
-	if requestID, _ := parent.Value(ctxkey.RequestID).(string); strings.TrimSpace(requestID) != "" {
-		base = context.WithValue(base, ctxkey.RequestID, strings.TrimSpace(requestID))
+	if values.requestID != "" {
+		base = context.WithValue(base, ctxkey.RequestID, values.requestID)
 	}
 	return base
 }
@@ -261,8 +277,9 @@ func wrapUsageRecordTaskContext(parent context.Context, task service.UsageRecord
 	if task == nil {
 		return nil
 	}
+	values := snapshotUsageRecordContext(parent)
 	return func(ctx context.Context) {
-		task(usageRecordContext(parent, ctx))
+		task(usageRecordContext(ctx, values))
 	}
 }
 
@@ -821,6 +838,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 			quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
 			sessionID := service.ExtractClientSessionID(c)
 			cyberBlocked := service.GetOpsCyberPolicy(c) != nil
+			channelUsageFields := clientRequestedUsageFields(c, channelMapping, reqModel, res.UpstreamModel)
 			h.submitOpenAIUsageRecordTask(c.Request.Context(), res, func(ctx context.Context) {
 				if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
 					Result:             res,
@@ -836,7 +854,7 @@ func (h *OpenAIGatewayHandler) Responses(c *gin.Context) {
 					APIKeyService:      h.apiKeyService,
 					QuotaPlatform:      quotaPlatform,
 					SessionID:          sessionID,
-					ChannelUsageFields: clientRequestedUsageFields(c, channelMapping, reqModel, res.UpstreamModel),
+					ChannelUsageFields: channelUsageFields,
 					PricingAt:          pricingAt,
 					CyberBlocked:       cyberBlocked,
 					NativeCompactionV2: nativeV2,
@@ -1425,6 +1443,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 			quotaPlatform := service.QuotaPlatform(c.Request.Context(), apiKey)
 			sessionID := service.ExtractClientSessionID(c)
 			cyberBlocked := service.GetOpsCyberPolicy(c) != nil
+			channelUsageFields := clientRequestedUsageFields(c, channelMappingMsg, reqModel, res.UpstreamModel)
 			h.submitOpenAIUsageRecordTask(c.Request.Context(), res, func(ctx context.Context) {
 				if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
 					Result:             res,
@@ -1440,7 +1459,7 @@ func (h *OpenAIGatewayHandler) Messages(c *gin.Context) {
 					APIKeyService:      h.apiKeyService,
 					QuotaPlatform:      quotaPlatform,
 					SessionID:          sessionID,
-					ChannelUsageFields: clientRequestedUsageFields(c, channelMappingMsg, reqModel, res.UpstreamModel),
+					ChannelUsageFields: channelUsageFields,
 					PricingAt:          pricingAt,
 					CyberBlocked:       cyberBlocked,
 				}); err != nil {
