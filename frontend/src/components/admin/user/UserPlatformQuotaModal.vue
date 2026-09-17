@@ -54,7 +54,7 @@
                     @state-change="setLimitState(row, 'daily', $event)"
                     @value-change="row.daily_limit_usd = $event"
                   />
-                  <ResetButton :busy="!!resetting[`${row.platform}.daily`]" @click="onReset(row.platform, 'daily')" />
+                  <ResetButton :busy="!!resetting[`${row.platform}.daily`]" :configured="savedConfigured.has(row.platform)" @click="onReset(row.platform, 'daily')" />
                 </td>
                 <td class="px-3 py-2">
                   <QuotaLimitEditor
@@ -64,7 +64,7 @@
                     @state-change="setLimitState(row, 'weekly', $event)"
                     @value-change="row.weekly_limit_usd = $event"
                   />
-                  <ResetButton :busy="!!resetting[`${row.platform}.weekly`]" @click="onReset(row.platform, 'weekly')" />
+                  <ResetButton :busy="!!resetting[`${row.platform}.weekly`]" :configured="savedConfigured.has(row.platform)" @click="onReset(row.platform, 'weekly')" />
                 </td>
                 <td class="px-3 py-2">
                   <QuotaLimitEditor
@@ -74,7 +74,7 @@
                     @state-change="setLimitState(row, 'monthly', $event)"
                     @value-change="row.monthly_limit_usd = $event"
                   />
-                  <ResetButton :busy="!!resetting[`${row.platform}.monthly`]" @click="onReset(row.platform, 'monthly')" />
+                  <ResetButton :busy="!!resetting[`${row.platform}.monthly`]" :configured="savedConfigured.has(row.platform)" @click="onReset(row.platform, 'monthly')" />
                 </td>
                 <td class="px-3 py-2 text-xs text-gray-500 dark:text-gray-400">
                   {{ formatUsage(row.daily_usage_usd) }} / {{ formatUsage(row.weekly_usage_usd) }} / {{ formatUsage(row.monthly_usage_usd) }}
@@ -243,6 +243,19 @@ const platformBaseline = ref('')
 const windowBaseline = ref('')
 const saveNotice = ref('')
 
+// 已保存且至少配置了一档限额的平台。只有这些平台在后端有配额记录，重置用量窗口才有对象。
+const savedConfigured = ref<Set<PlatformQuotaPlatform>>(new Set())
+
+function configuredPlatforms(items: PlatformQuotaItem[]): Set<PlatformQuotaPlatform> {
+  const out = new Set<PlatformQuotaPlatform>()
+  for (const it of items) {
+    if (it.daily_limit_usd != null || it.weekly_limit_usd != null || it.monthly_limit_usd != null) {
+      out.add(it.platform)
+    }
+  }
+  return out
+}
+
 const WINDOW_ORDER: Record<string, number> = { '5h': 0, '7d': 1 }
 const windowLoading = ref(false)
 const windowRows = ref<AccountWindowQuotaItem[]>([])
@@ -328,11 +341,11 @@ const QuotaLimitEditor: FunctionalComponent<{
     : null,
 ])
 
-const ResetButton: FunctionalComponent<{ busy: boolean }> = (buttonProps, { emit: buttonEmit }) => h('button', {
+const ResetButton: FunctionalComponent<{ busy: boolean; configured: boolean }> = (buttonProps, { emit: buttonEmit }) => h('button', {
   type: 'button',
   class: 'ml-1 text-xs text-gray-400 hover:text-amber-500 disabled:opacity-50',
-  disabled: buttonProps.busy,
-  title: t('admin.users.platformQuota.reset.button'),
+  disabled: buttonProps.busy || !buttonProps.configured,
+  title: t(buttonProps.configured ? 'admin.users.platformQuota.reset.button' : 'admin.users.platformQuota.reset.unavailable'),
   onClick: () => buttonEmit('click'),
 }, '↻')
 
@@ -410,9 +423,11 @@ async function load(preserveNotice = false) {
     const data = await adminAPI.users.getPlatformQuotas(props.user.id)
     quotas.value = normalize(data.platform_quotas || [])
     platformBaseline.value = serializePlatformQuotas()
+    savedConfigured.value = configuredPlatforms(data.platform_quotas || [])
   } catch {
     appStore.showError(t('admin.users.platformQuota.loadFailed'))
     quotas.value = PLATFORMS.map(emptyRow)
+    savedConfigured.value = new Set()
     platformBaseline.value = serializePlatformQuotas()
   } finally {
     loading.value = false
@@ -529,6 +544,7 @@ async function onReset(platform: PlatformQuotaPlatform, quotaWindow: PlatformQuo
   try {
     const data = await adminAPI.users.resetPlatformQuotaWindow(props.user.id, platform, quotaWindow)
     quotas.value = normalize(data.platform_quotas || [])
+    savedConfigured.value = configuredPlatforms(data.platform_quotas || [])
     platformBaseline.value = serializePlatformQuotas()
     appStore.showSuccess(t('admin.users.platformQuota.reset.success', { platform, window: translatedWindow }))
   } catch (error: any) {
