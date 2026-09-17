@@ -486,6 +486,7 @@ func (s *defaultOpenAIWSStateStore) GetSessionInvalidEncryptedContentDigests(gro
 }
 
 func (s *defaultOpenAIWSStateStore) HasAnySessionInvalidEncryptedContent() bool {
+	s.maybeCleanup()
 	s.sessionInvalidEncryptedMu.RLock()
 	defer s.sessionInvalidEncryptedMu.RUnlock()
 	return len(s.sessionInvalidEncrypted) > 0

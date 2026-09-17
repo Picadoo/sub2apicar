@@ -280,6 +280,74 @@ func TestOpenAIWSConnPool_EnsureTargetIdleAsyncFailureSuppress(t *testing.T) {
 	require.Equal(t, 2, dialer.DialCount())
 }
 
+func TestOpenAIWSConnPool_CloseWaitsForInFlightPrewarm(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
+	cfg.Gateway.OpenAIWS.MinIdlePerAccount = 1
+	cfg.Gateway.OpenAIWS.DialTimeoutSeconds = 1
+
+	pool := newOpenAIWSConnPool(cfg)
+	dialer := newOpenAIWSFirstDialBlockingCaptureDialer()
+	pool.setClientDialerForTest(dialer)
+	t.Cleanup(pool.Close)
+
+	account := &Account{ID: 281, Platform: PlatformOpenAI, Type: AccountTypeAPIKey}
+	ap := pool.getOrCreateAccountPool(account.ID)
+	ap.mu.Lock()
+	ap.lastAcquire = &openAIWSAcquireRequest{
+		Account: account,
+		WSURL:   "wss://example.com/v1/responses",
+	}
+	ap.mu.Unlock()
+
+	pool.ensureTargetIdleAsync(account.ID)
+	select {
+	case <-dialer.firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("预热拨号未开始")
+	}
+
+	closeDone := make(chan struct{})
+	go func() {
+		pool.Close()
+		close(closeDone)
+	}()
+
+	closedEarly := false
+	select {
+	case <-closeDone:
+		closedEarly = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(dialer.releaseFirst)
+
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("Close 未等待在途预热拨号结束")
+	}
+	require.Eventually(t, func() bool {
+		ap.mu.Lock()
+		defer ap.mu.Unlock()
+		return !ap.prewarmActive
+	}, time.Second, 5*time.Millisecond, "release 后应等待预热拨号完成")
+	if closedEarly {
+		t.Errorf("Close 不应在预热 goroutine 仍运行时返回")
+	}
+	dialed := dialer.DialedConns()
+	if len(dialed) != 1 {
+		t.Errorf("预期恰好完成一次预热拨号，实际为 %d", len(dialed))
+	} else if !dialed[0].isClosed() {
+		t.Errorf("Close 后完成的预热连接必须被关闭")
+	}
+
+	ap.mu.Lock()
+	defer ap.mu.Unlock()
+	if len(ap.conns) != 0 {
+		t.Errorf("关闭期间完成的预热连接不能重新进入连接池，实际连接数为 %d", len(ap.conns))
+	}
+}
+
 func TestOpenAIWSConnPool_AcquireQueueWaitMetrics(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Gateway.OpenAIWS.MaxConnsPerAccount = 1
@@ -2320,6 +2388,7 @@ type openAIWSFirstDialBlockingCaptureDialer struct {
 	mu           sync.Mutex
 	dialCount    int
 	headers      []http.Header
+	conns        []*openAIWSFakeConn
 	firstStarted chan struct{}
 	releaseFirst chan struct{}
 }
@@ -2412,6 +2481,8 @@ func (d *openAIWSFirstDialBlockingCaptureDialer) Dial(
 	d.dialCount++
 	dialNumber := d.dialCount
 	d.headers = append(d.headers, cloneHeader(headers))
+	conn := &openAIWSFakeConn{}
+	d.conns = append(d.conns, conn)
 	d.mu.Unlock()
 	if dialNumber == 1 {
 		close(d.firstStarted)
@@ -2421,7 +2492,13 @@ func (d *openAIWSFirstDialBlockingCaptureDialer) Dial(
 		case <-d.releaseFirst:
 		}
 	}
-	return &openAIWSFakeConn{}, 0, nil, nil
+	return conn, 0, nil, nil
+}
+
+func (d *openAIWSFirstDialBlockingCaptureDialer) DialedConns() []*openAIWSFakeConn {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]*openAIWSFakeConn(nil), d.conns...)
 }
 
 func (d *openAIWSFirstDialBlockingCaptureDialer) DialCount() int {
@@ -2496,6 +2573,12 @@ func (c *openAIWSFakeConn) Close() error {
 	defer c.mu.Unlock()
 	c.closed = true
 	return nil
+}
+
+func (c *openAIWSFakeConn) isClosed() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
 }
 
 type openAIWSBlockingConn struct {

@@ -151,6 +151,25 @@ func TestOpenAIWSStateStore_MaybeCleanupRemovesExpiredIncrementally(t *testing.T
 	require.Zero(t, remaining, "多轮 cleanup 后应逐步清空全部过期键")
 }
 
+func TestOpenAIWSStateStore_HasAnySessionInvalidEncryptedContentCleansExpired(t *testing.T) {
+	raw := NewOpenAIWSStateStore(nil)
+	store, ok := raw.(*defaultOpenAIWSStateStore)
+	require.True(t, ok)
+
+	raw.MarkSessionInvalidEncryptedContent(1, "expired-session", []string{"digest"}, time.Minute)
+	store.sessionInvalidEncryptedMu.Lock()
+	binding := store.sessionInvalidEncrypted["1:expired-session"]
+	binding.expiresAt = time.Now().Add(-time.Second)
+	store.sessionInvalidEncrypted["1:expired-session"] = binding
+	store.sessionInvalidEncryptedMu.Unlock()
+	store.lastCleanupUnixNano.Store(time.Now().Add(-2 * openAIWSStateStoreCleanupInterval).UnixNano())
+
+	require.False(t, raw.HasAnySessionInvalidEncryptedContent(), "过期 lineage 不应继续让热路径认为存在有效状态")
+	store.sessionInvalidEncryptedMu.RLock()
+	defer store.sessionInvalidEncryptedMu.RUnlock()
+	require.Empty(t, store.sessionInvalidEncrypted)
+}
+
 func TestEnsureBindingCapacity_EvictsOneWhenMapIsFull(t *testing.T) {
 	bindings := map[string]int{
 		"a": 1,

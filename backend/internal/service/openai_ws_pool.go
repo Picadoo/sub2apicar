@@ -870,6 +870,9 @@ type openAIWSConnPool struct {
 	workerStopCh chan struct{}
 	workerWg     sync.WaitGroup
 	closeOnce    sync.Once
+	closed       atomic.Bool
+	prewarmMu    sync.Mutex // serializes prewarm registration with Close
+	prewarmWg    sync.WaitGroup
 }
 
 func newOpenAIWSConnPool(cfg *config.Config) *openAIWSConnPool {
@@ -922,10 +925,15 @@ func (p *openAIWSConnPool) Close() {
 		return
 	}
 	p.closeOnce.Do(func() {
+		// Prevent a prewarm registration from racing with prewarmWg.Wait below.
+		p.prewarmMu.Lock()
+		p.closed.Store(true)
+		p.prewarmMu.Unlock()
 		if p.workerStopCh != nil {
 			close(p.workerStopCh)
 		}
 		p.workerWg.Wait()
+		p.prewarmWg.Wait()
 		// 遍历所有账户池，关闭全部空闲连接。
 		p.accounts.Range(func(key, value any) bool {
 			ap, ok := value.(*openAIWSAccountPool)
@@ -1146,6 +1154,9 @@ func (p *openAIWSConnPool) Acquire(ctx context.Context, req openAIWSAcquireReque
 func (p *openAIWSConnPool) acquire(ctx context.Context, req openAIWSAcquireRequest, retry int, queueWait *openAIWSAcquireQueueWait) (*openAIWSConnLease, error) {
 	if p == nil || req.Account == nil || req.Account.ID <= 0 {
 		return nil, errors.New("invalid ws acquire request")
+	}
+	if p.closed.Load() {
+		return nil, errOpenAIWSConnClosed
 	}
 	if stringsTrim(req.WSURL) == "" {
 		return nil, errors.New("ws url is empty")
@@ -1417,6 +1428,14 @@ retryAcquire:
 		ap = p.getOrCreateAccountPool(accountID)
 		ap.mu.Lock()
 		ap.creating--
+		if p.closed.Load() {
+			ap.signalChangedLocked()
+			ap.mu.Unlock()
+			if conn != nil {
+				conn.close()
+			}
+			return nil, errOpenAIWSConnClosed
+		}
 		if ap.generation != acquireGeneration {
 			ap.signalChangedLocked()
 			ap.mu.Unlock()
@@ -1853,19 +1872,39 @@ func (p *openAIWSConnPool) ensureTargetIdleAsync(accountID int64) {
 	if !ok || ap == nil {
 		return
 	}
+	p.prewarmMu.Lock()
+	if p.closed.Load() {
+		p.prewarmMu.Unlock()
+		return
+	}
+	p.prewarmWg.Add(1)
+	p.prewarmMu.Unlock()
+	launched := false
+	defer func() {
+		if !launched {
+			p.prewarmWg.Done()
+		}
+	}()
 	ap.mu.Lock()
-	defer ap.mu.Unlock()
+	if p.closed.Load() {
+		ap.mu.Unlock()
+		return
+	}
 	if ap.lastAcquire == nil {
+		ap.mu.Unlock()
 		return
 	}
 	if ap.prewarmActive {
+		ap.mu.Unlock()
 		return
 	}
 	now := time.Now()
 	if !ap.prewarmUntil.IsZero() && now.Before(ap.prewarmUntil) {
+		ap.mu.Unlock()
 		return
 	}
 	if p.shouldSuppressPrewarmLocked(ap, now) {
+		ap.mu.Unlock()
 		return
 	}
 	effectiveMaxConns := p.maxConnsHardCap()
@@ -1875,10 +1914,12 @@ func (p *openAIWSConnPool) ensureTargetIdleAsync(accountID int64) {
 	target := p.targetConnCountLocked(ap, effectiveMaxConns)
 	current := len(ap.conns) + ap.creating
 	if current >= target {
+		ap.mu.Unlock()
 		return
 	}
 	need = target - current
 	if need <= 0 {
+		ap.mu.Unlock()
 		return
 	}
 	req = cloneOpenAIWSAcquireRequest(*ap.lastAcquire)
@@ -1889,8 +1930,12 @@ func (p *openAIWSConnPool) ensureTargetIdleAsync(accountID int64) {
 	}
 	ap.creating += need
 	p.metrics.scaleUpTotal.Add(int64(need))
-
-	go p.prewarmConns(accountID, req, need, generation)
+	ap.mu.Unlock()
+	launched = true
+	go func() {
+		defer p.prewarmWg.Done()
+		p.prewarmConns(accountID, req, need, generation)
+	}()
 }
 
 func (p *openAIWSConnPool) targetConnCountLocked(ap *openAIWSAccountPool, maxConns int) int {
@@ -1939,9 +1984,17 @@ func (p *openAIWSConnPool) prewarmConns(accountID int64, req openAIWSAcquireRequ
 		generation = generations[0]
 	}
 	staleTarget := false
+	remaining := total
 	defer func() {
 		if ap, ok := p.getAccountPool(accountID); ok && ap != nil {
 			ap.mu.Lock()
+			if remaining > 0 && ap.creating > 0 {
+				release := remaining
+				if release > ap.creating {
+					release = ap.creating
+				}
+				ap.creating -= release
+			}
 			ap.prewarmActive = false
 			ap.signalChangedLocked()
 			ap.mu.Unlock()
@@ -1955,6 +2008,9 @@ func (p *openAIWSConnPool) prewarmConns(accountID int64, req openAIWSAcquireRequ
 	}()
 
 	for i := 0; i < total; i++ {
+		if p.closed.Load() {
+			return
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), p.dialTimeout()+openAIWSConnPrewarmExtraDelay)
 		conn, err := p.dialConn(ctx, req)
 		cancel()
@@ -1969,6 +2025,17 @@ func (p *openAIWSConnPool) prewarmConns(accountID int64, req openAIWSAcquireRequ
 		ap.mu.Lock()
 		if ap.creating > 0 {
 			ap.creating--
+		}
+		if remaining > 0 {
+			remaining--
+		}
+		if p.closed.Load() {
+			ap.signalChangedLocked()
+			ap.mu.Unlock()
+			if conn != nil {
+				conn.close()
+			}
+			return
 		}
 		if err != nil {
 			ap.prewarmFails++
