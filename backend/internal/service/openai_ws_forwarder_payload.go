@@ -468,6 +468,21 @@ func openAIWSRawMessageFromResult(parent []byte, value gjson.Result) json.RawMes
 	return json.RawMessage(value.Raw)
 }
 
+const openAIWSReplayDetachNonInputMinBytes = 64 << 10
+
+// openAIWSShouldDetachInputFromPayload avoids retaining a large request solely
+// because replay history needs a small input slice. Input-dominant payloads keep
+// the zero-copy path because copying them would add the same large allocation
+// that replay is intended to avoid.
+func openAIWSShouldDetachInputFromPayload(payload []byte, inputValue gjson.Result) bool {
+	inputBytes := len(inputValue.Raw)
+	if inputBytes == 0 || len(payload) <= inputBytes {
+		return false
+	}
+	nonInputBytes := len(payload) - inputBytes
+	return nonInputBytes >= openAIWSReplayDetachNonInputMinBytes && nonInputBytes > inputBytes
+}
+
 func normalizeOpenAIWSJSONForCompare(raw []byte) ([]byte, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
@@ -522,6 +537,7 @@ func openAIWSExtractNormalizedInputSequence(payload []byte) ([]json.RawMessage, 
 	if !inputValue.Exists() {
 		return nil, false, nil
 	}
+	detachInput := openAIWSShouldDetachInputFromPayload(payload, inputValue)
 	if inputValue.Type == gjson.JSON {
 		if inputValue.IsArray() {
 			// gjson 宽容解析；数组整体先做零分配合法性校验，避免把断裂
@@ -533,17 +549,29 @@ func openAIWSExtractNormalizedInputSequence(payload []byte) ([]json.RawMessage, 
 			elems := inputValue.Array()
 			items := make([]json.RawMessage, 0, len(elems))
 			for _, elem := range elems {
-				items = append(items, openAIWSRawMessageFromResult(payload, elem))
+				item := openAIWSRawMessageFromResult(payload, elem)
+				if detachInput {
+					item = json.RawMessage(bytes.Clone(item))
+				}
+				items = append(items, item)
 			}
 			return items, true, nil
 		}
-		return []json.RawMessage{openAIWSRawMessageFromResult(payload, inputValue)}, true, nil
+		item := openAIWSRawMessageFromResult(payload, inputValue)
+		if detachInput {
+			item = json.RawMessage(bytes.Clone(item))
+		}
+		return []json.RawMessage{item}, true, nil
 	}
 	if inputValue.Type == gjson.String {
 		encoded, _ := json.Marshal(inputValue.String())
 		return []json.RawMessage{encoded}, true, nil
 	}
-	return []json.RawMessage{openAIWSRawMessageFromResult(payload, inputValue)}, true, nil
+	item := openAIWSRawMessageFromResult(payload, inputValue)
+	if detachInput {
+		item = json.RawMessage(bytes.Clone(item))
+	}
+	return []json.RawMessage{item}, true, nil
 }
 
 func openAIWSInputIsPrefixExtended(previousPayload, currentPayload []byte) (bool, error) {
