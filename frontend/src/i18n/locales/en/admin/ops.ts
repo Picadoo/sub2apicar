@@ -495,6 +495,7 @@ export default {
           account: 'Account-level Metrics'
         },
         metrics: {
+          modelMismatch: 'Upstream Model Mismatch Count',
           successRate: 'Success Rate (%)',
           errorRate: 'Error Rate (%)',
           upstreamErrorRate: 'Upstream Error Rate (%)',
@@ -513,6 +514,7 @@ export default {
           overloadAccountCount: 'Overloaded Accounts'
         },
         metricDescriptions: {
+          modelMismatch: 'Requests whose sent and upstream-declared models differ in the window, ignoring GPT date suffixes. Alerts list accounts and models and reuse cooldown/event deduplication. No retries, account switching or billing changes. Missing declarations are excluded; matching names do not prove equal quality.',
           successRate: 'Percentage of successful requests in the window (0-100).',
           errorRate: 'Percentage of failed requests in the window (0-100).',
           upstreamErrorRate: 'Percentage of upstream failures in the window (0-100).',

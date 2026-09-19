@@ -495,6 +495,7 @@ export default {
           account: '账号级别指标'
         },
         metrics: {
+          modelMismatch: '上游模型不一致次数',
           successRate: '成功率 (%)',
           errorRate: '错误率 (%)',
           upstreamErrorRate: '上游错误率 (%)',
@@ -513,6 +514,7 @@ export default {
           overloadAccountCount: '过载账号数'
         },
         metricDescriptions: {
+          modelMismatch: '统计窗口内实际发往上游与响应自报模型不一致的请求数，忽略 GPT 日期版本后缀。告警列出账号及模型，复用冷却与事件合并；不会自动重试、换号或改计费。上游未报告模型时不计入，模型名相同不代表质量相同。',
           successRate: '统计窗口内成功请求占比（0~100）。',
           errorRate: '统计窗口内失败请求占比（0~100）。',
           upstreamErrorRate: '统计窗口内上游错误占比（0~100）。',

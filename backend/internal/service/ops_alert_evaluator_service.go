@@ -226,7 +226,7 @@ func (s *OpsAlertEvaluatorService) evaluateOnce(interval time.Duration) {
 		windowStart := safeEnd.Add(-time.Duration(windowMinutes) * time.Minute)
 		windowEnd := safeEnd
 
-		metricValue, ok := s.computeRuleMetric(ctx, rule, systemMetrics, windowStart, windowEnd, scopePlatform, scopeGroupID)
+		metricValue, details, ok := s.computeRuleMetricWithDetails(ctx, rule, systemMetrics, windowStart, windowEnd, scopePlatform, scopeGroupID)
 		if !ok {
 			s.resetRuleState(rule.ID, now)
 			continue
@@ -276,7 +276,7 @@ func (s *OpsAlertEvaluatorService) evaluateOnce(interval time.Duration) {
 				Severity:       strings.TrimSpace(rule.Severity),
 				Status:         OpsAlertStatusFiring,
 				Title:          fmt.Sprintf("%s: %s", strings.TrimSpace(rule.Severity), strings.TrimSpace(rule.Name)),
-				Description:    buildOpsAlertDescription(rule, metricValue, windowMinutes, scopePlatform, scopeGroupID),
+				Description:    buildOpsAlertDescription(rule, metricValue, windowMinutes, scopePlatform, scopeGroupID) + details,
 				MetricValue:    float64Ptr(metricValue),
 				ThresholdValue: float64Ptr(rule.Threshold),
 				Dimensions:     buildOpsAlertDimensions(scopePlatform, scopeGroupID),

@@ -116,6 +116,14 @@ const groupOptions = computed<SelectOption[]>(() => {
 
 const metricDefinitions = computed(() => {
   return [
+    {
+      type: 'upstream_model_mismatch_count',
+      group: 'system',
+      label: t('admin.ops.alertRules.metrics.modelMismatch'),
+      description: t('admin.ops.alertRules.metricDescriptions.modelMismatch'),
+      recommendedOperator: '>=',
+      recommendedThreshold: 1
+    },
     // System-level metrics
     {
       type: 'success_rate',

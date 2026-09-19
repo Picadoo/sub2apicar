@@ -675,6 +675,7 @@ export type OpsPhase = string
 export type AlertSeverity = 'critical' | 'warning' | 'info'
 export type ThresholdMode = 'count' | 'percentage' | 'both'
 export type MetricType =
+  | 'upstream_model_mismatch_count'
   | 'success_rate'
   | 'error_rate'
   | 'upstream_error_rate'

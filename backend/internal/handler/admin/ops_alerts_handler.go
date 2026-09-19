@@ -17,6 +17,7 @@ import (
 )
 
 var validOpsAlertMetricTypes = []string{
+	"upstream_model_mismatch_count",
 	"success_rate",
 	"error_rate",
 	"upstream_error_rate",
