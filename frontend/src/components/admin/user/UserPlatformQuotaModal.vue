@@ -482,6 +482,7 @@ function onClearAll() {
 
 async function onSave() {
   if (!props.user) return
+  // 拒绝非法数值，避免误存为无限额；保留拼车窗口的独立保存逻辑。
   const invalid: string[] = []
   for (const row of quotas.value) {
     for (const quotaWindow of ['daily', 'weekly', 'monthly'] as const) {
