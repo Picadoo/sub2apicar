@@ -48,8 +48,8 @@ func TestAccountWindowSharedPoolModeSurvivesStaleAccountEdit(t *testing.T) {
 			repo, mock := newWindowQuotaRepoSQLMock(t)
 			mock.ExpectQuery(`SELECT[\s\S]*window_quota_shared_pool_mode[\s\S]*FOR NO KEY UPDATE`).
 				WithArgs(int64(7), service.PlatformOpenAI, service.AccountTypeOAuth, `{}`, nil).
-				WillReturnRows(sqlmock.NewRows([]string{"identity", "ollama_identity", "proxy_identity", "probe", "rate_sync", "snapshot", "ollama_session", "ollama_auto", "ollama_snapshot", "shared_pool_mode"}).
-					AddRow(true, false, true, nil, nil, nil, nil, nil, nil, []byte(enabled)))
+				WillReturnRows(sqlmock.NewRows([]string{"identity", "ollama_identity", "proxy_identity", "probe", "rate_sync", "snapshot", "ollama_session", "ollama_auto", "ollama_snapshot", "opencode_identity", "opencode_auto", "opencode_snapshot", "shared_pool_mode"}).
+					AddRow(true, false, true, nil, nil, nil, nil, nil, nil, false, nil, nil, []byte(enabled)))
 			account := &service.Account{ID: 7, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
 				Extra: map[string]any{service.AccountWindowSharedPoolModeExtraKey: enabled != "true", "unrelated": "keep"}}
 			merged, err := lockAndMergeAccountProbeExtra(context.Background(), repo.client, account, nil, nil)
