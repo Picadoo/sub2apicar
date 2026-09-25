@@ -734,6 +734,9 @@ export default {
       },
       // OpenAI specific hints
       openai: {
+        requestTimezone: '请求时区（仅此账号）',
+        requestTimezoneUnchanged: '保持原样（不覆盖客户端）',
+        requestTimezoneHint: '仅覆盖此账号发往上游的环境与搜索时区；其他账号不受影响。可在授权前选择，创建时保存。不改变浏览器登录时区、代理出口或官方额度重置时间。',
         baseUrlHint: '留空使用官方 OpenAI API',
         apiKeyHint: '您的 OpenAI API Key',
         oauthPassthrough: '自动透传（仅替换认证）',

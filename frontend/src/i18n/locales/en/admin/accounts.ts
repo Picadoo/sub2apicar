@@ -617,6 +617,9 @@ export default {
       },
       // OpenAI specific hints
       openai: {
+        requestTimezone: 'Request timezone (this account only)',
+        requestTimezoneUnchanged: 'Keep unchanged (use client timezone)',
+        requestTimezoneHint: 'Override environment and search timezones only for this account. Choose before authorization; saved when the account is created. Does not change browser login timezone, proxy location, or upstream quota resets.',
         baseUrlHint: 'Leave default for official OpenAI API',
         apiKeyHint: 'Your OpenAI API Key',
         oauthPassthrough: 'Auto passthrough (auth only)',

@@ -328,6 +328,33 @@ describe('EditAccountModal', () => {
     authIsSimpleMode.value = true
   })
 
+  it.each(['', 'Asia/Tokyo'])('preserves existing timezone on unrelated edits: %s', async (timezone) => {
+    const account = buildAccount()
+    account.extra = timezone ? { openai_request_timezone: timezone } : {}
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    expect((wrapper.get('[data-testid="openai-request-timezone"]').element as HTMLSelectElement).value).toBe(timezone)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    if (timezone) expect(extra.openai_request_timezone).toBe(timezone)
+    else expect(extra).not.toHaveProperty('openai_request_timezone')
+    wrapper.unmount()
+  })
+
+  it('explicitly clears a saved timezone without changing the account prop', async () => {
+    const account = buildAccount()
+    account.extra = { openai_request_timezone: 'America/Los_Angeles' }
+    updateAccountMock.mockReset().mockResolvedValue(account)
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+    const wrapper = mountModal(account)
+    await wrapper.get('[data-testid="openai-request-timezone"]').setValue('')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra?.openai_request_timezone).toBe('')
+    expect(account.extra.openai_request_timezone).toBe('America/Los_Angeles')
+    wrapper.unmount()
+  })
+
   it('loads and submits the shared window quota account flag', async () => {
     const account = buildAccount()
     account.extra = { window_quota_shared: true }
