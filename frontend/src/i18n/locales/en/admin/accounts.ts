@@ -1551,8 +1551,16 @@ export default {
       // Stats Modal
       viewStats: 'View Stats',
       usageStatistics: 'Usage Statistics',
+      allTimeUsage: 'All retained history (averages based on active days)',
       last30DaysUsage: 'Last 30 days usage statistics (based on actual usage days)',
       stats: {
+        period: 'Period',
+        last30Days: 'Last 30 days',
+        allTime: 'All time',
+        totalCostAllTime: 'All-Time Total Cost',
+        totalRequestsAllTime: 'All-Time Total Requests',
+        totalTokensAllTime: 'All-Time Total',
+        usageTrendAllTime: 'All-Time Cost & Request Trend',
         totalCost: '30-Day Total Cost',
         accumulatedCost: 'Accumulated cost',
         standardCost: 'Standard',

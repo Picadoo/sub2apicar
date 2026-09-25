@@ -1637,8 +1637,16 @@ export default {
       // Stats Modal
       viewStats: '查看统计',
       usageStatistics: '使用统计',
+      allTimeUsage: '本站保留的全部历史（日均基于实际使用天数）',
       last30DaysUsage: '近30天使用统计（日均基于实际使用天数）',
       stats: {
+        period: '统计范围',
+        last30Days: '最近 30 天',
+        allTime: '全部历史',
+        totalCostAllTime: '全部总费用',
+        totalRequestsAllTime: '全部总请求',
+        totalTokensAllTime: '全部历史总计',
+        usageTrendAllTime: '全部历史费用与请求趋势',
         totalCost: '30天总费用',
         accumulatedCost: '累计成本',
         standardCost: '标准计费',

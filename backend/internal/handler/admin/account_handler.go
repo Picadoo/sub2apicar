@@ -1733,6 +1733,9 @@ func (h *AccountHandler) GetStats(c *gin.Context) {
 	now := timezone.Now()
 	endTime := timezone.StartOfDay(now.AddDate(0, 0, 1))
 	startTime := timezone.StartOfDay(now.AddDate(0, 0, -days+1))
+	if c.Query("days") == "all" {
+		startTime = time.Time{} // Repository resolves the first retained usage record.
+	}
 
 	stats, err := h.accountUsageService.GetAccountUsageStats(c.Request.Context(), accountID, startTime, endTime)
 	if err != nil {

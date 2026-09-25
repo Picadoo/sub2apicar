@@ -917,6 +917,19 @@ func (r *usageLogRepository) GetUpstreamEndpointStatsWithFilters(ctx context.Con
 
 // GetAccountUsageStats returns comprehensive usage statistics for an account over a time range
 func (r *usageLogRepository) GetAccountUsageStats(ctx context.Context, accountID int64, startTime, endTime time.Time) (resp *AccountUsageStatsResponse, err error) {
+	// A zero start means all retained history, without the rolling 90-day limit.
+	if startTime.IsZero() {
+		var first sql.NullTime
+		if err := scanSingleRow(ctx, r.sql,
+			"SELECT MIN(created_at) FROM usage_logs WHERE account_id = $1 AND created_at < $2",
+			[]any{accountID, endTime}, &first); err != nil {
+			return nil, err
+		}
+		startTime = timezone.StartOfDay(endTime.AddDate(0, 0, -1))
+		if first.Valid {
+			startTime = timezone.StartOfDay(first.Time.In(endTime.Location()))
+		}
+	}
 	daysCount := int(endTime.Sub(startTime).Hours()/24) + 1
 	if daysCount <= 0 {
 		daysCount = 30

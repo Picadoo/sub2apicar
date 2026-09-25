@@ -20,7 +20,7 @@
           <div>
             <div class="font-semibold text-gray-900 dark:text-gray-100">{{ account.name }}</div>
             <div class="text-xs text-gray-500 dark:text-gray-400">
-              {{ t('admin.accounts.last30DaysUsage') }}
+              {{ t(period === 'all' ? 'admin.accounts.allTimeUsage' : 'admin.accounts.last30DaysUsage') }}
             </div>
           </div>
         </div>
@@ -34,6 +34,14 @@
         >
           {{ account.status }}
         </span>
+      </div>
+
+      <div class="flex items-center gap-3">
+        <label for="account-stats-period" class="text-sm text-gray-600 dark:text-gray-300">{{ t('admin.accounts.stats.period') }}</label>
+        <select id="account-stats-period" v-model="period" class="input w-auto">
+          <option :value="30">{{ t('admin.accounts.stats.last30Days') }}</option>
+          <option value="all">{{ t('admin.accounts.stats.allTime') }}</option>
+        </select>
       </div>
 
       <!-- Loading State -->
@@ -50,7 +58,7 @@
           >
             <div class="mb-2 flex items-center justify-between">
               <span class="text-xs font-medium text-gray-500 dark:text-gray-400">{{
-                t('admin.accounts.stats.totalCost')
+                t(period === 'all' ? 'admin.accounts.stats.totalCostAllTime' : 'admin.accounts.stats.totalCost')
               }}</span>
               <div class="rounded-lg bg-emerald-100 p-1.5 dark:bg-emerald-900/30">
                 <Icon name="dollar" size="sm" class="text-emerald-600 dark:text-emerald-400" />
@@ -76,14 +84,14 @@
           >
             <div class="mb-2 flex items-center justify-between">
               <span class="text-xs font-medium text-gray-500 dark:text-gray-400">{{
-                t('admin.accounts.stats.totalRequests')
+                t(period === 'all' ? 'admin.accounts.stats.totalRequestsAllTime' : 'admin.accounts.stats.totalRequests')
               }}</span>
               <div class="rounded-lg bg-blue-100 p-1.5 dark:bg-blue-900/30">
                 <Icon name="bolt" size="sm" class="text-blue-600 dark:text-blue-400" />
               </div>
             </div>
             <p class="text-2xl font-bold text-gray-900 dark:text-white">
-              {{ formatNumber(stats.summary.total_requests) }}
+              {{ stats.summary.total_requests.toLocaleString() }}
             </p>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
               {{ t('admin.accounts.stats.totalCalls') }}
@@ -302,7 +310,7 @@
             <div class="space-y-2">
               <div class="flex items-center justify-between">
                 <span class="text-xs text-gray-500 dark:text-gray-400">{{
-                  t('admin.accounts.stats.totalTokens')
+                  t(period === 'all' ? 'admin.accounts.stats.totalTokensAllTime' : 'admin.accounts.stats.totalTokens')
                 }}</span>
                 <span class="text-sm font-semibold text-gray-900 dark:text-white">{{
                   formatTokens(stats.summary.total_tokens)
@@ -395,7 +403,7 @@
         <!-- Usage Trend Chart -->
         <div class="card p-4">
           <h3 class="mb-4 text-sm font-semibold text-gray-900 dark:text-white">
-            {{ t('admin.accounts.stats.usageTrend') }}
+            {{ t(period === 'all' ? 'admin.accounts.stats.usageTrendAllTime' : 'admin.accounts.stats.usageTrend') }}
           </h3>
           <div class="h-64">
             <Line v-if="trendChartData" :data="trendChartData" :options="lineChartOptions" />
@@ -492,6 +500,8 @@ const emit = defineEmits<{
   (e: 'close'): void
 }>()
 
+const period = ref<number | 'all'>('all')
+let requestId = 0
 const loading = ref(false)
 const stats = ref<AccountUsageStatsResponse | null>(null)
 
@@ -642,31 +652,25 @@ const lineChartOptions = computed(() => ({
   }
 }))
 
-// Load stats when modal opens
-watch(
-  () => props.show,
-  async (newVal) => {
-    if (newVal && props.account) {
-      await loadStats()
-    } else {
-      stats.value = null
-    }
-  }
-)
-
 const loadStats = async () => {
-  if (!props.account) return
-
+  const currentRequest = ++requestId
+  stats.value = null
+  if (!props.show || !props.account) {
+    loading.value = false
+    return
+  }
   loading.value = true
   try {
-    stats.value = await adminAPI.accounts.getStats(props.account.id, 30)
+    const result = await adminAPI.accounts.getStats(props.account.id, period.value)
+    if (currentRequest === requestId) stats.value = result
   } catch (error) {
-    console.error('Failed to load account stats:', error)
-    stats.value = null
+    if (currentRequest === requestId) console.error('Failed to load account stats:', error)
   } finally {
-    loading.value = false
+    if (currentRequest === requestId) loading.value = false
   }
 }
+
+watch([() => props.show, () => props.account?.id, period], loadStats, { immediate: true })
 
 const handleClose = () => {
   emit('close')
