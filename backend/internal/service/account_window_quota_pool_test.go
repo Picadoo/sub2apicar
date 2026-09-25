@@ -1149,3 +1149,52 @@ func TestEqualizeAccountActiveMemberLimits_UsesCurrentCeilings(t *testing.T) {
 		t.Fatalf("results len = %d, want 2", len(results))
 	}
 }
+
+// Both windows expire independently, including before the background worker runs.
+func TestWindowDonationExpiresWithItsOwnWindow(t *testing.T) {
+	now := time.Now().UTC()
+	past := now.Add(-time.Minute)
+	future := now.Add(time.Hour)
+	for _, expiredWindow := range []string{WindowType5h, WindowType7d} {
+		t.Run(expiredWindow, func(t *testing.T) {
+			records := []UserAccountWindowQuotaRecord{
+				awqRec(1, WindowType5h, 23, 10, 1),
+				awqRec(1, WindowType7d, 23, 10, 1),
+			}
+			for i := range records {
+				records[i].WindowResetAt = &future
+				if records[i].WindowType == expiredWindow {
+					records[i].WindowResetAt = &past
+				}
+			}
+			effective := effectiveWindowQuotaRecordsAt(records, now)
+			for _, record := range effective {
+				require.Equal(t, float64(23), record.LimitPercent)
+				if record.WindowType == expiredWindow {
+					require.Zero(t, record.DonatePoolFraction)
+					require.Zero(t, record.AttributedPercent)
+					require.Nil(t, record.WindowResetAt)
+				} else {
+					require.Equal(t, float64(1), record.DonatePoolFraction)
+					require.Equal(t, float64(10), record.AttributedPercent)
+					require.Equal(t, &future, record.WindowResetAt)
+				}
+			}
+			pv := buildAccountWindowPoolView(records)
+			pv.clearExpiredUsage(now)
+			if expiredWindow == WindowType5h {
+				require.Zero(t, pv.frac5h[1])
+				require.Equal(t, float64(23), pv.effective5hLimit(1))
+				require.Equal(t, float64(1), pv.frac7d[1])
+			} else {
+				require.Zero(t, pv.frac7d[1])
+				require.Equal(t, float64(23), pv.effective7dLimit(1))
+				require.Equal(t, float64(1), pv.frac5h[1])
+			}
+			// Reads must not mutate stored state; unknown reset times cannot imply expiry.
+			require.Equal(t, float64(1), records[0].DonatePoolFraction)
+			unknown := awqRec(1, expiredWindow, 23, 10, 1)
+			require.Equal(t, unknown, effectiveWindowQuotaRecordAt(unknown, now))
+		})
+	}
+}

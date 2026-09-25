@@ -108,7 +108,7 @@ func (r *userAccountWindowQuotaRepository) ApplyWindowSharesFromCheckpoint(
 			}
 			sameWindow := candidate.ResetAt == nil || legacyCheckpointMatchesCandidate(decodedRaw, candidate) || membersMatchCandidateWindow(members, candidate.ResetAt)
 			if !sameWindow {
-				if err := resetAccountWindowMembersInTx(txCtx, client, accountID, window, candidate.ResetAt, window == service.WindowType5h); err != nil {
+				if err := resetAccountWindowMembersInTx(txCtx, client, accountID, window, candidate.ResetAt); err != nil {
 					return err
 				}
 				for i := range members {
@@ -160,7 +160,7 @@ func (r *userAccountWindowQuotaRepository) ApplyWindowSharesFromCheckpoint(
 			if err != nil {
 				return err
 			}
-			if err := resetAccountWindowMembersInTx(txCtx, client, accountID, window, winner.ResetAt, window == service.WindowType5h); err != nil {
+			if err := resetAccountWindowMembersInTx(txCtx, client, accountID, window, winner.ResetAt); err != nil {
 				return err
 			}
 			winner.PendingBasisByUser = make(map[int64]float64)
@@ -602,14 +602,14 @@ func settlePendingOfficialDeltaInTx(ctx context.Context, client *dbent.Client, m
 	return roundWindowPercent(math.Max(0, deltaOfficial-allocated)), nil
 }
 
-func resetAccountWindowMembersInTx(ctx context.Context, client *dbent.Client, accountID int64, window string, resetAt *time.Time, clearDonation bool) error {
+func resetAccountWindowMembersInTx(ctx context.Context, client *dbent.Client, accountID int64, window string, resetAt *time.Time) error {
 	const q = `UPDATE user_account_window_quotas
 		SET attributed_percent = 0,
-			donate_pool_fraction = CASE WHEN $4 THEN 0 ELSE donate_pool_fraction END,
+			donate_pool_fraction = 0,
 			window_reset_at = $3,
-			updated_at = $5
+			updated_at = $4
 		WHERE account_id = $1 AND window_type = $2 AND deleted_at IS NULL`
-	_, err := client.ExecContext(ctx, q, accountID, window, nullableTime(resetAt), clearDonation, time.Now())
+	_, err := client.ExecContext(ctx, q, accountID, window, nullableTime(resetAt), time.Now())
 	if err != nil {
 		return fmt.Errorf("reset account %d window %s for new boundary: %w", accountID, window, err)
 	}
@@ -823,7 +823,7 @@ func recomputeWindowSharesInTx(txCtx context.Context, client *dbent.Client, acco
 }
 
 // ResetWindowForAccountIfDue 在账号行锁事务内清理到期窗口及其 durable checkpoint。
-// 新窗口若已先提交 future boundary，本次条件更新为 no-op；否则 5h donation 必须一并清零。
+// 新窗口若已先提交 future boundary，本次条件更新为 no-op；否则该窗口 donation 必须一并清零。
 func (r *userAccountWindowQuotaRepository) ResetWindowForAccountIfDue(ctx context.Context, accountID int64, window string, dueAt time.Time) (bool, error) {
 	reset := false
 	err := r.withWindowQuotaTx(ctx, func(txCtx context.Context, client *dbent.Client) error {
@@ -845,7 +845,7 @@ func (r *userAccountWindowQuotaRepository) ResetWindowForAccountIfDue(ctx contex
 
 		const q = `UPDATE user_account_window_quotas AS target
 			SET attributed_percent = 0,
-				donate_pool_fraction = CASE WHEN $2 = '5h' THEN 0 ELSE target.donate_pool_fraction END,
+				donate_pool_fraction = 0,
 				window_reset_at = NULL, updated_at = $4
 			WHERE target.account_id = $1 AND target.window_type = $2 AND target.deleted_at IS NULL
 			  AND EXISTS (
@@ -1411,7 +1411,7 @@ func (r *userAccountWindowQuotaRepository) SetDonatePoolFraction(ctx context.Con
 	})
 }
 
-// ListDueResets 返回所有已到期窗口；baseline-only 与 5h donation-only 窗口也必须清理。
+// ListDueResets 返回所有已到期窗口；baseline-only 与 donation-only 窗口也必须清理。
 func (r *userAccountWindowQuotaRepository) ListDueResets(ctx context.Context, now time.Time) ([]service.AccountWindowReset, error) {
 	client := clientFromContext(ctx, r.client)
 	const q = `SELECT DISTINCT q.account_id, q.window_type

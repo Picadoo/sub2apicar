@@ -98,7 +98,7 @@ type UserAccountWindowQuotaRecord struct {
 	LimitPercent      float64
 	AttributedPercent float64
 	WindowResetAt     *time.Time
-	// DonatePoolFraction 是用户愿意捐入 5h 救急池的比例（占自己 5h 上限），∈[0,1]；仅 5h 行有意义。
+	// DonatePoolFraction 是用户愿意捐入救急池的比例（占自己该窗口上限），∈[0,1]；仅当前窗口有效。
 	DonatePoolFraction float64
 }
 
@@ -857,6 +857,7 @@ func (pv *accountWindowPoolView) clearExpiredUsage(now time.Time) {
 	for userID, resetAt := range pv.reset7d {
 		if resetAt != nil && !resetAt.After(now) {
 			pv.used7d[userID] = 0
+			pv.frac7d[userID] = 0
 			delete(pv.reset7d, userID)
 		}
 	}
@@ -996,9 +997,7 @@ func effectiveWindowQuotaRecordAt(record UserAccountWindowQuotaRecord, now time.
 	}
 	record.AttributedPercent = 0
 	record.WindowResetAt = nil
-	if record.WindowType == WindowType5h {
-		record.DonatePoolFraction = 0
-	}
+	record.DonatePoolFraction = 0
 	return record
 }
 
