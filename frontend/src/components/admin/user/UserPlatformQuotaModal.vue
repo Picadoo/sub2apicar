@@ -212,7 +212,7 @@ import {
   setAccountWindowLimit,
   type AccountWindowQuotaItem,
 } from '@/api/accountWindowQuota'
-import { PLATFORM_QUOTA_PLATFORMS } from '@/api/admin/users'
+import { platformQuotaPlatforms } from '@/api/admin/users'
 import type { AdminUser, PlatformQuotaItem, PlatformQuotaPlatform, PlatformQuotaWindow } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 
@@ -366,7 +366,7 @@ function emptyRow(platform: PlatformQuotaPlatform): QuotaRow {
 function normalize(items: PlatformQuotaItem[]): QuotaRow[] {
   const byPlatform = new Map<PlatformQuotaPlatform, PlatformQuotaItem>()
   for (const item of items) byPlatform.set(item.platform, item)
-  return PLATFORM_QUOTA_PLATFORMS.map((platform) => {
+  return platformQuotaPlatforms().map((platform) => {
     const item = byPlatform.get(platform)
     if (!item) return emptyRow(platform)
     return {
@@ -435,7 +435,7 @@ async function load(preserveNotice = false) {
     savedConfigured.value = configuredPlatforms(data.platform_quotas || [])
   } catch {
     appStore.showError(t('admin.users.platformQuota.loadFailed'))
-    quotas.value = PLATFORM_QUOTA_PLATFORMS.map(emptyRow)
+    quotas.value = platformQuotaPlatforms().map(emptyRow)
     savedConfigured.value = new Set()
     platformBaseline.value = serializePlatformQuotas()
   } finally {
