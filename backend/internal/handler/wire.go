@@ -115,6 +115,7 @@ func ProvideGatewayHandler(
 	accountRepo service.AccountRepository,
 	accountWindowQuotaService *service.AccountWindowQuotaService,
 	coordinator *securityaudit.Coordinator,
+	geminiCachedContentService *service.GeminiCachedContentService,
 ) *GatewayHandler {
 	h := NewGatewayHandler(gatewayService, openAIGatewayService, geminiCompatService, antigravityGatewayService,
 		userService, concurrencyService, billingCacheService, usageService, apiKeyService, usageRecordWorkerPool,
@@ -122,6 +123,7 @@ func ProvideGatewayHandler(
 	h.accountRepo = accountRepo
 	h.accountWindowQuotaService = accountWindowQuotaService
 	h.securityAuditCoordinator = coordinator
+	h.geminiCachedContentService = geminiCachedContentService
 	return h
 }
 
