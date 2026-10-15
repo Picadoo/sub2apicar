@@ -154,6 +154,36 @@ func TestWSResponseCreate_ForcePriorityInjectsMissingTier(t *testing.T) {
 	require.Equal(t, OpenAIFastTierPriority, gjson.GetBytes(updated, "service_tier").String())
 }
 
+func TestWSResponseCreate_GroupForceFilteringAndBlocking(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		force    bool
+		action   string
+		wantTier string
+		blocked  bool
+	}{
+		{name: "group opt-in overrides filtering", force: true, action: BetaPolicyActionFilter, wantTier: OpenAIFastTierPriority},
+		{name: "disabled group follows filtering", action: BetaPolicyActionFilter},
+		{name: "group opt-in still honors blocking", force: true, action: BetaPolicyActionBlock, wantTier: OpenAIFastTierPriority, blocked: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			settings := openAIFastFilterPriorityPolicy()
+			settings.Rules[0].Action = tt.action
+			svc := newOpenAIGatewayServiceWithSettings(t, DefaultOpenAIFastPolicySettings())
+			ctx := withOpenAIFastPolicyContext(context.Background(), settings)
+			ctx = context.WithValue(ctx, ctxkey.Group, &Group{
+				ID: 7, Platform: PlatformComposite, Status: StatusActive, Hydrated: true, ForceOpenAIFast: tt.force,
+			})
+			account := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+			frame := []byte(`{"type":"response.create","model":"gpt-5.6-sol","service_tier":"priority"}`)
+			updated, blocked, err := svc.applyOpenAIFastPolicyToWSResponseCreate(ctx, account, "gpt-5.6-sol", frame)
+			require.NoError(t, err)
+			require.Equal(t, tt.blocked, blocked != nil)
+			require.Equal(t, tt.wantTier, gjson.GetBytes(updated, "service_tier").String())
+		})
+	}
+}
+
 func TestWSResponseCreate_GroupForceDoesNotTouchOtherFrames(t *testing.T) {
 	svc := newOpenAIGatewayServiceWithSettings(t, DefaultOpenAIFastPolicySettings())
 	account := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}

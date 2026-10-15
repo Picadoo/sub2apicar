@@ -319,6 +319,32 @@
             </div>
           </template>
 
+          <template #cell-openai_fast="{ row }">
+            <div
+              v-if="supportsGroupOpenAIFast(row.platform)"
+              class="flex items-center gap-2"
+              :title="t('admin.groups.openaiFast.hint')"
+            >
+              <Toggle
+                :data-testid="`group-fast-toggle-${row.id}`"
+                :model-value="row.force_openai_fast ?? false"
+                :disabled="togglingFastGroupIds.has(row.id)"
+                :aria-busy="togglingFastGroupIds.has(row.id)"
+                :aria-label="t('admin.groups.openaiFast.toggleForGroup', { name: row.name })"
+                class="disabled:cursor-wait disabled:opacity-50"
+                @update:model-value="handleToggleGroupFast(row, $event)"
+              />
+              <span class="whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
+                {{
+                  togglingFastGroupIds.has(row.id)
+                    ? t('common.saving')
+                    : row.force_openai_fast ? t('common.enabled') : t('common.disabled')
+                }}
+              </span>
+            </div>
+            <span v-else class="text-xs text-gray-400">—</span>
+          </template>
+
           <template #cell-capacity="{ row }">
             <GroupCapacityBadge
               v-if="capacityMap.get(row.id)"
@@ -383,7 +409,8 @@
             <div class="flex items-center gap-1">
               <button
                 @click="handleEdit(row)"
-                class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-primary-600 dark:hover:bg-dark-700 dark:hover:text-primary-400"
+                :disabled="togglingFastGroupIds.has(row.id)"
+                class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-gray-100 hover:text-primary-600 disabled:cursor-wait disabled:opacity-50 dark:hover:bg-dark-700 dark:hover:text-primary-400"
               >
                 <Icon name="edit" size="sm" />
                 <span class="text-xs">{{ t("common.edit") }}</span>
@@ -4485,6 +4512,7 @@ const allColumns = computed<Column[]>(() => {
     basic[3],
     { key: "capacity", label: t("admin.groups.columns.capacity"), sortable: false },
     { key: "usage", label: t("admin.groups.columns.usage"), sortable: false },
+    { key: "openai_fast", label: t("admin.groups.openaiFast.column"), sortable: false },
     ...basic.slice(4),
   ];
 });
@@ -4841,6 +4869,7 @@ const sortSubmitting = ref(false);
 const editingGroup = ref<AdminGroup | null>(null);
 const deletingGroup = ref<AdminGroup | null>(null);
 const duplicatingGroupIds = reactive(new Set<number>());
+const togglingFastGroupIds = reactive(new Set<number>());
 const showRateMultipliersModal = ref(false);
 const rateMultipliersGroup = ref<AdminGroup | null>(null);
 const showRPMOverridesModal = ref(false);
@@ -6435,6 +6464,33 @@ const handleRateMultipliers = (group: AdminGroup) => {
 const handleRPMOverrides = (group: AdminGroup) => {
   rpmOverridesGroup.value = group;
   showRPMOverridesModal.value = true;
+};
+
+const handleToggleGroupFast = async (group: AdminGroup, enabled: boolean) => {
+  if (!supportsGroupOpenAIFast(group.platform) || togglingFastGroupIds.has(group.id)) return;
+
+  togglingFastGroupIds.add(group.id);
+  try {
+    const updated = await adminAPI.groups.update(group.id, {
+      force_openai_fast: enabled,
+    });
+    const current = groups.value.find((item) => item.id === group.id);
+    if (current) current.force_openai_fast = updated.force_openai_fast;
+    appStore.showSuccess(
+      t(
+        updated.force_openai_fast
+          ? "admin.groups.openaiFast.enabled"
+          : "admin.groups.openaiFast.disabled",
+        { name: group.name },
+      ),
+    );
+  } catch (error) {
+    appStore.showError(
+      extractApiErrorMessage(error, t("admin.groups.openaiFast.failedToUpdate")),
+    );
+  } finally {
+    togglingFastGroupIds.delete(group.id);
+  }
 };
 
 const handleDuplicate = async (group: AdminGroup) => {

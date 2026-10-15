@@ -1380,8 +1380,13 @@ export default {
       },
       openaiFast: {
         title: 'OpenAI Fast 模式',
+        column: 'Fast',
+        toggleForGroup: '切换 {name} 的强制 Fast',
+        enabled: '已为 {name} 开启 Fast；已有 WebSocket 会话需重连',
+        disabled: '已为 {name} 关闭强制 Fast，恢复全局策略；已有 WebSocket 会话需重连',
+        failedToUpdate: '更新分组 Fast 开关失败',
         force: '强制使用 Fast（priority）',
-        hint: '开启后，此分组的 OpenAI 请求会强制写入 service_tier=priority；全局 Fast/Flex 策略仍可过滤或拦截。保存后新请求立即生效，已建立的 WebSocket 会话需重连。',
+        hint: '开启后，此分组的 OpenAI 请求优先使用 Fast，优先于全局过滤；显式拦截仍生效。关闭后恢复全局策略。新请求在保存后生效，已有 WebSocket 会话需重连。',
         free: '免费 Fast',
         freeHint: '该分组的 Fast 请求仍使用 priority 档位，但客户实际费用按同一请求的 Standard 价格计算。'
       },

@@ -1,7 +1,7 @@
 import { defineComponent, h, type PropType } from "vue";
-import { flushPromises, mount } from "@vue/test-utils";
+import { enableAutoUnmount, flushPromises, mount } from "@vue/test-utils";
 import { createPinia } from "pinia";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AdminGroup, CodexModelsManifestConfig } from "@/types";
 import GroupsView from "@/views/admin/GroupsView.vue";
@@ -12,12 +12,18 @@ const {
   getUsageSummary,
   getCapacitySummary,
   getLiveCapability,
+  updateGroup,
+  showError,
+  showSuccess,
 } = vi.hoisted(() => ({
   listGroups: vi.fn(),
   getModelAllowlistCandidates: vi.fn(),
   getUsageSummary: vi.fn(),
   getCapacitySummary: vi.fn(),
   getLiveCapability: vi.fn(),
+  updateGroup: vi.fn(),
+  showError: vi.fn(),
+  showSuccess: vi.fn(),
 }));
 
 vi.mock("@/api/admin", () => ({
@@ -30,7 +36,7 @@ vi.mock("@/api/admin", () => ({
       getCapacitySummary,
       getLiveCapability,
       create: vi.fn(),
-      update: vi.fn(),
+      update: updateGroup,
       delete: vi.fn(),
       duplicate: vi.fn(),
       updateSortOrder: vi.fn(),
@@ -44,8 +50,8 @@ vi.mock("@/api/admin", () => ({
 
 vi.mock("@/stores/app", () => ({
   useAppStore: () => ({
-    showError: vi.fn(),
-    showSuccess: vi.fn(),
+    showError,
+    showSuccess,
   }),
 }));
 
@@ -148,7 +154,7 @@ const DataTableStub = defineComponent({
   props: {
     data: { type: Array, default: () => [] },
   },
-  template: '<div><div v-if="data.length"><slot name="cell-actions" :row="data[0]" /></div></div>',
+  template: '<div><div v-for="row in data" :key="row.id"><slot name="cell-openai_fast" :row="row" /><slot name="cell-actions" :row="row" /></div></div>',
 });
 
 const BaseDialogStub = defineComponent({
@@ -232,7 +238,9 @@ const mountView = () =>
     },
   });
 
-describe("GroupsView Codex manifest binding", () => {
+enableAutoUnmount(afterEach);
+
+describe("GroupsView group controls", () => {
   beforeEach(() => {
     localStorage.clear();
     listGroups.mockReset();
@@ -240,9 +248,12 @@ describe("GroupsView Codex manifest binding", () => {
     getUsageSummary.mockReset();
     getCapacitySummary.mockReset();
     getLiveCapability.mockReset();
+    updateGroup.mockReset();
+    showError.mockReset();
+    showSuccess.mockReset();
 
     listGroups.mockResolvedValue({
-      items: [sourceGroup],
+      items: [structuredClone(sourceGroup)],
       total: 1,
       page: 1,
       page_size: 20,
@@ -287,6 +298,73 @@ describe("GroupsView Codex manifest binding", () => {
       }),
     );
 
-    wrapper.unmount();
+  });
+
+  it("opens and closes group Fast without sending other group settings", async () => {
+    const wrapper = mountView();
+    await flushPromises();
+    const toggle = wrapper.get('[data-testid="group-fast-toggle-42"]');
+    expect(toggle.attributes('aria-checked')).toBe('false');
+
+    updateGroup.mockResolvedValueOnce({ ...sourceGroup, force_openai_fast: true });
+    await toggle.trigger('click');
+    await flushPromises();
+    expect(updateGroup).toHaveBeenLastCalledWith(42, { force_openai_fast: true });
+    expect(toggle.attributes('aria-checked')).toBe('true');
+
+    updateGroup.mockResolvedValueOnce({ ...sourceGroup, force_openai_fast: false });
+    await toggle.trigger('click');
+    await flushPromises();
+    expect(updateGroup).toHaveBeenLastCalledWith(42, { force_openai_fast: false });
+    expect(toggle.attributes('aria-checked')).toBe('false');
+    expect(showSuccess).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps the previous state on failure and allows a retry", async () => {
+    const wrapper = mountView();
+    await flushPromises();
+    const toggle = wrapper.get('[data-testid="group-fast-toggle-42"]');
+    updateGroup.mockRejectedValueOnce(new Error('save failed'));
+    await toggle.trigger('click');
+    await flushPromises();
+    expect(toggle.attributes('aria-checked')).toBe('false');
+    expect(toggle.attributes('disabled')).toBeUndefined();
+    expect(showError).toHaveBeenCalledOnce();
+
+    updateGroup.mockResolvedValueOnce({ ...sourceGroup, force_openai_fast: true });
+    await toggle.trigger('click');
+    await flushPromises();
+    expect(toggle.attributes('aria-checked')).toBe('true');
+  });
+
+  it("prevents repeated saves and stale edits while a toggle is pending", async () => {
+    let resolveUpdate!: (value: AdminGroup) => void;
+    updateGroup.mockReturnValueOnce(new Promise<AdminGroup>((resolve) => { resolveUpdate = resolve; }));
+    const wrapper = mountView();
+    await flushPromises();
+    const toggle = wrapper.get('[data-testid="group-fast-toggle-42"]');
+    await toggle.trigger('click');
+    expect(toggle.attributes('disabled')).toBeDefined();
+    const edit = wrapper.findAll('button').find((button) => button.text().includes('common.edit'))!;
+    expect(edit.attributes('disabled')).toBeDefined();
+    await toggle.trigger('click');
+    expect(updateGroup).toHaveBeenCalledOnce();
+    resolveUpdate({ ...sourceGroup, force_openai_fast: true });
+    await flushPromises();
+    expect(toggle.attributes('disabled')).toBeUndefined();
+    expect(edit.attributes('disabled')).toBeUndefined();
+  });
+
+  it("only shows Fast controls for OpenAI and Composite groups", async () => {
+    listGroups.mockResolvedValueOnce({ items: [
+      structuredClone(sourceGroup),
+      { ...sourceGroup, id: 43, platform: 'composite' },
+      { ...sourceGroup, id: 44, platform: 'anthropic' },
+    ], total: 3, page: 1, page_size: 20, pages: 1 });
+    const wrapper = mountView();
+    await flushPromises();
+    expect(wrapper.find('[data-testid="group-fast-toggle-42"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="group-fast-toggle-43"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="group-fast-toggle-44"]').exists()).toBe(false);
   });
 });

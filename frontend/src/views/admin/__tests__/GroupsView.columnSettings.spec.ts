@@ -281,6 +281,7 @@ describe('admin GroupsView column settings', () => {
       expect.anything(),
     )
     expect(wrapper.find('select').text()).not.toContain('admin.groups.allGroups')
+    expect(columnKeys(wrapper)).not.toContain('openai_fast')
   })
 
   afterEach(() => {
@@ -299,6 +300,7 @@ describe('admin GroupsView column settings', () => {
       'account_count',
       'capacity',
       'usage',
+      'openai_fast',
       'status',
       'actions',
     ])
@@ -323,6 +325,7 @@ describe('admin GroupsView column settings', () => {
       'rate_multiplier',
       'is_exclusive',
       'account_count',
+      'openai_fast',
       'status',
       'actions',
     ])
@@ -342,6 +345,7 @@ describe('admin GroupsView column settings', () => {
       'is_exclusive',
       'account_count',
       'capacity',
+      'openai_fast',
       'status',
       'actions',
     ])
@@ -365,6 +369,7 @@ describe('admin GroupsView column settings', () => {
       'is_exclusive',
       'account_count',
       'capacity',
+      'openai_fast',
       'status',
       'actions',
     ])
@@ -389,6 +394,7 @@ describe('admin GroupsView column settings', () => {
       'account_count',
       'capacity',
       'usage',
+      'openai_fast',
       'status',
       'actions',
     ])

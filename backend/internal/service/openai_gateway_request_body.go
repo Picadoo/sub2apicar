@@ -1927,7 +1927,13 @@ func (s *OpenAIGatewayService) evaluateOpenAIFastPolicy(ctx context.Context, acc
 		}
 		settings = fetched
 	}
-	return evaluateOpenAIFastPolicyWithSettings(settings, openAIFastPolicyUserID(ctx), account, model, tier)
+	action, errMsg = evaluateOpenAIFastPolicyWithSettings(settings, openAIFastPolicyUserID(ctx), account, model, tier)
+	// An explicit group opt-in overrides filtering without enabling Fast for
+	// other groups. Explicit block rules still apply to the selected group.
+	if action == BetaPolicyActionFilter && tier == OpenAIFastTierPriority && openAIGroupForcesFast(ctx, account) {
+		return BetaPolicyActionPass, ""
+	}
+	return action, errMsg
 }
 
 // shouldForceOpenAIFastPriorityForMissingTier reports whether a request that
@@ -2052,8 +2058,8 @@ func openAIGroupForcesFast(ctx context.Context, account *Account) bool {
 // action=force_priority rewrites any matched known tier to "priority". Before
 // the global policy is evaluated, a trusted request Group with
 // ForceOpenAIFast enabled unconditionally sets service_tier to "priority".
-// The global policy remains authoritative and may still pass, filter, or block
-// that final value.
+// Group opt-in overrides global filtering of priority; explicit block rules
+// still apply. Groups without opt-in continue to follow the global policy.
 //
 // Rationale for normalize-on-pass: chat-completions / messages 入口在调用本
 // 函数之前已经通过 normalizeResponsesBodyServiceTier 把 service_tier 归一化
@@ -2151,7 +2157,7 @@ func writeOpenAIFastPolicyBlockedResponse(c *gin.Context, err *OpenAIFastBlocked
 //   - filter: returns a copy with top-level service_tier removed
 //   - force_priority: keeps service_tier and rewrites it to "priority"
 //   - block: returns (frame, *OpenAIFastBlockedError)
-//   - Group ForceOpenAIFast: sets priority first, then applies the global rule
+//   - Group ForceOpenAIFast: sets priority and overrides filtering, but not blocking
 //
 // Only frames whose "type" field strictly equals "response.create" are
 // inspected/mutated. Any other frame type — including the empty string —

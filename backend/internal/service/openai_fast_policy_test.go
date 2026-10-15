@@ -358,7 +358,7 @@ func TestApplyOpenAIFastPolicyToBody_GroupForceInjectsAndOverridesTier(t *testin
 	}
 }
 
-func TestApplyOpenAIFastPolicyToBody_GroupForceStillHonorsGlobalPolicy(t *testing.T) {
+func TestApplyOpenAIFastPolicyToBody_GroupForceOverridesFilteringAndRestoresOnDisable(t *testing.T) {
 	svc := newOpenAIGatewayServiceWithSettings(t, openAIFastFilterPriorityPolicy())
 	account := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
 	ctx := context.WithValue(context.Background(), ctxkey.Group, &Group{
@@ -367,8 +367,29 @@ func TestApplyOpenAIFastPolicyToBody_GroupForceStillHonorsGlobalPolicy(t *testin
 
 	updated, err := svc.applyOpenAIFastPolicyToBody(ctx, account, "gpt-5.6-sol", []byte(`{"model":"gpt-5.6-sol"}`))
 	require.NoError(t, err)
-	require.False(t, gjson.GetBytes(updated, "service_tier").Exists(),
-		"the global filter remains authoritative after the group requests priority")
+	require.Equal(t, OpenAIFastTierPriority, gjson.GetBytes(updated, "service_tier").String())
+
+	// A new authenticated request after the group is disabled uses the original
+	// filter again, including when the client explicitly requests Fast.
+	ctx = context.WithValue(ctx, ctxkey.Group, &Group{
+		ID: 7, Platform: PlatformOpenAI, Status: StatusActive, Hydrated: true,
+	})
+	updated, err = svc.applyOpenAIFastPolicyToBody(ctx, account, "gpt-5.6-sol", []byte(`{"model":"gpt-5.6-sol","service_tier":"priority"}`))
+	require.NoError(t, err)
+	require.False(t, gjson.GetBytes(updated, "service_tier").Exists())
+}
+
+func TestApplyOpenAIFastPolicyToBody_GroupForceStillHonorsGlobalBlock(t *testing.T) {
+	settings := openAIFastFilterPriorityPolicy()
+	settings.Rules[0].Action = BetaPolicyActionBlock
+	svc := newOpenAIGatewayServiceWithSettings(t, settings)
+	account := &Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth}
+	ctx := context.WithValue(context.Background(), ctxkey.Group, &Group{
+		ID: 7, Platform: PlatformOpenAI, Status: StatusActive, Hydrated: true, ForceOpenAIFast: true,
+	})
+	_, err := svc.applyOpenAIFastPolicyToBody(ctx, account, "gpt-5.6-sol", []byte(`{"model":"gpt-5.6-sol"}`))
+	var blocked *OpenAIFastBlockedError
+	require.ErrorAs(t, err, &blocked)
 }
 
 func TestApplyOpenAIFastPolicyToBody_GroupForceRequiresHydratedGroup(t *testing.T) {
