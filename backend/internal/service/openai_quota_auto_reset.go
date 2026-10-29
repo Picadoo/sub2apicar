@@ -307,7 +307,7 @@ func (s *OpenAIQuotaAutoResetService) evaluateAccount(ctx context.Context, accou
 		needsQuery = false
 	}
 	if !needsQuery {
-		if !assessment.pauseReached && state != nil && state.TriggerWindow != "" {
+		if !assessment.pauseReached && !assessment.resetReached && state != nil && state.TriggerWindow != "" {
 			state.TriggerWindow = ""
 			state.ErrorCode = ""
 			state.CheckedAt = now.UTC().Format(time.RFC3339)

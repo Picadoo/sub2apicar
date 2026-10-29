@@ -578,3 +578,19 @@ func TestOpenAIQuotaAutoResetService_ScansWithoutAnyOptIn(t *testing.T) {
 	require.Len(t, service.queue, 1)
 	require.Equal(t, int64(1), <-service.queue)
 }
+
+func TestOpenAIQuotaAutoResetService_ExpiryQueryFailureKeepsBackoff(t *testing.T) {
+	service, repo, quota := newResetThresholdTestFixture(t, nil, 1)
+	repo.setExtraForTest(OpenAIAutoResetCreditEnabledExtraKey, false)
+	repo.setExtraForTest("codex_7d_used_percent", 10.0)
+	repo.setExtraForTest(openaiQuotaResetCreditsKey, &OpenAIRateLimitResetCredits{
+		AvailableCount: 1, Credits: []OpenAIRateLimitResetCreditDetail{{ExpiresAt: time.Now().Add(2 * time.Minute).Format(time.RFC3339)}},
+	})
+	quota.queryErr = errors.New("upstream unavailable")
+	require.Error(t, service.evaluateAccount(context.Background(), 501))
+	for range 3 {
+		require.NoError(t, service.evaluateAccount(context.Background(), 501))
+	}
+	require.Equal(t, int32(1), quota.queryCalls.Load())
+	require.Equal(t, "RESET_CREDIT_QUERY_FAILED", repo.stateForTest().ErrorCode)
+}
