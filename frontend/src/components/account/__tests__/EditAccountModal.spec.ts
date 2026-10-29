@@ -1762,6 +1762,26 @@ describe('EditAccountModal', () => {
     expect(updateAccountMock).toHaveBeenCalledTimes(1)
   })
 
+  it('shows quota limit card for Vertex SA account and keeps quota limits on save', async () => {
+    const account = buildVertexAccount()
+    account.extra = { quota_limit: 200, quota_daily_limit: 20, quota_used: 35.5 }
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset()
+    checkMixedChannelRiskMock.mockResolvedValue({ has_risk: false })
+    updateAccountMock.mockResolvedValue(account)
+
+    const wrapper = mountModal(account)
+    expect(wrapper.findComponent({ name: 'QuotaLimitCard' }).exists()).toBe(true)
+
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(extra?.quota_limit).toBe(200)
+    expect(extra?.quota_daily_limit).toBe(20)
+    expect(extra?.quota_weekly_limit).toBeUndefined()
+  })
+
   it('blocks Vertex SA save when neither credentials_status nor legacy json indicates existence', async () => {
     const account = buildVertexAccount()
     account.credentials = {
@@ -1925,6 +1945,29 @@ describe('EditAccountModal OpenAI 自动使用重置卡', () => {
       auto_reset_credit_7d_threshold: 0.92
     })
     expect(extra).not.toHaveProperty('codex_auto_reset_credit_state')
+    wrapper.unmount()
+  })
+
+  it('loads and saves expiry settings independently of usage thresholds', async () => {
+    const account = buildOpenAIOAuthParentAccount()
+    account.extra = { auto_reset_credit_enabled: true, auto_reset_credit_expiry_enabled: true, auto_reset_credit_expiry_minutes: 5 }
+    updateAccountMock.mockResolvedValue(account)
+    const wrapper = mountModal(account)
+    expect((wrapper.get('[data-testid="auto-reset-credit-expiry-enabled"]').element as HTMLInputElement).checked).toBe(true)
+    expect((wrapper.get('[data-testid="auto-reset-credit-expiry-minutes"]').element as HTMLInputElement).value).toBe('5')
+    await wrapper.get('[data-testid="auto-reset-credit-expiry-minutes"]').setValue('3')
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).toMatchObject({ auto_reset_credit_expiry_enabled: true, auto_reset_credit_expiry_minutes: 3 })
+    wrapper.unmount()
+  })
+
+  it.each(['0', '61', '1.5'])('rejects invalid expiry minutes %s', async (minutes) => {
+    const account = buildOpenAIOAuthParentAccount()
+    account.extra = { auto_reset_credit_enabled: true, auto_reset_credit_expiry_enabled: true }
+    const wrapper = mountModal(account)
+    await wrapper.get('[data-testid="auto-reset-credit-expiry-minutes"]').setValue(minutes)
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock).not.toHaveBeenCalled()
     wrapper.unmount()
   })
 
