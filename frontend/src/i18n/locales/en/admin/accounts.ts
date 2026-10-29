@@ -1062,16 +1062,13 @@ export default {
 	    }
 	  },
       autoResetCredit: {
-	    title: 'Automatically use reset credits',
-	    hint: 'Uses the earliest-expiring available credit when usage reaches a threshold, with an optional expiry trigger. Off by default.',
+	    title: 'Use reset credits early at usage thresholds',
+	    hint: 'This switch only controls early use at usage thresholds. Expiring credits are always used automatically.',
 	    threshold5h: '5h auto-reset threshold (%)',
 	    threshold7d: '7d auto-reset threshold (%)',
 	    thresholdHint: 'Each window is evaluated independently. Enter 0.1–100; both default to 100.',
 	    thresholdInvalid: 'Automatic reset-credit thresholds must be between 0.1% and 100%.',
-        expiryEnabled: 'Use reset credits before expiry',
-        expiryMinutes: 'Minutes before expiry',
-        expiryHint: 'Requires automatic reset credits. Defaults to 5 minutes, configurable from 1 to 60. Checked every minute, even below usage thresholds. Expired credits and credits with unknown expiry do not trigger.',
-        expiryInvalid: 'Minutes before expiry must be an integer from 1 to 60.',
+        expiryHint: 'Reset credits are automatically attempted within five minutes of expiry. Checked every minute, independent of this switch and usage thresholds.',
         expiryTrigger: 'Expiring soon'
 	  },
       // Quota control (Anthropic OAuth/SetupToken only)

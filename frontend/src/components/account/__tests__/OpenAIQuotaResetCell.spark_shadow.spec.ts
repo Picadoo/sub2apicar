@@ -461,15 +461,15 @@ describe('OpenAIQuotaResetCell 自动用卡运行态', () => {
     wrapper.unmount()
   })
 
-  it('开关关闭时不显示历史运行态', () => {
+  it('用量阈值开关关闭时仍展示临期自动用卡状态', () => {
     const account = makeAccount({
       extra: {
         auto_reset_credit_enabled: false,
-        codex_auto_reset_credit_state: { status: 'success', available_count: 1 },
+        codex_auto_reset_credit_state: { status: 'success', trigger_window: 'expiry', available_count: 1 },
       },
     })
     const wrapper = mount(OpenAIQuotaResetCell, { props: { account } })
-    expect(wrapper.find('[data-testid="auto-reset-credit-state"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="auto-reset-credit-state"]').text()).toContain('admin.accounts.autoResetCredit.expiryTrigger')
     wrapper.unmount()
   })
 })

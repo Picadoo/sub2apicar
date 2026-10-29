@@ -251,7 +251,6 @@ const updateCredits = (usage: OpenAIQuotaUsage | null) => {
 type AutoResetCreditState = NonNullable<NonNullable<Account['extra']>['codex_auto_reset_credit_state']>
 const validAutoResetStatuses = new Set(['checking', 'available', 'resetting', 'success', 'no_credit', 'failed'])
 const autoResetState = computed<AutoResetCreditState | null>(() => {
-  if (props.account.extra?.auto_reset_credit_enabled !== true) return null
   const state = props.account.extra?.codex_auto_reset_credit_state
   if (!state || typeof state !== 'object' || !validAutoResetStatuses.has(String(state.status))) return null
   return state

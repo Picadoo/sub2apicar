@@ -1336,8 +1336,6 @@ func filterSchedulerExtra(extra map[string]any) map[string]any {
 		service.OpenAIAutoResetCreditEnabledExtraKey,
 		service.OpenAIAutoResetCredit5hThresholdExtraKey,
 		service.OpenAIAutoResetCredit7dThresholdExtraKey,
-		service.OpenAIAutoResetCreditExpiryEnabledExtraKey,
-		service.OpenAIAutoResetCreditExpiryMinutesExtraKey,
 		service.OpenAIAutoResetCreditStateExtraKey,
 		"model_rate_limits",
 		service.UpstreamBillingProbeExtraKey,

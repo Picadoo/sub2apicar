@@ -1948,26 +1948,20 @@ describe('EditAccountModal OpenAI 自动使用重置卡', () => {
     wrapper.unmount()
   })
 
-  it('loads and saves expiry settings independently of usage thresholds', async () => {
+  it('expiry is automatic with no expiry checkbox or time option, even when threshold use is off', async () => {
     const account = buildOpenAIOAuthParentAccount()
-    account.extra = { auto_reset_credit_enabled: true, auto_reset_credit_expiry_enabled: true, auto_reset_credit_expiry_minutes: 5 }
+    account.extra = { auto_reset_credit_enabled: false, auto_reset_credit_expiry_enabled: false, auto_reset_credit_expiry_minutes: 60 }
     updateAccountMock.mockResolvedValue(account)
     const wrapper = mountModal(account)
-    expect((wrapper.get('[data-testid="auto-reset-credit-expiry-enabled"]').element as HTMLInputElement).checked).toBe(true)
-    expect((wrapper.get('[data-testid="auto-reset-credit-expiry-minutes"]').element as HTMLInputElement).value).toBe('5')
-    await wrapper.get('[data-testid="auto-reset-credit-expiry-minutes"]').setValue('3')
+    expect(wrapper.find('[data-testid="auto-reset-credit-expiry-enabled"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="auto-reset-credit-expiry-minutes"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('admin.accounts.autoResetCredit.expiryHint')
     await wrapper.get('form#edit-account-form').trigger('submit.prevent')
-    expect(updateAccountMock.mock.calls[0]?.[1]?.extra).toMatchObject({ auto_reset_credit_expiry_enabled: true, auto_reset_credit_expiry_minutes: 3 })
-    wrapper.unmount()
-  })
-
-  it.each(['0', '61', '1.5'])('rejects invalid expiry minutes %s', async (minutes) => {
-    const account = buildOpenAIOAuthParentAccount()
-    account.extra = { auto_reset_credit_enabled: true, auto_reset_credit_expiry_enabled: true }
-    const wrapper = mountModal(account)
-    await wrapper.get('[data-testid="auto-reset-credit-expiry-minutes"]').setValue(minutes)
-    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
-    expect(updateAccountMock).not.toHaveBeenCalled()
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(extra.auto_reset_credit_enabled).toBe(false)
+    expect(extra).not.toHaveProperty('auto_reset_credit_expiry_enabled')
+    expect(extra).not.toHaveProperty('auto_reset_credit_expiry_minutes')
     wrapper.unmount()
   })
 

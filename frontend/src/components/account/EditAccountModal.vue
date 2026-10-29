@@ -2896,28 +2896,6 @@
           </div>
         </div>
         <p class="input-hint">{{ t('admin.accounts.autoResetCredit.thresholdHint') }}</p>
-        <label class="flex items-center gap-2 text-sm">
-          <input
-            v-model="autoResetCreditExpiryEnabled"
-            type="checkbox"
-            :disabled="!autoResetCreditEnabled"
-            data-testid="auto-reset-credit-expiry-enabled"
-          />
-          {{ t('admin.accounts.autoResetCredit.expiryEnabled') }}
-        </label>
-        <div v-if="autoResetCreditExpiryEnabled">
-          <label class="input-label">{{ t('admin.accounts.autoResetCredit.expiryMinutes') }}</label>
-          <input
-            v-model.number="autoResetCreditExpiryMinutes"
-            type="number"
-            min="1"
-            max="60"
-            step="1"
-            class="input"
-            :disabled="!autoResetCreditEnabled"
-            data-testid="auto-reset-credit-expiry-minutes"
-          />
-        </div>
         <p class="input-hint">{{ t('admin.accounts.autoResetCredit.expiryHint') }}</p>
       </div>
 
@@ -4131,8 +4109,6 @@ const autoPause7dDisabled = ref(false)
 const autoResetCreditEnabled = ref(false)
 const autoResetCredit5hThreshold = ref(100)
 const autoResetCredit7dThreshold = ref(100)
-const autoResetCreditExpiryEnabled = ref(false)
-const autoResetCreditExpiryMinutes = ref(5)
 const upstreamBillingAutoProbeEnabled = ref(false)
 const upstreamBillingRateSyncEnabled = ref(false)
 const mixedScheduling = ref(false) // For antigravity accounts: enable mixed scheduling
@@ -4693,8 +4669,6 @@ const syncFormFromAccount = (newAccount: Account | null) => {
 	autoPause5hDisabled.value = extra?.auto_pause_5h_disabled === true
 	autoPause7dDisabled.value = extra?.auto_pause_7d_disabled === true
 	autoResetCreditEnabled.value = extra?.auto_reset_credit_enabled === true
-	autoResetCreditExpiryEnabled.value = extra?.auto_reset_credit_expiry_enabled === true
-	autoResetCreditExpiryMinutes.value = typeof extra?.auto_reset_credit_expiry_minutes === 'number' ? extra.auto_reset_credit_expiry_minutes : 5
 	autoResetCredit5hThreshold.value =
 		typeof extra?.auto_reset_credit_5h_threshold === 'number' ? extra.auto_reset_credit_5h_threshold * 100 : 100
 	autoResetCredit7dThreshold.value =
@@ -5694,10 +5668,6 @@ const handleSubmit = async () => {
     appStore.showError(t('admin.accounts.pleaseSelectStatus'))
     return
   }
-	if (autoResetCreditEnabled.value && autoResetCreditExpiryEnabled.value && (!Number.isInteger(autoResetCreditExpiryMinutes.value) || autoResetCreditExpiryMinutes.value < 1 || autoResetCreditExpiryMinutes.value > 60)) {
-		appStore.showError(t('admin.accounts.autoResetCredit.expiryInvalid'))
-		return
-	}
 	if (autoResetCreditEnabled.value) {
 		const thresholds = [autoResetCredit5hThreshold.value, autoResetCredit7dThreshold.value]
 		if (thresholds.some((value) => !Number.isFinite(value) || value < 0.1 || value > 100)) {
@@ -6334,8 +6304,8 @@ const handleSubmit = async () => {
 		}
 		if (props.account.type === 'oauth' && !isSparkShadow.value) {
 			newExtra.auto_reset_credit_enabled = autoResetCreditEnabled.value
-			newExtra.auto_reset_credit_expiry_enabled = autoResetCreditExpiryEnabled.value
-			newExtra.auto_reset_credit_expiry_minutes = autoResetCreditExpiryMinutes.value
+			delete newExtra.auto_reset_credit_expiry_enabled
+			delete newExtra.auto_reset_credit_expiry_minutes
 			newExtra.auto_reset_credit_5h_threshold = autoResetCredit5hThreshold.value / 100
 			newExtra.auto_reset_credit_7d_threshold = autoResetCredit7dThreshold.value / 100
 		}

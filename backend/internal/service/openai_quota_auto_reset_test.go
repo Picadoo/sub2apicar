@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/stretchr/testify/require"
 )
 
@@ -476,34 +477,13 @@ func TestOpenAIQuotaAutoResetService_QueryFailureBacksOffBeforeRetry(t *testing.
 	require.Equal(t, OpenAIAutoResetStatusNoCredit, repo.stateForTest().Status)
 }
 
-func TestOpenAIAutoResetExpiryConfig(t *testing.T) {
-	config := ResolveOpenAIAutoResetCreditConfig(&Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth})
-	require.False(t, config.ExpiryEnabled)
-	require.Equal(t, 5, config.ExpiryMinutes)
-	for _, value := range []any{0, 61, 1.5, "bad", nil} {
-		_, err := normalizeOpenAIAutoResetCreditExtra(PlatformOpenAI, AccountTypeOAuth, false, map[string]any{
-			OpenAIAutoResetCreditExpiryMinutesExtraKey: value,
-		})
-		require.Error(t, err)
-	}
+func TestOpenAIAutoResetExpiryConfigIsNoLongerOptional(t *testing.T) {
 	extra, err := normalizeOpenAIAutoResetCreditExtra(PlatformOpenAI, AccountTypeOAuth, false, map[string]any{
-		OpenAIAutoResetCreditExpiryEnabledExtraKey: true,
-		OpenAIAutoResetCreditExpiryMinutesExtraKey: 3,
+		"auto_reset_credit_expiry_enabled": false,
+		"auto_reset_credit_expiry_minutes": 60,
 	})
 	require.NoError(t, err)
-	config = ResolveOpenAIAutoResetCreditConfig(&Account{Platform: PlatformOpenAI, Type: AccountTypeOAuth, Extra: extra})
-	require.True(t, config.ExpiryEnabled)
-	require.Equal(t, 3, config.ExpiryMinutes)
-	stripOpenAIAutoResetCreditManagedExtra(extra, true)
 	require.Empty(t, extra)
-	_, err = normalizeOpenAIAutoResetCreditExtra(PlatformOpenAI, AccountTypeOAuth, false, map[string]any{
-		OpenAIAutoResetCreditExpiryEnabledExtraKey: "true",
-	})
-	require.Error(t, err)
-	_, err = normalizeOpenAIAutoResetCreditExtra(PlatformOpenAI, AccountTypeOAuth, true, map[string]any{
-		OpenAIAutoResetCreditExpiryEnabledExtraKey: true,
-	})
-	require.Error(t, err)
 }
 
 func TestOpenAIQuotaAutoResetService_ExpiryBoundaries(t *testing.T) {
@@ -511,19 +491,17 @@ func TestOpenAIQuotaAutoResetService_ExpiryBoundaries(t *testing.T) {
 	for _, test := range []struct {
 		name      string
 		expiresAt string
-		enabled   bool
 		count     int
 		want      bool
 	}{
-		{"inside", now.Add(4 * time.Minute).Format(time.RFC3339), true, 1, true},
-		{"boundary", now.Add(5 * time.Minute).Format(time.RFC3339), true, 1, true},
-		{"outside", now.Add(5*time.Minute + time.Second).Format(time.RFC3339), true, 1, false},
-		{"expired", now.Add(-time.Second).Format(time.RFC3339), true, 1, false},
-		{"expires-now", now.Format(time.RFC3339), true, 1, false},
-		{"unknown", "", true, 1, false},
-		{"invalid", "not-a-date", true, 1, false},
-		{"disabled", now.Add(time.Minute).Format(time.RFC3339), false, 1, false},
-		{"no-credit", now.Add(time.Minute).Format(time.RFC3339), true, 0, false},
+		{"inside", now.Add(4 * time.Minute).Format(time.RFC3339), 1, true},
+		{"boundary", now.Add(5 * time.Minute).Format(time.RFC3339), 1, true},
+		{"outside", now.Add(5*time.Minute + time.Second).Format(time.RFC3339), 1, false},
+		{"expired", now.Add(-time.Second).Format(time.RFC3339), 1, false},
+		{"expires-now", now.Format(time.RFC3339), 1, false},
+		{"unknown", "", 1, false},
+		{"invalid", "not-a-date", 1, false},
+		{"no-credit", now.Add(time.Minute).Format(time.RFC3339), 0, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			credits := &OpenAIRateLimitResetCredits{AvailableCount: test.count, Credits: []OpenAIRateLimitResetCreditDetail{{ExpiresAt: test.expiresAt}}}
@@ -533,7 +511,7 @@ func TestOpenAIQuotaAutoResetService_ExpiryBoundaries(t *testing.T) {
 			require.NoError(t, json.Unmarshal(encoded, &cached))
 			account := &Account{Extra: map[string]any{openaiQuotaResetCreditsKey: cached}}
 			service := &OpenAIQuotaAutoResetService{}
-			config := OpenAIAutoResetCreditConfig{Enabled: true, Threshold5h: 1, Threshold7d: 1, ExpiryEnabled: test.enabled, ExpiryMinutes: 5}
+			config := OpenAIAutoResetCreditConfig{Enabled: false, Threshold5h: 1, Threshold7d: 1}
 			fromCache := service.assessExtra(account, config, now)
 			fromUsage := service.assessUsage(&OpenAIQuotaUsage{RateLimitResetCredits: credits}, account, config, now)
 			require.Equal(t, test.want, fromCache.resetReached)
@@ -550,7 +528,8 @@ func TestOpenAIQuotaAutoResetService_ExpiryRechecksLiveCredits(t *testing.T) {
 		t.Run((time.Duration(liveMinutes) * time.Minute).String(), func(t *testing.T) {
 			service, repo, quota := newResetThresholdTestFixture(t, nil, 1)
 			repo.setExtraForTest("codex_7d_used_percent", 10.0)
-			repo.setExtraForTest(OpenAIAutoResetCreditExpiryEnabledExtraKey, true)
+			repo.setExtraForTest(OpenAIAutoResetCreditEnabledExtraKey, false)
+			repo.setExtraForTest("auto_reset_credit_expiry_enabled", false)
 			repo.setExtraForTest(openaiQuotaResetCreditsKey, &OpenAIRateLimitResetCredits{
 				AvailableCount: 1, Credits: []OpenAIRateLimitResetCreditDetail{{ExpiresAt: time.Now().Add(2 * time.Minute).Format(time.RFC3339)}},
 			})
@@ -568,4 +547,34 @@ func TestOpenAIQuotaAutoResetService_ExpiryRechecksLiveCredits(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOpenAIQuotaAutoResetService_DisabledThresholdDoesNotConsumeNonExpiringCredit(t *testing.T) {
+	service, repo, quota := newResetThresholdTestFixture(t, nil, 1)
+	repo.setExtraForTest(OpenAIAutoResetCreditEnabledExtraKey, false)
+	quota.usage.RateLimitResetCredits.Credits = []OpenAIRateLimitResetCreditDetail{{ExpiresAt: time.Now().Add(time.Hour).Format(time.RFC3339)}}
+	require.NoError(t, service.evaluateAccount(context.Background(), 501))
+	require.Equal(t, int32(1), quota.queryCalls.Load())
+	require.Zero(t, quota.resetCalls.Load())
+}
+
+type expiryScanTestRepo struct {
+	AccountRepository
+	accounts []Account
+}
+
+func (r *expiryScanTestRepo) ListWithFilters(_ context.Context, _ pagination.PaginationParams, platform, accountType, status, _ string, _ int64, _ string) ([]Account, *pagination.PaginationResult, error) {
+	return r.accounts, nil, nil
+}
+
+func TestOpenAIQuotaAutoResetService_ScansWithoutAnyOptIn(t *testing.T) {
+	repo := &expiryScanTestRepo{accounts: []Account{
+		{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Schedulable: true, Extra: map[string]any{OpenAIAutoResetCreditEnabledExtraKey: false, "auto_reset_credit_expiry_enabled": false}},
+		{ID: 2, Platform: PlatformOpenAI, Type: AccountTypeOAuth, Schedulable: false},
+		{ID: 3, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Schedulable: true},
+	}}
+	service := &OpenAIQuotaAutoResetService{accountRepo: repo, ctx: context.Background(), queue: make(chan int64, 10)}
+	service.scanEnabledAccounts(context.Background())
+	require.Len(t, service.queue, 1)
+	require.Equal(t, int64(1), <-service.queue)
 }

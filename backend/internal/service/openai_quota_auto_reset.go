@@ -234,7 +234,7 @@ func (s *OpenAIQuotaAutoResetService) scanEnabledAccounts(ctx context.Context) {
 		}
 		for i := range accounts {
 			account := &accounts[i]
-			if account.Schedulable && ResolveOpenAIAutoResetCreditConfig(account).Enabled {
+			if account.Schedulable && isOpenAIAutoResetCreditAccount(account) {
 				s.Notify(account.ID)
 			}
 		}
@@ -288,7 +288,7 @@ func (s *OpenAIQuotaAutoResetService) evaluateAccount(ctx context.Context, accou
 		return nil
 	}
 	config := ResolveOpenAIAutoResetCreditConfig(account)
-	if !config.Enabled || !account.IsActive() || !account.Schedulable {
+	if !isOpenAIAutoResetCreditAccount(account) || !account.IsActive() || !account.Schedulable {
 		return nil
 	}
 
@@ -297,7 +297,8 @@ func (s *OpenAIQuotaAutoResetService) evaluateAccount(ctx context.Context, accou
 	state := openAIAutoResetStateFromExtra(account.Extra)
 	// 达到用卡阈值本应立即查询以便用卡；但 10 分钟内已确认无卡时，重查不会改变结论，
 	// 只会让调度热路径的通知把同一账号的上游额度接口打到十几秒一次。
-	needsQuery := openAIAutoResetSnapshotStale(account.Extra, now) ||
+	needsQuery := openAIAutoResetSnapshotStale(account.Extra, now) || openAIAutoResetStateStale(state, now) ||
+		assessment.triggerWindow == "expiry" ||
 		(assessment.resetReached && !openAIAutoResetNoCreditConfirmed(state, now))
 	if assessment.pauseReached && !assessment.resetReached {
 		needsQuery = needsQuery || state == nil || state.Status == OpenAIAutoResetStatusChecking || state.Status == OpenAIAutoResetStatusFailed || openAIAutoResetStateStale(state, now)
@@ -342,13 +343,13 @@ func (s *OpenAIQuotaAutoResetService) evaluateAccount(ctx context.Context, accou
 		return s.failState(ctx, accountID, checking, "RESET_CREDIT_DETAILS_UNAVAILABLE", nil)
 	}
 
-	// 查询期间管理员可能关闭开关；消费前重新读取账号，确保尚未发出的任务可取消。
+	// 重新核对账号和阈值配置；临期用卡不受按用量阈值开关影响。
 	account, err = s.accountRepo.GetByID(ctx, accountID)
 	if err != nil || account == nil {
 		return err
 	}
 	config = ResolveOpenAIAutoResetCreditConfig(account)
-	if !config.Enabled {
+	if !isOpenAIAutoResetCreditAccount(account) || !account.IsActive() || !account.Schedulable {
 		return nil
 	}
 	assessment = s.assessUsage(usage, account, config, time.Now())
@@ -402,11 +403,11 @@ func (s *OpenAIQuotaAutoResetService) evaluateAccount(ctx context.Context, accou
 	}
 
 	account, err = s.accountRepo.GetByID(ctx, accountID)
-	if err != nil || account == nil || !ResolveOpenAIAutoResetCreditConfig(account).Enabled {
+	if err != nil || account == nil {
 		return err
 	}
 	config = ResolveOpenAIAutoResetCreditConfig(account)
-	if !account.IsActive() || !account.Schedulable || !s.assessUsage(usage, account, config, time.Now()).resetReached {
+	if !isOpenAIAutoResetCreditAccount(account) || !account.IsActive() || !account.Schedulable || !s.assessUsage(usage, account, config, time.Now()).resetReached {
 		return nil
 	}
 	expiresAt, expiryErr := time.Parse(time.RFC3339, candidate.ExpiresAt)
@@ -527,12 +528,10 @@ func (s *OpenAIQuotaAutoResetService) assessExtra(account *Account, config OpenA
 	utilization5h, _ := resolveOpenAIQuotaUtilization(account.Extra, "5h", now)
 	utilization7d, _ := resolveOpenAIQuotaUtilization(account.Extra, "7d", now)
 	assessment := s.buildAssessment(account, config, utilization5h, utilization7d)
-	if config.ExpiryEnabled {
-		encoded, err := json.Marshal(account.Extra[openaiQuotaResetCreditsKey])
-		var credits OpenAIRateLimitResetCredits
-		if err == nil && json.Unmarshal(encoded, &credits) == nil {
-			applyOpenAIAutoResetExpiry(&assessment, &credits, config, now)
-		}
+	encoded, err := json.Marshal(account.Extra[openaiQuotaResetCreditsKey])
+	var credits OpenAIRateLimitResetCredits
+	if err == nil && json.Unmarshal(encoded, &credits) == nil {
+		applyOpenAIAutoResetExpiry(&assessment, &credits, now)
 	}
 	return assessment
 }
@@ -542,16 +541,16 @@ func (s *OpenAIQuotaAutoResetService) assessUsage(usage *OpenAIQuotaUsage, accou
 	utilization5h := readOpenAIQuotaUsedPercent(updates, "5h") / 100
 	utilization7d := readOpenAIQuotaUsedPercent(updates, "7d") / 100
 	assessment := s.buildAssessment(account, config, utilization5h, utilization7d)
-	applyOpenAIAutoResetExpiry(&assessment, usage.RateLimitResetCredits, config, now)
+	applyOpenAIAutoResetExpiry(&assessment, usage.RateLimitResetCredits, now)
 	return assessment
 }
 
-// Expiry is a separate opt-in trigger; only a still-valid, explicitly dated card qualifies.
-func applyOpenAIAutoResetExpiry(assessment *openAIAutoResetAssessment, credits *OpenAIRateLimitResetCredits, config OpenAIAutoResetCreditConfig, now time.Time) {
-	if !config.ExpiryEnabled || credits == nil || credits.AvailableCount <= 0 {
+// Expiring credits are always used within their final five minutes, independent of usage settings.
+func applyOpenAIAutoResetExpiry(assessment *openAIAutoResetAssessment, credits *OpenAIRateLimitResetCredits, now time.Time) {
+	if credits == nil || credits.AvailableCount <= 0 {
 		return
 	}
-	deadline := now.Add(time.Duration(config.ExpiryMinutes) * time.Minute)
+	deadline := now.Add(5 * time.Minute)
 	for _, credit := range credits.Credits {
 		expiresAt, err := time.Parse(time.RFC3339, credit.ExpiresAt)
 		if err == nil && expiresAt.After(now) && !expiresAt.After(deadline) {
@@ -568,6 +567,9 @@ func (s *OpenAIQuotaAutoResetService) buildAssessment(account *Account, config O
 		utilization7d: utilization7d,
 		threshold5h:   config.Threshold5h,
 		threshold7d:   config.Threshold7d,
+	}
+	if !config.Enabled {
+		return assessment
 	}
 	reset5h := utilization5h >= config.Threshold5h
 	reset7d := utilization7d >= config.Threshold7d

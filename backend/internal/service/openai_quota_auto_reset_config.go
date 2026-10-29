@@ -11,12 +11,10 @@ import (
 )
 
 const (
-	OpenAIAutoResetCreditEnabledExtraKey       = "auto_reset_credit_enabled"
-	OpenAIAutoResetCredit5hThresholdExtraKey   = "auto_reset_credit_5h_threshold"
-	OpenAIAutoResetCredit7dThresholdExtraKey   = "auto_reset_credit_7d_threshold"
-	OpenAIAutoResetCreditExpiryEnabledExtraKey = "auto_reset_credit_expiry_enabled"
-	OpenAIAutoResetCreditExpiryMinutesExtraKey = "auto_reset_credit_expiry_minutes"
-	OpenAIAutoResetCreditStateExtraKey         = "codex_auto_reset_credit_state"
+	OpenAIAutoResetCreditEnabledExtraKey     = "auto_reset_credit_enabled"
+	OpenAIAutoResetCredit5hThresholdExtraKey = "auto_reset_credit_5h_threshold"
+	OpenAIAutoResetCredit7dThresholdExtraKey = "auto_reset_credit_7d_threshold"
+	OpenAIAutoResetCreditStateExtraKey       = "codex_auto_reset_credit_state"
 
 	openAIAutoResetCreditDefaultThreshold = 1.0
 	openAIAutoResetCreditMinimumThreshold = 0.001
@@ -25,20 +23,17 @@ const (
 // OpenAIAutoResetCreditConfig 是账号级自动用卡配置。阈值采用 0-1 比例，
 // 避免后端调度与前端百分比展示混用同一数值语义。
 type OpenAIAutoResetCreditConfig struct {
-	Enabled       bool
-	Threshold5h   float64
-	Threshold7d   float64
-	ExpiryEnabled bool
-	ExpiryMinutes int
+	Enabled     bool
+	Threshold5h float64
+	Threshold7d float64
 }
 
 // ResolveOpenAIAutoResetCreditConfig 只接受 OpenAI OAuth 母账号；历史账号未配置时
-// 始终保持关闭，防止升级后产生意外消费。
+// 按用量阈值用卡默认关闭；临期用卡始终自动执行，不受此配置控制。
 func ResolveOpenAIAutoResetCreditConfig(account *Account) OpenAIAutoResetCreditConfig {
 	config := OpenAIAutoResetCreditConfig{
-		Threshold5h:   openAIAutoResetCreditDefaultThreshold,
-		Threshold7d:   openAIAutoResetCreditDefaultThreshold,
-		ExpiryMinutes: 5,
+		Threshold5h: openAIAutoResetCreditDefaultThreshold,
+		Threshold7d: openAIAutoResetCreditDefaultThreshold,
 	}
 	if !isOpenAIAutoResetCreditAccount(account) || account.Extra == nil {
 		return config
@@ -49,10 +44,6 @@ func ResolveOpenAIAutoResetCreditConfig(account *Account) OpenAIAutoResetCreditC
 	}
 	if value, ok := resolveAccountExtraNumber(account.Extra, OpenAIAutoResetCredit7dThresholdExtraKey); ok && isValidOpenAIAutoResetThreshold(value) {
 		config.Threshold7d = value
-	}
-	config.ExpiryEnabled = resolveAccountExtraBool(account.Extra, OpenAIAutoResetCreditExpiryEnabledExtraKey)
-	if value, ok := resolveAccountExtraNumber(account.Extra, OpenAIAutoResetCreditExpiryMinutesExtraKey); ok && validOpenAIAutoResetExpiryMinutes(value) {
-		config.ExpiryMinutes = int(value)
 	}
 	return config
 }
@@ -69,31 +60,19 @@ func normalizeOpenAIAutoResetCreditExtra(platform, accountType string, isShadow 
 	}
 	normalized := cloneOpenAIAutoResetExtra(extra)
 	delete(normalized, OpenAIAutoResetCreditStateExtraKey)
+	delete(normalized, "auto_reset_credit_expiry_enabled")
+	delete(normalized, "auto_reset_credit_expiry_minutes")
 
 	_, hasEnabled := normalized[OpenAIAutoResetCreditEnabledExtraKey]
 	_, has5h := normalized[OpenAIAutoResetCredit5hThresholdExtraKey]
 	_, has7d := normalized[OpenAIAutoResetCredit7dThresholdExtraKey]
-	_, hasExpiryEnabled := normalized[OpenAIAutoResetCreditExpiryEnabledExtraKey]
-	_, hasExpiryMinutes := normalized[OpenAIAutoResetCreditExpiryMinutesExtraKey]
-	if !hasEnabled && !has5h && !has7d && !hasExpiryEnabled && !hasExpiryMinutes {
+	if !hasEnabled && !has5h && !has7d {
 		return normalized, nil
 	}
 	if platform != PlatformOpenAI || accountType != AccountTypeOAuth || isShadow {
 		return nil, infraerrors.New(http.StatusBadRequest, "OPENAI_AUTO_RESET_CREDIT_ACCOUNT_INVALID", "automatic reset credits are only supported for OpenAI OAuth parent accounts")
 	}
 
-	if hasExpiryEnabled {
-		if _, ok := normalized[OpenAIAutoResetCreditExpiryEnabledExtraKey].(bool); !ok {
-			return nil, infraerrors.BadRequest("OPENAI_AUTO_RESET_CREDIT_EXPIRY_INVALID", "auto_reset_credit_expiry_enabled must be a boolean")
-		}
-	}
-	if hasExpiryMinutes {
-		value, ok := parseOpenAIAutoResetThreshold(normalized[OpenAIAutoResetCreditExpiryMinutesExtraKey])
-		if !ok || !validOpenAIAutoResetExpiryMinutes(value) {
-			return nil, infraerrors.BadRequest("OPENAI_AUTO_RESET_CREDIT_EXPIRY_INVALID", "auto_reset_credit_expiry_minutes must be an integer between 1 and 60")
-		}
-		normalized[OpenAIAutoResetCreditExpiryMinutesExtraKey] = value
-	}
 	enabled := false
 	if hasEnabled {
 		value, ok := normalized[OpenAIAutoResetCreditEnabledExtraKey].(bool)
@@ -130,8 +109,8 @@ func stripOpenAIAutoResetCreditManagedExtra(extra map[string]any, stripConfig bo
 		delete(extra, OpenAIAutoResetCreditEnabledExtraKey)
 		delete(extra, OpenAIAutoResetCredit5hThresholdExtraKey)
 		delete(extra, OpenAIAutoResetCredit7dThresholdExtraKey)
-		delete(extra, OpenAIAutoResetCreditExpiryEnabledExtraKey)
-		delete(extra, OpenAIAutoResetCreditExpiryMinutesExtraKey)
+		delete(extra, "auto_reset_credit_expiry_enabled")
+		delete(extra, "auto_reset_credit_expiry_minutes")
 	}
 	return extra
 }
@@ -170,8 +149,4 @@ func cloneOpenAIAutoResetExtra(source map[string]any) map[string]any {
 		cloned[key] = value
 	}
 	return cloned
-}
-
-func validOpenAIAutoResetExpiryMinutes(value float64) bool {
-	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= 1 && value <= 60 && value == math.Trunc(value)
 }
