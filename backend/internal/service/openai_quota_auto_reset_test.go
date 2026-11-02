@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -475,6 +476,37 @@ func TestOpenAIQuotaAutoResetService_QueryFailureBacksOffBeforeRetry(t *testing.
 	require.NoError(t, service.evaluateAccount(context.Background(), 501))
 	require.Equal(t, int32(2), quota.queryCalls.Load(), "重试间隔过后应恢复查询")
 	require.Equal(t, OpenAIAutoResetStatusNoCredit, repo.stateForTest().Status)
+}
+
+func TestOpenAIQuotaAutoResetService_DisabledThresholdAndNonExpiringCardsNeverConsume(t *testing.T) {
+	for _, queryFails := range []bool{false, true} {
+		t.Run(fmt.Sprintf("query_fails=%t", queryFails), func(t *testing.T) {
+			service, repo, quota := newResetThresholdTestFixture(t, nil, 3)
+			repo.setExtraForTest(OpenAIAutoResetCreditEnabledExtraKey, false)
+			repo.setExtraForTest("codex_7d_used_percent", 21.0)
+			credits := &OpenAIRateLimitResetCredits{
+				AvailableCount: 3,
+				Credits:        []OpenAIRateLimitResetCreditDetail{{ExpiresAt: time.Now().Add(4 * 24 * time.Hour).Format(time.RFC3339)}},
+			}
+			repo.setExtraForTest(openaiQuotaResetCreditsKey, credits)
+			quota.usage.RateLimit.SecondaryWindow.UsedPercent = 21
+			quota.usage.RateLimitResetCredits = credits
+			if queryFails {
+				quota.queryErr = errors.New("SOCKS authentication failed")
+			}
+			err := service.evaluateAccount(context.Background(), 501)
+			if queryFails {
+				require.Error(t, err)
+				require.Equal(t, "RESET_CREDIT_QUERY_FAILED", repo.stateForTest().ErrorCode)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, OpenAIAutoResetStatusAvailable, repo.stateForTest().Status)
+			}
+			require.Equal(t, int32(1), quota.queryCalls.Load())
+			require.Zero(t, quota.resetCalls.Load(), "regular quota checks must not consume a reset card")
+			require.Empty(t, repo.stateForTest().TriggerWindow)
+		})
+	}
 }
 
 func TestOpenAIAutoResetExpiryConfigIsNoLongerOptional(t *testing.T) {

@@ -434,6 +434,31 @@ describe('OpenAIQuotaResetCell — 外审 F6:影子禁用重置', () => {
 
 describe('OpenAIQuotaResetCell 自动用卡运行态', () => {
   it.each([
+    'RESET_CREDIT_QUERY_FAILED',
+    'USAGE_SNAPSHOT_WRITE_FAILED',
+    'RESET_CREDIT_DETAILS_UNAVAILABLE',
+  ])('将用卡前的 %s 显示为查询失败，不误报重置失败', (errorCode) => {
+    const wrapper = mount(OpenAIQuotaResetCell, {
+      props: { account: makeAccount({
+        id: 57,
+        extra: {
+          auto_reset_credit_enabled: false,
+          codex_auto_reset_credit_state: {
+            status: 'failed', available_count: 3, error_code: errorCode,
+          },
+        },
+      }) },
+    })
+    const state = wrapper.get('[data-testid="auto-reset-credit-state"]')
+    expect(state.text()).toContain('admin.accounts.openaiQuotaReset.autoStatus.queryFailed')
+    expect(state.text()).not.toContain('admin.accounts.openaiQuotaReset.autoStatus.failed')
+    expect(state.find('span').classes()).toContain('bg-amber-50')
+    expect(state.text()).toContain(errorCode)
+    expect(resetOpenAIQuota).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it.each([
     ['checking', 'checking'],
     ['available', 'available'],
     ['resetting', 'resetting'],

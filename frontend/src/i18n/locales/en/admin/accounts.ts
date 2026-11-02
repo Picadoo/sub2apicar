@@ -1813,6 +1813,7 @@ export default {
           resetting: 'Auto-resetting',
           success: 'Auto-reset succeeded',
           noCredit: 'No credit',
+          queryFailed: 'Quota / credit lookup failed (no reset attempted this check)',
           failed: 'Auto-reset failed'
         },
         confirmTitle: 'Confirm Weekly Limit Reset',

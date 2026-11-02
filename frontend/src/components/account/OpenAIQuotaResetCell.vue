@@ -255,8 +255,14 @@ const autoResetState = computed<AutoResetCreditState | null>(() => {
   if (!state || typeof state !== 'object' || !validAutoResetStatuses.has(String(state.status))) return null
   return state
 })
+const autoResetQueryFailed = computed(() =>
+  autoResetState.value?.status === 'failed' &&
+  ['RESET_CREDIT_QUERY_FAILED', 'USAGE_SNAPSHOT_WRITE_FAILED', 'RESET_CREDIT_DETAILS_UNAVAILABLE']
+    .includes(autoResetState.value.error_code ?? '')
+)
 const autoResetStateLabel = computed(() => {
   if (!autoResetState.value?.status) return ''
+  if (autoResetQueryFailed.value) return t('admin.accounts.openaiQuotaReset.autoStatus.queryFailed')
   const keyByStatus: Record<string, string> = {
     checking: 'checking',
     available: 'available',
@@ -268,6 +274,9 @@ const autoResetStateLabel = computed(() => {
   return t(`admin.accounts.openaiQuotaReset.autoStatus.${keyByStatus[autoResetState.value.status]}`)
 })
 const autoResetStateClass = computed(() => {
+  if (autoResetQueryFailed.value) {
+    return 'bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
+  }
   switch (autoResetState.value?.status) {
     case 'available':
       return 'bg-blue-50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300'

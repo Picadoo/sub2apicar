@@ -604,6 +604,7 @@ export default {
           resetting: '自动重置中',
           success: '自动重置成功',
           noCredit: '无卡',
+          queryFailed: '额度／卡信息查询失败（本轮未用卡）',
           failed: '自动重置失败'
         },
         confirmTitle: '确认重置周限',
