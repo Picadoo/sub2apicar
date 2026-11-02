@@ -15,9 +15,16 @@ import {
   rebalanceAccountWindowQuotas,
   setAccountWindowMembers,
   setAccountSharedPoolMode,
+  setAccountCreditSpending,
 } from '@/api/accountWindowQuota'
 
 describe('account window quota admin API', () => {
+  it.each([true, false])('puts explicit credit permission %s independently of shared pool', async (enabled) => {
+    put.mockResolvedValue({ data: { account_id: 7, credit_spending_enabled: enabled } })
+    await expect(setAccountCreditSpending(7, enabled)).resolves.toEqual({ account_id: 7, credit_spending_enabled: enabled })
+    expect(put).toHaveBeenCalledWith('/admin/account-window-quotas/accounts/7/credit-spending', { enabled })
+  })
+
   it.each([true, false])('puts the explicit shared-pool switch value %s', async (enabled) => {
     put.mockResolvedValue({ data: { account_id: 7, shared_pool_mode: enabled } })
     await expect(setAccountSharedPoolMode(7, enabled)).resolves.toEqual({ account_id: 7, shared_pool_mode: enabled })

@@ -7,6 +7,7 @@ const apiMocks = vi.hoisted(() => ({
   setMembers: vi.fn(),
   setLimit: vi.fn(),
   setSharedPool: vi.fn(),
+  setCreditSpending: vi.fn(),
   listUsers: vi.fn(),
   getCeilings: vi.fn(),
   setSeats: vi.fn(),
@@ -23,6 +24,7 @@ vi.mock('@/api/accountWindowQuota', () => ({
   setAccountWindowMembers: apiMocks.setMembers,
   setAccountWindowLimit: apiMocks.setLimit,
   setAccountSharedPoolMode: apiMocks.setSharedPool,
+  setAccountCreditSpending: apiMocks.setCreditSpending,
   getAccountWindowCeilings: apiMocks.getCeilings,
   setAccountWindowSeats: apiMocks.setSeats,
   setAccountWindowCeiling: apiMocks.setCeiling,
@@ -207,6 +209,44 @@ describe('AdminWindowQuotaOverviewCard', () => {
     await flushPromises()
     expect(toggle.attributes('aria-checked')).toBe('true')
     expect(storeMocks.showError).toHaveBeenCalledWith('admin.windowQuotaOverview.sharedPoolFailed')
+  })
+
+  it('requires separate credit permission even with shared pool already enabled', async () => {
+    apiMocks.getOverview.mockResolvedValue({ ...overview, shared_pool_account_ids: [7] })
+    apiMocks.setCreditSpending.mockResolvedValueOnce({ account_id: 7, credit_spending_enabled: true })
+      .mockResolvedValueOnce({ account_id: 7, credit_spending_enabled: false })
+    const wrapper = mount(AdminWindowQuotaOverviewCard)
+    await flushPromises()
+    const toggle = wrapper.get('[data-testid="credit-spending-toggle-7"]')
+    expect(toggle.attributes('aria-checked')).toBe('false')
+    await toggle.trigger('click')
+    await flushPromises()
+    expect(apiMocks.setCreditSpending).toHaveBeenLastCalledWith(7, true)
+    expect(toggle.attributes('aria-checked')).toBe('true')
+    await toggle.trigger('click')
+    await flushPromises()
+    expect(apiMocks.setCreditSpending).toHaveBeenLastCalledWith(7, false)
+    expect(toggle.attributes('aria-checked')).toBe('false')
+    expect(apiMocks.setSharedPool).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-testid="shared-pool-toggle-7"]').attributes('aria-checked')).toBe('true')
+  })
+
+  it('keeps credit authorization off after a failed save and prevents duplicate submissions', async () => {
+    let reject: (reason: Error) => void = () => {}
+    apiMocks.setCreditSpending.mockImplementationOnce(() => new Promise((_, fail) => { reject = fail }))
+    const wrapper = mount(AdminWindowQuotaOverviewCard)
+    await flushPromises()
+    const toggle = wrapper.get('[data-testid="credit-spending-toggle-7"]')
+    await toggle.trigger('click')
+    expect(toggle.attributes('disabled')).toBeDefined()
+    expect(toggle.attributes('aria-checked')).toBe('false')
+    await toggle.trigger('click')
+    expect(apiMocks.setCreditSpending).toHaveBeenCalledTimes(1)
+    reject(new Error('offline'))
+    await flushPromises()
+    expect(toggle.attributes('aria-checked')).toBe('false')
+    expect(toggle.attributes('disabled')).toBeUndefined()
+    expect(storeMocks.showError).toHaveBeenCalledWith('admin.windowQuotaOverview.creditSpendingFailed')
   })
 
   beforeEach(() => {

@@ -255,12 +255,18 @@ func (h *AccountWindowQuotaHandler) AdminOverview(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
+	creditIDs, err := h.quota.ListCreditSpendingAccountIDs(c.Request.Context())
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
 	response.Success(c, gin.H{
-		"enabled":                 true,
-		"rows":                    buildOverviewItems(records, time.Now()),
-		"summaries":               buildSummaryItems(summaryRecords),
-		"account_ids":             accountIDs,
-		"shared_pool_account_ids": sharedPoolIDs,
+		"enabled":                     true,
+		"rows":                        buildOverviewItems(records, time.Now()),
+		"summaries":                   buildSummaryItems(summaryRecords),
+		"account_ids":                 accountIDs,
+		"shared_pool_account_ids":     sharedPoolIDs,
+		"credit_spending_account_ids": creditIDs,
 	})
 }
 
@@ -292,6 +298,36 @@ func (h *AccountWindowQuotaHandler) AdminSetSharedPoolMode(c *gin.Context) {
 		return
 	}
 	response.Success(c, gin.H{"account_id": accountID, "shared_pool_mode": *req.Enabled})
+}
+
+// AdminSetCreditSpending controls the explicit permission to spend paid Codex credits.
+// PUT /api/v1/admin/account-window-quotas/accounts/:id/credit-spending
+func (h *AccountWindowQuotaHandler) AdminSetCreditSpending(c *gin.Context) {
+	accountID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || accountID <= 0 {
+		response.BadRequest(c, "invalid account id")
+		return
+	}
+	var req struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.Enabled == nil {
+		response.BadRequest(c, "enabled must be a boolean")
+		return
+	}
+	if h.quota == nil || !h.quota.Enabled() {
+		response.BadRequest(c, "account window quota is not enabled")
+		return
+	}
+	if err := h.quota.SetAccountCreditSpending(c.Request.Context(), accountID, *req.Enabled); err != nil {
+		if errors.Is(err, service.ErrAccountWindowInvalidMembers) {
+			response.BadRequest(c, "account is not an active shared account")
+			return
+		}
+		response.ErrorFrom(c, err)
+		return
+	}
+	response.Success(c, gin.H{"account_id": accountID, "credit_spending_enabled": *req.Enabled})
 }
 
 type setAccountWindowLimitRequest struct {

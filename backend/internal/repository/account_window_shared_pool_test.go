@@ -32,8 +32,8 @@ func TestAccountWindowSharedPoolRepositoryRejectsNonSharedAccount(t *testing.T) 
 func TestAccountWindowSharedPoolRepositoryReadsFlagWithMembership(t *testing.T) {
 	repo, mock := newWindowQuotaRepoSQLMock(t)
 	mock.ExpectQuery(`SELECT[\s\S]*window_quota_shared_pool_mode[\s\S]*WHERE q.account_id = \$1`).
-		WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"user_id", "account_id", "window_type", "limit_percent", "attributed_percent", "window_reset_at", "donate_pool_fraction", "shared_pool_mode"}).
-		AddRow(1, 7, "5h", 23, 30, nil, 0.5, true))
+		WithArgs(int64(7)).WillReturnRows(sqlmock.NewRows([]string{"user_id", "account_id", "window_type", "limit_percent", "attributed_percent", "window_reset_at", "donate_pool_fraction", "shared_pool_mode", "credit_spending_enabled"}).
+		AddRow(1, 7, "5h", 23, 30, nil, 0.5, true, false))
 	rows, err := repo.ListByAccount(context.Background(), 7)
 	require.NoError(t, err)
 	require.Len(t, rows, 1)
@@ -48,8 +48,8 @@ func TestAccountWindowSharedPoolModeSurvivesStaleAccountEdit(t *testing.T) {
 			repo, mock := newWindowQuotaRepoSQLMock(t)
 			mock.ExpectQuery(`SELECT[\s\S]*window_quota_shared_pool_mode[\s\S]*FOR NO KEY UPDATE`).
 				WithArgs(int64(7), service.PlatformOpenAI, service.AccountTypeOAuth, `{}`, nil).
-				WillReturnRows(sqlmock.NewRows([]string{"identity", "ollama_identity", "proxy_identity", "probe", "rate_sync", "snapshot", "ollama_session", "ollama_auto", "ollama_snapshot", "opencode_identity", "opencode_auto", "opencode_snapshot", "shared_pool_mode", "grok_observed_models", "upstream_model_metadata"}).
-					AddRow(true, false, true, nil, nil, nil, nil, nil, nil, false, nil, nil, []byte(enabled), nil, nil))
+				WillReturnRows(sqlmock.NewRows([]string{"identity", "ollama_identity", "proxy_identity", "probe", "rate_sync", "snapshot", "ollama_session", "ollama_auto", "ollama_snapshot", "opencode_identity", "opencode_auto", "opencode_snapshot", "shared_pool_mode", "grok_observed_models", "upstream_model_metadata", "credit_spending_enabled"}).
+					AddRow(true, false, true, nil, nil, nil, nil, nil, nil, false, nil, nil, []byte(enabled), nil, nil, nil))
 			account := &service.Account{ID: 7, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth,
 				Extra: map[string]any{service.AccountWindowSharedPoolModeExtraKey: enabled != "true", "unrelated": "keep"}}
 			merged, err := lockAndMergeAccountProbeExtra(context.Background(), repo.client, account, nil, nil)

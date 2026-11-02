@@ -162,6 +162,7 @@ export interface AdminWindowQuotaSummary {
 }
 
 export interface AdminWindowQuotaOverviewResponse {
+  credit_spending_account_ids?: number[]
   shared_pool_account_ids?: number[]
   enabled: boolean
   rows: AdminWindowQuotaOverviewItem[]
@@ -251,6 +252,14 @@ export async function setAccountSharedPoolMode(accountId: number, enabled: boole
   const { data } = await apiClient.put<{ account_id: number; shared_pool_mode: boolean }>(
     `/admin/account-window-quotas/accounts/${accountId}/shared-pool`,
     { enabled },
+  )
+  return data
+}
+
+/** Explicit administrator permission; shared-pool mode never enables this. */
+export async function setAccountCreditSpending(accountId: number, enabled: boolean): Promise<{ account_id: number; credit_spending_enabled: boolean }> {
+  const { data } = await apiClient.put<{ account_id: number; credit_spending_enabled: boolean }>(
+    `/admin/account-window-quotas/accounts/${accountId}/credit-spending`, { enabled },
   )
   return data
 }

@@ -84,3 +84,29 @@ func TestWriteAccountWindowQuotaExceeded_WritesFinal429(t *testing.T) {
 	require.Contains(t, recorder.Body.String(), `"window":"7d"`)
 	require.Contains(t, recorder.Body.String(), `"code":"user_account_window_quota_exceeded"`)
 }
+
+// HTTP forwarding and each WebSocket turn share this guard. A cached account
+// permission must never bypass the freshly persisted carpool permission.
+func TestAccountWindowCreditSpendingGuardIgnoresStaleAccountPermission(t *testing.T) {
+	svc, c, recorder, account := newWindowQuotaBlockedGatewayTestContext(t)
+	used := 100.0
+	repo := &sharedPoolWindowRepo{stubWindowRepo: stubWindowRepo{official7d: &used, rows: []UserAccountWindowQuotaRecord{
+		{UserID: 99, AccountID: account.ID, WindowType: WindowType7d, LimitPercent: 23, SharedPoolMode: true},
+	}}}
+	svc.accountWindowQuota = NewAccountWindowQuotaService(repo, nil)
+	account.Extra[AccountWindowCreditSpendingExtraKey] = true
+	require.ErrorIs(t, svc.CheckAccountWindowQuota(context.Background(), c, account), ErrUserAccountWindowQuotaExceeded)
+	require.NoError(t, svc.accountWindowQuota.SetAccountCreditSpending(context.Background(), account.ID, true))
+	require.NoError(t, svc.CheckAccountWindowQuota(context.Background(), c, account))
+	require.NoError(t, svc.accountWindowQuota.SetAccountCreditSpending(context.Background(), account.ID, false))
+	require.ErrorIs(t, svc.CheckAccountWindowQuota(context.Background(), c, account), ErrUserAccountWindowQuotaExceeded)
+	require.Empty(t, recorder.Body.String(), "a denied candidate may fail over before writing a response")
+}
+
+func TestWriteAccountWindowQuotaExceeded_ExplainsUnverifiedQuota(t *testing.T) {
+	_, c, recorder, _ := newWindowQuotaBlockedGatewayTestContext(t)
+	WriteAccountWindowQuotaExceeded(c, &UserAccountWindowQuotaExceededError{Window: AccountWindowQuotaUnavailable})
+	require.Equal(t, http.StatusTooManyRequests, recorder.Code)
+	require.Contains(t, recorder.Body.String(), `"code":"account_window_quota_unavailable"`)
+	require.Contains(t, recorder.Body.String(), "refresh the account's official quota")
+}

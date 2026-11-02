@@ -18,6 +18,7 @@ import (
 )
 
 type accountWindowQuotaHandlerRepo struct {
+	creditIDs        []int64
 	rows             []service.UserAccountWindowQuotaRecord
 	adminRows        []service.AdminWindowQuotaOverviewRow
 	maxConfigured    float64
@@ -111,6 +112,37 @@ func TestAccountWindowQuotaHandler_SharedPoolModeVisibleWithoutMembers(t *testin
 	w := performAccountWindowQuotaRequest(t, http.MethodGet, "/", "", h.AdminOverview)
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Equal(t, []any{float64(7)}, decodeAccountWindowQuotaResponse(t, w)["shared_pool_account_ids"])
+}
+func TestAccountWindowQuotaHandler_CreditSpendingValidation(t *testing.T) {
+	for _, body := range []string{`{}`, `{"enabled":null}`, `{"enabled":"true"}`} {
+		repo := &accountWindowQuotaHandlerRepo{}
+		h, _ := newAccountWindowQuotaHandlerTest(t, repo)
+		w := performAccountWindowQuotaRequest(t, http.MethodPut, "/", body, h.AdminSetCreditSpending, gin.Param{Key: "id", Value: "7"})
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		require.Zero(t, repo.modeAccount)
+	}
+	for _, enabled := range []bool{true, false} {
+		repo := &accountWindowQuotaHandlerRepo{}
+		h, _ := newAccountWindowQuotaHandlerTest(t, repo)
+		body, err := json.Marshal(map[string]bool{"enabled": enabled})
+		require.NoError(t, err)
+		w := performAccountWindowQuotaRequest(t, http.MethodPut, "/", string(body), h.AdminSetCreditSpending, gin.Param{Key: "id", Value: "7"})
+		require.Equal(t, http.StatusOK, w.Code)
+		require.Equal(t, int64(7), repo.modeAccount)
+		require.Equal(t, enabled, repo.modeEnabled)
+		require.Equal(t, enabled, decodeAccountWindowQuotaResponse(t, w)["credit_spending_enabled"])
+	}
+	repo := &accountWindowQuotaHandlerRepo{modeErr: service.ErrAccountWindowInvalidMembers}
+	h, _ := newAccountWindowQuotaHandlerTest(t, repo)
+	w := performAccountWindowQuotaRequest(t, http.MethodPut, "/", `{"enabled":true}`, h.AdminSetCreditSpending, gin.Param{Key: "id", Value: "7"})
+	require.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestAccountWindowQuotaHandler_CreditSpendingVisibleWithoutMembers(t *testing.T) {
+	h, _ := newAccountWindowQuotaHandlerTest(t, &accountWindowQuotaHandlerRepo{sharedAccountIDs: []int64{7}, creditIDs: []int64{7}})
+	w := performAccountWindowQuotaRequest(t, http.MethodGet, "/", "", h.AdminOverview)
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, []any{float64(7)}, decodeAccountWindowQuotaResponse(t, w)["credit_spending_account_ids"])
 }
 func (r *accountWindowQuotaHandlerRepo) GetAccountOfficialWindowPercent(_ context.Context, _ int64, window string) (float64, bool, error) {
 	value := r.official5h
@@ -350,4 +382,12 @@ func TestAccountWindowQuotaHandler_DonateRejectsNonMember(t *testing.T) {
 
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	require.Contains(t, w.Body.String(), service.ErrAccountWindowNotMember.Error())
+}
+
+func (r *accountWindowQuotaHandlerRepo) SetAccountCreditSpending(_ context.Context, accountID int64, enabled bool) error {
+	r.modeAccount, r.modeEnabled = accountID, enabled
+	return r.modeErr
+}
+func (r *accountWindowQuotaHandlerRepo) ListCreditSpendingAccountIDs(context.Context) ([]int64, error) {
+	return r.creditIDs, nil
 }

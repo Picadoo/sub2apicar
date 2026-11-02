@@ -58,6 +58,21 @@
             <button
               type="button"
               role="switch"
+              :aria-checked="creditSpendingAccountIds.includes(g.accountId)"
+              :aria-label="t('admin.windowQuotaOverview.creditSpendingSwitch', { id: g.accountId })"
+              class="btn btn-sm"
+              :class="creditSpendingAccountIds.includes(g.accountId) ? 'btn-primary' : 'btn-secondary'"
+              :disabled="savingCreditSpending !== null"
+              :data-testid="`credit-spending-toggle-${g.accountId}`"
+              @click="toggleCreditSpending(g.accountId)"
+            >
+              {{ creditSpendingAccountIds.includes(g.accountId)
+                ? t('admin.windowQuotaOverview.disableCreditSpending')
+                : t('admin.windowQuotaOverview.enableCreditSpending') }}
+            </button>
+            <button
+              type="button"
+              role="switch"
               :aria-checked="sharedPoolAccountIds.includes(g.accountId)"
               :aria-label="t('admin.windowQuotaOverview.sharedPoolSwitch', { id: g.accountId })"
               class="btn btn-sm"
@@ -84,6 +99,14 @@
           </div>
         </div>
 
+        <p class="mb-2 text-xs text-gray-500 dark:text-gray-400" :data-testid="`credit-spending-status-${g.accountId}`">
+          <strong :class="creditSpendingAccountIds.includes(g.accountId) ? 'text-amber-600 dark:text-amber-400' : ''">
+            {{ creditSpendingAccountIds.includes(g.accountId)
+              ? t('admin.windowQuotaOverview.creditSpendingAllowed')
+              : t('admin.windowQuotaOverview.creditSpendingForbidden') }}
+          </strong>
+          {{ t('admin.windowQuotaOverview.creditSpendingHint') }}
+        </p>
         <p class="mb-3 text-xs text-gray-500 dark:text-gray-400" :data-testid="`shared-pool-status-${g.accountId}`">
           <strong v-if="sharedPoolAccountIds.includes(g.accountId)" class="text-blue-600 dark:text-blue-400">
             {{ t('admin.windowQuotaOverview.sharedPoolActive') }}
@@ -342,6 +365,7 @@ import {
   setAccountWindowMembers,
   rebalanceAccountWindowQuotas,
   setAccountSharedPoolMode,
+  setAccountCreditSpending,
   type AdminWindowQuotaSummary,
   type AdminWindowQuotaOverviewItem,
   type AdminWindowQuotaOverviewResponse,
@@ -356,6 +380,8 @@ const summaries = ref<AdminWindowQuotaSummary[]>([])
 const sharedAccountIds = ref<number[]>([])
 const sharedPoolAccountIds = ref<number[]>([])
 const savingSharedPool = ref<number | null>(null)
+const creditSpendingAccountIds = ref<number[]>([])
+const savingCreditSpending = ref<number | null>(null)
 const previewAccountId = ref<number | null>(null)
 const rebalancingAccountId = ref<number | null>(null)
 const memberEditorAccountId = ref<number | null>(null)
@@ -666,6 +692,22 @@ function applyOverviewData(data: AdminWindowQuotaOverviewResponse) {
   summaries.value = data.summaries ?? []
   sharedAccountIds.value = data.account_ids ?? []
   sharedPoolAccountIds.value = data.shared_pool_account_ids ?? []
+  creditSpendingAccountIds.value = data.credit_spending_account_ids ?? []
+}
+
+async function toggleCreditSpending(accountId: number) {
+  if (savingCreditSpending.value !== null) return
+  savingCreditSpending.value = accountId
+  try {
+    const result = await setAccountCreditSpending(accountId, !creditSpendingAccountIds.value.includes(accountId))
+    creditSpendingAccountIds.value = creditSpendingAccountIds.value.filter((id) => id !== accountId)
+    if (result.credit_spending_enabled) creditSpendingAccountIds.value.push(accountId)
+    appStore.showSuccess(t('admin.windowQuotaOverview.creditSpendingSaved'))
+  } catch (error: any) {
+    appStore.showError(error?.response?.data?.message || t('admin.windowQuotaOverview.creditSpendingFailed'))
+  } finally {
+    savingCreditSpending.value = null
+  }
 }
 
 async function toggleSharedPool(accountId: number) {
@@ -765,6 +807,7 @@ async function load() {
     summaries.value = []
     sharedAccountIds.value = []
     sharedPoolAccountIds.value = []
+    creditSpendingAccountIds.value = []
   }
 }
 

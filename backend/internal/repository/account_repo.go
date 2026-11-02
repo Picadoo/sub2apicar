@@ -683,7 +683,8 @@ func lockAndMergeAccountProbeExtra(
 			extra -> 'opencode_go_usage_snapshot',
 			extra -> 'window_quota_shared_pool_mode',
 			extra -> 'grok_observed_models',
-			extra -> 'upstream_model_metadata'
+			extra -> 'upstream_model_metadata',
+			extra -> 'window_quota_credit_spending_enabled'
 		FROM accounts
 		WHERE id = $1 AND deleted_at IS NULL
 		FOR NO KEY UPDATE
@@ -713,6 +714,7 @@ func lockAndMergeAccountProbeExtra(
 		currentOpenCodeAutoRefresh     []byte
 		currentOpenCodeSnapshot        []byte
 		currentSharedPoolMode          []byte
+		currentCreditSpending          []byte
 		currentGrokObservedModels      []byte
 		currentUpstreamModelMetadata   []byte
 	)
@@ -732,6 +734,7 @@ func lockAndMergeAccountProbeExtra(
 		&currentSharedPoolMode,
 		&currentGrokObservedModels,
 		&currentUpstreamModelMetadata,
+		&currentCreditSpending,
 	); err != nil {
 		return nil, err
 	}
@@ -748,6 +751,13 @@ func lockAndMergeAccountProbeExtra(
 		return nil, err
 	} else if present {
 		extra[service.AccountWindowSharedPoolModeExtraKey] = value
+	}
+	// Stale account editors must not grant or revoke the paid-credit permission.
+	delete(extra, service.AccountWindowCreditSpendingExtraKey)
+	if value, present, err := decodeAccountExtraJSON(currentCreditSpending); err != nil {
+		return nil, err
+	} else if present {
+		extra[service.AccountWindowCreditSpendingExtraKey] = value
 	}
 	for _, key := range []string{
 		service.UpstreamBillingProbeEnabledExtraKey,

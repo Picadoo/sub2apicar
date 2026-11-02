@@ -17,14 +17,17 @@ import (
 
 // 官方窗口类型常量。
 const (
-	WindowType5h = "5h"
-	WindowType7d = "7d"
+	WindowType5h                  = "5h"
+	WindowType7d                  = "7d"
+	AccountWindowQuotaUnavailable = "quota_unavailable"
 
 	// AccountWindowForceUnattributedExtraKey 标记账号官方额度还会被中转站外部来源消耗。
 	// 启用后，官方增量全部记为未归因，绝不使用中转站 usage log 将其分配给成员。
 	AccountWindowForceUnattributedExtraKey = "window_quota_force_unattributed"
 	// Shared pool mode suspends personal caps without changing membership or usage.
 	AccountWindowSharedPoolModeExtraKey = "window_quota_shared_pool_mode"
+	// Spending Codex credits requires a separate, explicit administrator opt-in.
+	AccountWindowCreditSpendingExtraKey = "window_quota_credit_spending_enabled"
 
 	// v4 checkpoint 持久化官方窗口、前向 usage_log 游标和待结算美元 basis。
 	// 成员历史 attributed_percent 只增量推进，刷新或迟到日志不得触发整窗重分。
@@ -91,13 +94,14 @@ var accountWindowTypes = []string{WindowType5h, WindowType7d}
 
 // UserAccountWindowQuotaRecord 是 user × account × window 维度配额台账的传输结构体。
 type UserAccountWindowQuotaRecord struct {
-	SharedPoolMode    bool
-	UserID            int64
-	AccountID         int64
-	WindowType        string
-	LimitPercent      float64
-	AttributedPercent float64
-	WindowResetAt     *time.Time
+	SharedPoolMode        bool
+	CreditSpendingEnabled bool
+	UserID                int64
+	AccountID             int64
+	WindowType            string
+	LimitPercent          float64
+	AttributedPercent     float64
+	WindowResetAt         *time.Time
 	// DonatePoolFraction 是用户愿意捐入救急池的比例（占自己该窗口上限），∈[0,1]；仅当前窗口有效。
 	DonatePoolFraction float64
 }
@@ -210,6 +214,32 @@ type accountWindowForceUnattributedReader interface {
 type accountWindowSharedPoolManager interface {
 	SetAccountSharedPoolMode(ctx context.Context, accountID int64, enabled bool) error
 	ListSharedPoolAccountIDs(ctx context.Context) ([]int64, error)
+}
+
+type accountWindowCreditSpendingManager interface {
+	SetAccountCreditSpending(ctx context.Context, accountID int64, enabled bool) error
+	ListCreditSpendingAccountIDs(ctx context.Context) ([]int64, error)
+}
+
+func (s *AccountWindowQuotaService) SetAccountCreditSpending(ctx context.Context, accountID int64, enabled bool) error {
+	if !s.Enabled() || accountID <= 0 {
+		return ErrAccountWindowInvalidMembers
+	}
+	manager, ok := s.repo.(accountWindowCreditSpendingManager)
+	if !ok {
+		return errors.New("account credit spending is unavailable")
+	}
+	return manager.SetAccountCreditSpending(ctx, accountID, enabled)
+}
+
+func (s *AccountWindowQuotaService) ListCreditSpendingAccountIDs(ctx context.Context) ([]int64, error) {
+	if !s.Enabled() {
+		return nil, nil
+	}
+	if manager, ok := s.repo.(accountWindowCreditSpendingManager); ok {
+		return manager.ListCreditSpendingAccountIDs(ctx)
+	}
+	return nil, nil
 }
 
 func (s *AccountWindowQuotaService) SetAccountSharedPoolMode(ctx context.Context, accountID int64, enabled bool) error {
@@ -1012,7 +1042,7 @@ func effectiveWindowQuotaRecordsAt(records []UserAccountWindowQuotaRecord, now t
 // CheckUserAccountEligible 校验用户在某账号上是否仍可发起请求。
 // 规则：5h、7d 都在自己份额之上可借各自的「自愿救急池」（只用别人主动捐出的部分；无人捐则纯硬上限）。
 // 返回 eligible=false 时附带被打满的窗口与其重置时间，供调用方生成 429。
-// fail-open：底层错误一律放行（不因配额组件故障阻断业务）。
+// 付费点数权限不可因读取失败而放行；未授权时必须有可验证的官方窗口快照。
 func (s *AccountWindowQuotaService) CheckUserAccountEligible(ctx context.Context, userID, accountID int64) (eligible bool, blockedWindow string, resetAt *time.Time) {
 	if !s.Enabled() || userID <= 0 || accountID <= 0 {
 		return true, "", nil
@@ -1020,7 +1050,7 @@ func (s *AccountWindowQuotaService) CheckUserAccountEligible(ctx context.Context
 	records, err := s.repo.ListByAccount(ctx, accountID)
 	if err != nil {
 		slog.Warn("account_window_quota.eligibility_read_failed", "user_id", userID, "account_id", accountID, "error", err)
-		return true, "", nil
+		return false, AccountWindowQuotaUnavailable, nil
 	}
 	pv := buildAccountWindowPoolView(records)
 	pv.clearExpiredUsage(time.Now())
@@ -1034,16 +1064,40 @@ func (s *AccountWindowQuotaService) CheckUserAccountEligible(ctx context.Context
 		return false, WindowType5h, nil
 	}
 
-	// 0) 账号级硬闸只读取 OpenAI 官方账号窗口百分比。成员归因之和、
-	// usage_logs.total_cost 和 Token 都不能充当账号总量来源；官方快照暂缺时 fail-open。
-	if official7d, found := s.resolveAccountWindowOfficialPercent(ctx, accountID, WindowType7d); found && official7d+windowQuotaEpsilon >= ceiling7d {
-		return false, WindowType7d, pv.reset7d[userID]
-	}
-	if official5h, found := s.resolveAccountWindowOfficialPercent(ctx, accountID, WindowType5h); found && official5h+windowQuotaEpsilon >= ceiling5h {
-		return false, WindowType5h, pv.reset5h[userID]
+	// 0) Credit spending is an explicit permission above shared-pool mode.
+	// Only that permission may waive the official account safety ceilings; it
+	// never waives membership, personal caps, billing, or real upstream limits.
+	// Read the flag with membership on every check, including WS turns, so a
+	// stale scheduler account or an existing connection cannot retain permission.
+	if !records[0].CreditSpendingEnabled {
+		reader, ok := s.repo.(accountWindowOfficialUsageReader)
+		if !ok {
+			return false, AccountWindowQuotaUnavailable, nil
+		}
+		verified := false
+		for _, window := range []string{WindowType7d, WindowType5h} {
+			used, found, err := reader.GetAccountOfficialWindowPercent(ctx, accountID, window)
+			if err != nil {
+				slog.Warn("account_window_quota.official_extra_read_failed", "account_id", accountID, "window", window, "error", err)
+				return false, AccountWindowQuotaUnavailable, nil
+			}
+			verified = verified || found
+			ceiling, reset := ceiling7d, pv.reset7d[userID]
+			if window == WindowType5h {
+				ceiling, reset = ceiling5h, pv.reset5h[userID]
+			}
+			if found && normalizeAccountWindowPercent(used)+windowQuotaEpsilon >= ceiling {
+				return false, window, reset
+			}
+		}
+		// Pro may only expose a weekly window. Never invent a missing 5h window,
+		// but require at least one valid official window before using the account.
+		if !verified {
+			return false, AccountWindowQuotaUnavailable, nil
+		}
 	}
 	// The account flag is read with the member rows, so toggles need no cache
-	// invalidation. Membership and both official ceilings remain mandatory.
+	// invalidation. Shared pool cannot authorize credit spending on its own.
 	if records[0].SharedPoolMode {
 		return true, "", nil
 	}

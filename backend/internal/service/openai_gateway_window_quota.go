@@ -86,6 +86,10 @@ func WriteAccountWindowQuotaExceeded(c *gin.Context, quotaErr error) {
 		"message": fmt.Sprintf("You have reached your %s window usage limit on this account; access resumes after the official window resets.", window),
 		"window":  window,
 	}
+	if window == AccountWindowQuotaUnavailable {
+		errBody["code"] = "account_window_quota_unavailable"
+		errBody["message"] = "This account's included quota could not be verified and credit spending is not authorized. Ask an administrator to refresh the account's official quota."
+	}
 	if resetAt != nil {
 		retryAfter := int(time.Until(*resetAt).Seconds())
 		if retryAfter < 1 {

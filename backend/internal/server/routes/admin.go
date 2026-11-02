@@ -147,6 +147,7 @@ func registerAccountWindowQuotaRoutes(admin *gin.RouterGroup, h *handler.Handler
 		quotas.POST("/accounts/:id/equalize", h.AccountWindowQuota.AdminEqualizeAccountLimits)
 		quotas.PUT("/accounts/:id/members", h.AccountWindowQuota.AdminSetAccountMembers)
 		quotas.PUT("/accounts/:id/shared-pool", h.AccountWindowQuota.AdminSetSharedPoolMode)
+		quotas.PUT("/accounts/:id/credit-spending", h.AccountWindowQuota.AdminSetCreditSpending)
 		quotas.GET("/ceilings", h.AccountWindowQuota.AdminGetCeilings)
 		quotas.POST("/ceiling", h.AccountWindowQuota.AdminSetCeiling)
 		quotas.POST("/seats", h.AccountWindowQuota.AdminSetSeats)
