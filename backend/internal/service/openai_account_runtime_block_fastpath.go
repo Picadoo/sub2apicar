@@ -222,10 +222,6 @@ func shouldCooldownOpenAITransientUpstreamError(statusCode int, responseBody []b
 	}
 }
 
-func (s *OpenAIGatewayService) markOpenAIOAuth429RateLimited(ctx context.Context, account *Account, headers http.Header, responseBody []byte) {
-	s.markOpenAIOAuth429RateLimitedAt(ctx, account, headers, responseBody, time.Now())
-}
-
 func (s *OpenAIGatewayService) markOpenAIOAuth429RateLimitedAt(ctx context.Context, account *Account, headers http.Header, responseBody []byte, observedAt time.Time) {
 	if s == nil || !isOpenAIOAuthAccount(account) {
 		return

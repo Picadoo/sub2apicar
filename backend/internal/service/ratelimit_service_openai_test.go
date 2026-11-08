@@ -559,3 +559,17 @@ func TestCalculateOpenAI429ResetTime_5MinFallbackWhenNoReset(t *testing.T) {
 		t.Errorf("expected nil when no reset_after_seconds, got %v", resetAt)
 	}
 }
+
+// Test-only wrappers supply the observation time; production callers pass it explicitly.
+// handle429 兼容内部测试和无传输时间调用。
+func (s *RateLimitService) handle429(ctx context.Context, account *Account, headers http.Header, responseBody []byte) {
+	s.handle429At(ctx, account, headers, responseBody, time.Now())
+}
+
+func (s *RateLimitService) calculateOpenAI429ResetTime(headers http.Header) *time.Time {
+	return calculateOpenAI429ResetTime(headers)
+}
+
+func (s *RateLimitService) persistOpenAICodexSnapshot(ctx context.Context, account *Account, headers http.Header) {
+	s.persistOpenAICodexSnapshotAt(ctx, account, headers, time.Now())
+}

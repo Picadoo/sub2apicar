@@ -1,8 +1,5 @@
 version: "2"
 
-run:
-  build-tags: [unit]
-
 linters:
   default: none
   enable:

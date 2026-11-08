@@ -1256,11 +1256,6 @@ func setAccountRateLimitedMonotonic(ctx context.Context, repo AccountRepository,
 	return repo.SetRateLimited(ctx, accountID, resetAt)
 }
 
-// handle429 兼容内部测试和无传输时间调用。
-func (s *RateLimitService) handle429(ctx context.Context, account *Account, headers http.Header, responseBody []byte) {
-	s.handle429At(ctx, account, headers, responseBody, time.Now())
-}
-
 // handle429At 解析响应头获取重置时间，标记账号为限流状态，并用真实响应观测时间处理官方快照。
 func (s *RateLimitService) handle429At(ctx context.Context, account *Account, headers http.Header, responseBody []byte, observedAt time.Time) {
 	// OpenAI OAuth stays on the same account for the gateway's bounded retry
@@ -1515,10 +1510,6 @@ func calculateOpenAI429ResetTimeAt(headers http.Header, observedAt time.Time) *t
 	// 未达到100%时，reset-after 只代表窗口信息，不能证明账号配额耗尽。
 	// 这类瞬时429必须回到可配置的兜底路径，避免未耗尽账号被长时间排除。
 	return nil
-}
-
-func (s *RateLimitService) calculateOpenAI429ResetTime(headers http.Header) *time.Time {
-	return calculateOpenAI429ResetTime(headers)
 }
 
 func (s *RateLimitService) calculateOpenAI429ResetTimeAt(headers http.Header, observedAt time.Time) *time.Time {
@@ -1862,10 +1853,6 @@ func pickSooner(a, b *time.Time) *time.Time {
 	default:
 		return b
 	}
-}
-
-func (s *RateLimitService) persistOpenAICodexSnapshot(ctx context.Context, account *Account, headers http.Header) {
-	s.persistOpenAICodexSnapshotAt(ctx, account, headers, time.Now())
 }
 
 func (s *RateLimitService) persistOpenAICodexSnapshotAt(ctx context.Context, account *Account, headers http.Header, observedAt time.Time) {
