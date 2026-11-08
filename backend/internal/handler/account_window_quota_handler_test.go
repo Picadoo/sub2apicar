@@ -195,7 +195,7 @@ func TestAccountWindowQuotaHandler_AdminOverviewIncludesSummaries(t *testing.T) 
 		official5h:       &official5h,
 	}
 	h, mr := newAccountWindowQuotaHandlerTest(t, repo)
-	mr.Set("uawq:ceiling:5h", "92")
+	require.NoError(t, mr.Set("uawq:ceiling:5h", "92"))
 
 	w := performAccountWindowQuotaRequest(t, http.MethodGet, "/api/v1/admin/account-window-quotas/overview", "", h.AdminOverview)
 	require.Equal(t, http.StatusOK, w.Code)

@@ -44,7 +44,7 @@ func (r *opsRepository) GetModelMismatchGroups(ctx context.Context, start, end t
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	groups := make([]service.OpsModelMismatchGroup, 0, 10)
 	for rows.Next() {
 		var group service.OpsModelMismatchGroup

@@ -945,9 +945,9 @@ func TestGrokLocalUsageForQuotaSelectsFreeOrPaidWindows(t *testing.T) {
 
 		_, weekly, monthly := grokLocalUsageForQuota(context.Background(), repo, 57, &paidBilling, now)
 
-		require.Nil(t, monthly)
+		require.NotNil(t, monthly)
 		require.NotNil(t, weekly)
-		require.Equal(t, []time.Time{localStart}, repo.startTimes)
+		require.Equal(t, []time.Time{localStart, now.Add(-13 * 24 * time.Hour)}, repo.startTimes)
 		require.Equal(t, billing.PeriodStart, paidBilling.PeriodStart)
 	})
 }

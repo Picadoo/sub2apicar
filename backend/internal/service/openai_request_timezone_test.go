@@ -144,7 +144,7 @@ func TestOpenAIRequestTimezonePassthroughWSTwoTurns(t *testing.T) {
 	t.Logf("temporary websocket listener: %s", server.Listener.Addr())
 	defer server.Close()
 	client := dialPassthroughLifecycleClientWithPayload(t, server, string(timezoneTestBody()))
-	defer client.CloseNow()
+	defer func() { _ = client.CloseNow() }()
 	for turn := 0; turn < 2; turn++ {
 		wire := requirePassthroughUpstreamWrite(t, upstream, 3*time.Second)
 		require.Contains(t, gjson.GetBytes(wire, "input.0.content.0.text").String(), "<timezone>America/New_York</timezone>")

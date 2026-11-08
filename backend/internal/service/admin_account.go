@@ -590,10 +590,6 @@ func (s *adminServiceImpl) bootstrapSharedAccountMembers(ctx context.Context, ac
 	}
 }
 
-type accountProbeEnabledAtomicUpdater interface {
-	UpdateWithUpstreamBillingProbeEnabled(context.Context, *Account, bool) error
-}
-
 func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *UpdateAccountInput) (*Account, error) {
 	account, err := s.accountRepo.GetByID(ctx, id)
 	if err != nil {

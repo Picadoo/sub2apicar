@@ -33,12 +33,12 @@ func ChatProxyStatus(c *gin.Context) {
 		response.Success(c, gin.H{"enabled": false, "max": 0, "active": []any{}})
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil) // #nosec G704 -- URL comes only from deployment configuration, never request input.
 	if err != nil {
 		unavailable()
 		return
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(req) // #nosec G704 -- Only the administrator-configured chatgate status endpoint is requested.
 	if err != nil {
 		unavailable()
 		return

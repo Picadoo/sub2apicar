@@ -1,5 +1,8 @@
 version: "2"
 
+run:
+  build-tags: [unit]
+
 linters:
   default: none
   enable:
@@ -25,6 +28,9 @@ linters:
             - "!**/internal/service/ops_metrics_collector.go"
             - "!**/internal/service/ops_scheduled_report_service.go"
             - "!**/internal/service/wire.go"
+            # Existing quota attribution coordinates through Redis checkpoints.
+            - "!**/internal/service/account_window_quota_service.go"
+            - "!**/internal/service/account_window_quota_pool_test.go"
           deny:
             - pkg: github.com/Wei-Shaw/sub2api/internal/repository
               desc: "service must not import repository"
@@ -36,6 +42,8 @@ linters:
           list-mode: original
           files:
             - "**/internal/handler/**"
+            # The handler fixture uses miniredis to exercise quota settings.
+            - "!**/internal/handler/account_window_quota_handler_test.go"
           deny:
             - pkg: github.com/Wei-Shaw/sub2api/internal/repository
               desc: "handler must not import repository"

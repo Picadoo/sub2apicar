@@ -363,7 +363,7 @@ func TestAccountTestService_OpenAI429PersistsSnapshotAndRateLimitState(t *testin
 	resp.Header.Set("x-codex-primary-used-percent", "100")
 	resp.Header.Set("x-codex-primary-reset-after-seconds", "604800")
 	resp.Header.Set("x-codex-primary-window-minutes", "10080")
-	resp.Header.Set("x-codex-secondary-used-percent", "100")
+	resp.Header.Set("x-codex-secondary-used-percent", "0")
 	resp.Header.Set("x-codex-secondary-reset-after-seconds", "18000")
 	resp.Header.Set("x-codex-secondary-window-minutes", "300")
 

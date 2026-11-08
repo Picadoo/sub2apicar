@@ -125,10 +125,16 @@ func TestScopedAdminBatchRejectsWholeRequestBeforeData(t *testing.T) {
 	}
 }
 
+type scopedStatisticsSnapshotRepo struct{ stubQuotaAccountRepo }
+
+func (r *scopedStatisticsSnapshotRepo) UpdateCodexUsageSnapshotIfNewer(ctx context.Context, id int64, _ time.Time, updates map[string]any) (bool, error) {
+	return true, r.UpdateExtra(ctx, id, updates)
+}
+
 func TestScopedAdminSnapshotWriteDoesNotNotifyAutomaticReset(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		a := &Account{ID: 1, Platform: PlatformOpenAI, Type: AccountTypeOAuth, GroupIDs: []int64{1}}
-		repo := &stubQuotaAccountRepo{accounts: map[int64]*Account{1: a}}
+		repo := &scopedStatisticsSnapshotRepo{stubQuotaAccountRepo: stubQuotaAccountRepo{accounts: map[int64]*Account{1: a}}}
 		svc := &AccountUsageService{accountRepo: repo}
 		notifier := NewOpenAIQuotaAutoResetService(nil, nil, nil, nil, nil, nil, nil)
 		openAIAutoResetNotifierRegistry.Lock()
@@ -141,7 +147,7 @@ func TestScopedAdminSnapshotWriteDoesNotNotifyAutomaticReset(t *testing.T) {
 			openAIAutoResetNotifierRegistry.Unlock()
 			notifier.cancel()
 		}()
-		svc.persistOpenAICodexProbeSnapshotContext(scopedStatisticsServiceContext("accounts.usage.read"), 1, map[string]any{"codex_5h_used_percent": 25.0})
+		svc.persistOpenAICodexProbeSnapshotContext(scopedStatisticsServiceContext("accounts.usage.read"), 1, map[string]any{"codex_5h_used_percent": 25.0, "codex_usage_updated_at": time.Now().UTC().Format(time.RFC3339Nano)})
 		synctest.Wait()
 		require.Equal(t, 1, repo.extraUpdateCalls)
 		require.Empty(t, notifier.queue)

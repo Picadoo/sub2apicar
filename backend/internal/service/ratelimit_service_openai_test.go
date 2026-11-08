@@ -4,6 +4,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -188,6 +189,10 @@ func (r *openAI429SnapshotRepo) SetRateLimited(_ context.Context, id int64, _ ti
 	return nil
 }
 
+func (r *openAI429SnapshotRepo) UpdateCodexUsageSnapshotIfNewer(ctx context.Context, id int64, _ time.Time, updates map[string]any) (bool, error) {
+	return true, r.UpdateExtra(ctx, id, updates)
+}
+
 func (r *openAI429SnapshotRepo) UpdateExtra(_ context.Context, _ int64, updates map[string]any) error {
 	r.updatedExtra = updates
 	return nil
@@ -208,7 +213,7 @@ func TestHandle429_OpenAIPersistsCodexSnapshotImmediately(t *testing.T) {
 	headers.Set("x-codex-primary-used-percent", "100")
 	headers.Set("x-codex-primary-reset-after-seconds", "604800")
 	headers.Set("x-codex-primary-window-minutes", "10080")
-	headers.Set("x-codex-secondary-used-percent", "100")
+	headers.Set("x-codex-secondary-used-percent", "0")
 	headers.Set("x-codex-secondary-reset-after-seconds", "18000")
 	headers.Set("x-codex-secondary-window-minutes", "300")
 
@@ -238,7 +243,7 @@ func TestHandle429_OpenAISyncsObservedPlanType(t *testing.T) {
 		Type:        AccountTypeOAuth,
 		Credentials: map[string]any{"plan_type": "plus"},
 	}
-	body := []byte(`{"error":{"type":"usage_limit_reached","message":"limit reached","plan_type":"free","resets_at":1777283883}}`)
+	body := []byte(fmt.Sprintf(`{"error":{"type":"usage_limit_reached","message":"limit reached","plan_type":"free","resets_at":%d}}`, time.Now().Add(time.Hour).Unix()))
 
 	svc.handle429(context.Background(), account, http.Header{}, body)
 

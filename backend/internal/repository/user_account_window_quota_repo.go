@@ -329,7 +329,7 @@ func lockAccountWindowMembersInTx(ctx context.Context, client *dbent.Client, acc
 	if err != nil {
 		return nil, fmt.Errorf("lock account %d window %s members: %w", accountID, window, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	members := make([]accountWindowMemberState, 0)
 	for rows.Next() {
 		var member accountWindowMemberState
@@ -446,7 +446,7 @@ func usageLogCursorInTx(ctx context.Context, client *dbent.Client, accountID int
 	if err != nil {
 		return attributionCursor{}, false, fmt.Errorf("resolve account %d usage-log cursor: %w", accountID, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	if !rows.Next() {
 		return attributionCursor{}, false, rows.Err()
 	}
@@ -469,7 +469,7 @@ func latestUsageCursorInTx(ctx context.Context, client *dbent.Client, accountID 
 	if err != nil {
 		return attributionCursor{}, false, fmt.Errorf("read account %d latest usage cursor: %w", accountID, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	if !rows.Next() {
 		return attributionCursor{}, false, rows.Err()
 	}
@@ -526,7 +526,7 @@ func readIncrementalUsageCostsInTx(ctx context.Context, client *dbent.Client, ac
 	if err != nil {
 		return nil, fmt.Errorf("read account %d incremental usage costs: %w", accountID, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	costByUser := make(map[int64]float64)
 	for rows.Next() {
 		var userID int64
@@ -958,7 +958,7 @@ func (r *userAccountWindowQuotaRepository) ListByAccount(ctx context.Context, ac
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	return scanWindowQuotaRecords(rows)
 }
 
@@ -974,7 +974,7 @@ func (r *userAccountWindowQuotaRepository) ListSharedAccountIDs(ctx context.Cont
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	accountIDs := make([]int64, 0)
 	for rows.Next() {
 		var accountID int64
@@ -1016,7 +1016,7 @@ func (r *userAccountWindowQuotaRepository) ListSharedPoolAccountIDs(ctx context.
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	ids := make([]int64, 0)
 	for rows.Next() {
 		var id int64
@@ -1058,7 +1058,7 @@ func (r *userAccountWindowQuotaRepository) ListCreditSpendingAccountIDs(ctx cont
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	ids := make([]int64, 0)
 	for rows.Next() {
 		var id int64
@@ -1080,7 +1080,7 @@ func (r *userAccountWindowQuotaRepository) IsAccountWindowForceUnattributed(ctx 
 	if err != nil {
 		return false, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	force := false
 	if rows.Next() {
 		if err := rows.Scan(&force); err != nil {
@@ -1116,7 +1116,7 @@ func (r *userAccountWindowQuotaRepository) ListPeerSharedAccountMemberUserIDs(ct
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	userIDs := make([]int64, 0)
 	for rows.Next() {
 		var userID int64
@@ -1156,7 +1156,7 @@ func (r *userAccountWindowQuotaRepository) GetAccountOfficialWindowPercent(ctx c
 	if err != nil {
 		return 0, false, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	if !rows.Next() {
 		if err := rows.Err(); err != nil {
 			return 0, false, err
@@ -1977,15 +1977,4 @@ func nullableTime(t *time.Time) any {
 		return nil
 	}
 	return *t
-}
-
-func entWindowQuotaToRecord(e *dbent.UserAccountWindowQuota) *service.UserAccountWindowQuotaRecord {
-	return &service.UserAccountWindowQuotaRecord{
-		UserID:            e.UserID,
-		AccountID:         e.AccountID,
-		WindowType:        e.WindowType,
-		LimitPercent:      e.LimitPercent,
-		AttributedPercent: e.AttributedPercent,
-		WindowResetAt:     e.WindowResetAt,
-	}
 }

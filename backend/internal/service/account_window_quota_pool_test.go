@@ -423,7 +423,8 @@ func (s *stubWindowRepo) GetAccountOfficialWindowPercent(_ context.Context, _ in
 
 func newStubQuotaService(t *testing.T, rows []UserAccountWindowQuotaRecord) *AccountWindowQuotaService {
 	t.Helper()
-	svc, _ := newQuotaServiceWithMiniRedis(t, &stubWindowRepo{rows: rows})
+	official := 0.0
+	svc, _ := newQuotaServiceWithMiniRedis(t, &stubWindowRepo{rows: rows, official5h: &official})
 	return svc
 }
 
@@ -490,7 +491,7 @@ func TestSetAccountMembers_RecomputesFromOfficialCheckpointUsingDollarPath(t *te
 	}
 	encoded, err := json.Marshal(checkpoint)
 	require.NoError(t, err)
-	mr.Set(accountWindowCheckpointKey(29, WindowType5h), string(encoded))
+	require.NoError(t, mr.Set(accountWindowCheckpointKey(29, WindowType5h), string(encoded)))
 
 	_, err = svc.SetAccountMembers(context.Background(), 29, []int64{31, 1})
 	require.NoError(t, err)
@@ -641,7 +642,7 @@ func TestResetDueWindowsDeletesCheckpointOnlyWhenDatabaseWindowIsStillDue(t *tes
 			}
 			svc, mr := newQuotaServiceWithMiniRedis(t, repo)
 			key := accountWindowCheckpointKey(29, WindowType5h)
-			mr.Set(key, `{"basis":"full_window_total_cost_v3"}`)
+			require.NoError(t, mr.Set(key, `{"basis":"full_window_total_cost_v3"}`))
 
 			svc.ResetDueWindows(context.Background())
 
@@ -783,7 +784,7 @@ func TestCheckEligible_AccountCeilingIgnoresAttributedMemberSum(t *testing.T) {
 	}
 }
 
-// 官方窗口达到 ceiling 时，即使当前成员远未到个人上限也必须全员拦截。
+// Redis checkpoints cannot replace a missing official quota snapshot.
 func TestCheckEligible_DoesNotUseRedisCheckpointAsOfficialTruth(t *testing.T) {
 	svc, mr := newQuotaServiceWithMiniRedis(t, &stubWindowRepo{
 		rows: []UserAccountWindowQuotaRecord{
@@ -795,11 +796,11 @@ func TestCheckEligible_DoesNotUseRedisCheckpointAsOfficialTruth(t *testing.T) {
 	checkpoint := NewAccountWindowAttributionCheckpoint(95, resetAt.Add(-5*time.Hour), now, &resetAt)
 	encoded, err := json.Marshal(checkpoint)
 	require.NoError(t, err)
-	mr.Set(accountWindowCheckpointKey(1, WindowType5h), string(encoded))
+	require.NoError(t, mr.Set(accountWindowCheckpointKey(1, WindowType5h), string(encoded)))
 
 	eligible, window, _ := svc.CheckUserAccountEligible(context.Background(), 1, 1)
-	require.True(t, eligible)
-	require.Empty(t, window)
+	require.False(t, eligible)
+	require.Equal(t, AccountWindowQuotaUnavailable, window)
 }
 
 func TestCheckEligible_AccountCeilingHardStopFromOfficialSnapshot(t *testing.T) {
@@ -925,7 +926,7 @@ func TestSyncOfficialSnapshot_LegacyCheckpointRebuildsFromWindowStartWithCostBas
 	}
 	encoded, err := json.Marshal(legacy)
 	require.NoError(t, err)
-	mr.Set(accountWindowCheckpointKey(29, WindowType7d), string(encoded))
+	require.NoError(t, mr.Set(accountWindowCheckpointKey(29, WindowType7d), string(encoded)))
 
 	used7d, reset7d, minutes7d := 42.0, 6*24*60*60, 10080
 	snapshot := &OpenAICodexUsageSnapshot{
@@ -1081,8 +1082,8 @@ func TestListAllForAdmin_ReturnsPerAccountWindowSummaries(t *testing.T) {
 		official7d: &official7d,
 	}
 	svc, mr := newQuotaServiceWithMiniRedis(t, repo)
-	mr.Set(accountWindowCeilingKey(WindowType5h), "50")
-	mr.Set(accountWindowCeilingKey(WindowType7d), "80")
+	require.NoError(t, mr.Set(accountWindowCeilingKey(WindowType5h), "50"))
+	require.NoError(t, mr.Set(accountWindowCeilingKey(WindowType7d), "80"))
 
 	_, summaries, err := svc.ListAllForAdmin(context.Background())
 	if err != nil {
@@ -1135,8 +1136,8 @@ func TestEqualizeAccountActiveMemberLimits_UsesCurrentCeilings(t *testing.T) {
 		{WindowType: WindowType7d, ActiveMemberCount: 4, SharePercent: 22.5, CeilingPercent: 90},
 	}}
 	svc, mr := newQuotaServiceWithMiniRedis(t, repo)
-	mr.Set(accountWindowCeilingKey(WindowType5h), "80")
-	mr.Set(accountWindowCeilingKey(WindowType7d), "90")
+	require.NoError(t, mr.Set(accountWindowCeilingKey(WindowType5h), "80"))
+	require.NoError(t, mr.Set(accountWindowCeilingKey(WindowType7d), "90"))
 
 	results, err := svc.EqualizeAccountActiveMemberLimits(context.Background(), 7)
 	if err != nil {

@@ -40,7 +40,7 @@ func (s *OpsAlertEvaluatorService) computeRuleMetricWithDetails(ctx context.Cont
 		return 0, "", true
 	}
 	var details strings.Builder
-	details.WriteString("\n上游响应自报模型不一致（非模型质量鉴定；未自动重试或切换账号）。最多列出 10 组：")
+	_, _ = details.WriteString("\n上游响应自报模型不一致（非模型质量鉴定；未自动重试或切换账号）。最多列出 10 组：")
 	for i, group := range groups {
 		if i >= 10 {
 			break

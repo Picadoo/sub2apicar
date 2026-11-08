@@ -14,7 +14,7 @@ import (
 func TestOpsModelMismatchGroups(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	require.NoError(t, err)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	r := &opsRepository{db: db}
 	end := time.Now()
 	start := end.Add(-5 * time.Minute)
