@@ -18,7 +18,8 @@ func TestAPIKeyConcurrencyAtomicLimitAndRelease(t *testing.T) {
 	r := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: r.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
-	cache := NewConcurrencyCache(client, 15, 900).(*concurrencyCache)
+	cache, cacheOK := NewConcurrencyCache(client, 15, 900).(*concurrencyCache)
+	require.True(t, cacheOK)
 	ctx := context.Background()
 	var acquired atomic.Int64
 	var wg sync.WaitGroup
@@ -61,7 +62,8 @@ func TestAPIKeyConcurrencyLiveSharesLimit(t *testing.T) {
 	r := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: r.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
-	cache := NewConcurrencyCache(client, 15, 900).(*concurrencyCache)
+	cache, cacheOK := NewConcurrencyCache(client, 15, 900).(*concurrencyCache)
+	require.True(t, cacheOK)
 	ctx := context.Background()
 	ok, err := cache.AcquireAPIKeySlot(ctx, 30, 1, "regular")
 	require.NoError(t, err)
