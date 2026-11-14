@@ -335,9 +335,23 @@ func (s *OpenAIGatewayService) handleOpenAIWSErrorEventTransientFailureAt(ctx co
 	if status != 0 {
 		if status == http.StatusTooManyRequests {
 			headers = openAIWSSemantic429Headers(account, canonicalModel, headers)
+			observedAt = openAIWSInConnectionEventObservedAt(headers, observedAt)
+		} else {
+			observedAt = time.Now()
 		}
 		s.handleOpenAIAccountUpstreamErrorAt(ctx, account, status, headers, payload, observedAt, canonicalModel)
 	}
+}
+
+// openAIWSInConnectionEventObservedAt 返回连接内事件（error / response.failed）的冷却基准时间。
+// 握手时间只用于解释仍被保留的握手响应头中的相对 reset（spark OAuth 429）；
+// 头被剥离或是 5xx/529 等瞬时失败时以事件到达时间为准，否则复用多时的长连接上
+// 算出的冷却截止时间早已过去，限流与瞬时冷却都会被当成过期而不生效。
+func openAIWSInConnectionEventObservedAt(retainedHeaders http.Header, handshakeObservedAt time.Time) time.Time {
+	if len(retainedHeaders) > 0 && !handshakeObservedAt.IsZero() {
+		return handshakeObservedAt
+	}
+	return time.Now()
 }
 
 // handleOpenAIWSFailureAccountSideEffects applies both structured credential
@@ -351,14 +365,19 @@ func (s *OpenAIGatewayService) handleOpenAIWSFailureAccountSideEffectsAt(ctx con
 	message := extractOpenAISSEErrorMessage(payload)
 	status := openAIStreamFailureStatus(payload, message)
 	switch status {
-	case http.StatusUnauthorized, http.StatusTooManyRequests, 529:
+	case http.StatusTooManyRequests:
+		model := firstNonEmpty(canonicalModel, gjson.GetBytes(payload, "model").String(), gjson.GetBytes(payload, "response.model").String())
+		observedAt = openAIWSInConnectionEventObservedAt(openAIWSSemantic429Headers(account, model, headers), observedAt)
 		s.handleOpenAIStreamTerminalAccountSideEffectsAt(nil, account, payload, message, headers, observedAt, canonicalModel)
+		return true
+	case http.StatusUnauthorized, 529:
+		s.handleOpenAIStreamTerminalAccountSideEffectsAt(nil, account, payload, message, headers, time.Now(), canonicalModel)
 		return true
 	case http.StatusForbidden:
 		if !openAIStream403AccountFailure(payload, message) {
 			return false
 		}
-		s.handleOpenAIStreamTerminalAccountSideEffectsAt(nil, account, payload, message, headers, observedAt, canonicalModel)
+		s.handleOpenAIStreamTerminalAccountSideEffectsAt(nil, account, payload, message, headers, time.Now(), canonicalModel)
 		return true
 	}
 
@@ -366,7 +385,7 @@ func (s *OpenAIGatewayService) handleOpenAIWSFailureAccountSideEffectsAt(ctx con
 	if status == 0 {
 		return false
 	}
-	s.handleOpenAIAccountUpstreamErrorAt(ctx, account, status, headers, payload, observedAt, canonicalModel)
+	s.handleOpenAIAccountUpstreamErrorAt(ctx, account, status, headers, payload, time.Now(), canonicalModel)
 	return true
 }
 
@@ -726,6 +745,7 @@ func (s *OpenAIGatewayService) persistOpenAIWSRateLimitSignal(ctx context.Contex
 	// 实际拨号 HTTP 429 使用 nil responseBody，必须保留响应头。
 	if len(responseBody) > 0 {
 		headers = openAIWSSemantic429Headers(account, model, headers)
+		observedAt = openAIWSInConnectionEventObservedAt(headers, observedAt)
 	}
 	s.handleOpenAIAccountUpstreamErrorAt(ctx, account, http.StatusTooManyRequests, headers, responseBody, observedAt, model)
 }

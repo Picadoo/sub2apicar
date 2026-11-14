@@ -3880,22 +3880,34 @@ func (h *OpenAIGatewayHandler) writeAccountWindowQuotaExceeded(c *gin.Context, q
 		}
 	}
 
+	code := "user_account_window_quota_exceeded"
+	message := fmt.Sprintf("You have reached your %s window usage limit on this account; access resumes after the official window resets.", window)
+	if window == service.AccountWindowQuotaUnavailable {
+		code = "account_window_quota_unavailable"
+		message = "This account's included quota could not be verified and credit spending is not authorized. Ask an administrator to refresh the account's official quota."
+	}
+
 	if service.StopOpenAICompactSSEKeepaliveCommitted(c) {
 		streamStarted = true
 	}
 	service.StopOpenAIImagesJSONKeepaliveCommitted(c)
 	if !streamStarted {
+		if anthropic {
+			service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonWindowQuotaExceeded)
+			h.anthropicErrorResponse(c, http.StatusTooManyRequests, "rate_limit_error", message)
+			return
+		}
 		service.WriteAccountWindowQuotaExceeded(c, quotaErr)
 		return
 	}
 
 	service.MarkOpsClientBusinessLimited(c, service.OpsClientBusinessLimitedReasonWindowQuotaExceeded)
-	message := fmt.Sprintf("You have reached your %s window usage limit on this account; access resumes after the official window resets.", window)
 	if anthropic {
+		service.MarkOpsStreamError(c, "rate_limit_error", message, http.StatusTooManyRequests)
 		h.anthropicStreamingAwareError(c, http.StatusTooManyRequests, "rate_limit_error", message, true)
 		return
 	}
-	h.handleStreamingAwareErrorWithCode(c, http.StatusTooManyRequests, "rate_limit_error", "user_account_window_quota_exceeded", message, true, false)
+	h.handleStreamingAwareErrorWithCode(c, http.StatusTooManyRequests, "rate_limit_error", code, message, true, false)
 }
 
 // handleForwardRequestBodyMemoryOverload ends a request when rewriting exhausts

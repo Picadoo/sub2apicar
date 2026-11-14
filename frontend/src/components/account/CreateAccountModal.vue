@@ -5254,6 +5254,7 @@ watch(
       interceptWarmupRequests.value = false
     }
     if (newPlatform !== 'openai') {
+      form.window_quota_shared = false
       openaiPassthroughEnabled.value = false
       openaiRequestTimezone.value = ''
       openaiFlattenNamespacesEnabled.value = false

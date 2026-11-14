@@ -64,6 +64,19 @@ func (s *OpenAIGatewayService) CheckAccountWindowQuota(ctx context.Context, c *g
 	return &UserAccountWindowQuotaExceededError{Window: window, ResetAt: resetAt}
 }
 
+// checkLiveAccountWindowQuota 是 Live 创建路径的份额预检（Live 没有 gin.Context 中的 api_key，
+// 直接使用鉴权身份中的用户 ID）。语义与 CheckAccountWindowQuota 相同：未启用/无用户时放行。
+func (s *OpenAIGatewayService) checkLiveAccountWindowQuota(ctx context.Context, userID int64, account *Account) error {
+	if s == nil || account == nil || userID <= 0 || !account.IsWindowQuotaShared() || s.accountWindowQuota == nil || !s.accountWindowQuota.Enabled() {
+		return nil
+	}
+	eligible, window, resetAt := s.accountWindowQuota.CheckUserAccountEligible(ctx, userID, account.ID)
+	if eligible {
+		return nil
+	}
+	return &UserAccountWindowQuotaExceededError{Window: window, ResetAt: resetAt}
+}
+
 // WriteAccountWindowQuotaExceeded 写出候选池耗尽后的最终 429。
 func WriteAccountWindowQuotaExceeded(c *gin.Context, quotaErr error) {
 	if c == nil {

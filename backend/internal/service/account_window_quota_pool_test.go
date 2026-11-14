@@ -704,6 +704,30 @@ func TestCheckUserAccountEligible_ExpiredWindowDoesNotBlockBeforeResetWorker(t *
 	require.Nil(t, resetAt)
 }
 
+// 成员上限为 0 表示该窗口不可用，不能被当成不限额（同步额度已分完时新成员默认就是 0）。
+func TestCheckUserAccountEligible_ZeroLimitMemberIsBlocked(t *testing.T) {
+	svc := newStubQuotaService(t, []UserAccountWindowQuotaRecord{
+		awqRec(1, WindowType5h, 0, 0, 0),
+		awqRec(1, WindowType7d, 23, 0, 0),
+		awqRec(2, WindowType5h, 23, 0, 1),
+		awqRec(2, WindowType7d, 23, 0, 0),
+	})
+	eligible, window, resetAt := svc.CheckUserAccountEligible(context.Background(), 1, 1)
+	require.False(t, eligible)
+	require.Equal(t, WindowType5h, window)
+	require.Nil(t, resetAt)
+
+	svc = newStubQuotaService(t, []UserAccountWindowQuotaRecord{
+		awqRec(1, WindowType5h, 23, 0, 0),
+		awqRec(1, WindowType7d, 0, 0, 0),
+		awqRec(2, WindowType7d, 23, 0, 1),
+	})
+	eligible, window, resetAt = svc.CheckUserAccountEligible(context.Background(), 1, 1)
+	require.False(t, eligible)
+	require.Equal(t, WindowType7d, window)
+	require.Nil(t, resetAt)
+}
+
 // 7d 周配额打满 → 即使 5h 救急池有余也拦截（铁底线）。
 func TestCheckUserAccountEligible_SevenDayHardBlock(t *testing.T) {
 	svc := newStubQuotaService(t, []UserAccountWindowQuotaRecord{

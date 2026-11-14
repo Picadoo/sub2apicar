@@ -1155,8 +1155,9 @@ func (c *concurrencyCache) reconcileExpiredIndexCandidates(ctx context.Context, 
 // CleanupStaleProcessSlots 启动时清理非当前进程前缀的槽位。
 // 清理范围来自活跃索引（含 score 已过期的成员——它们往往正是崩溃进程留下的残留），
 // 避免在 Redis 上 SCAN 全部 concurrency:* 键；另有一次性迁移清扫兜底索引机制上线前的遗留等待计数。
-// API Key 槽位（concurrency:api_key:*）是 stats-only 数据：每次 Track/读取都会按分数
-// 裁剪过期成员，key 自带 TTL，可在一个 slot TTL 内自愈，因此不参与启动清理。
+// API Key 槽位（concurrency:api_key:*）在本定制中参与 Key 独立并发限额（AcquireAPIKeySlot），
+// 死进程残留会让 max_concurrency 较小的 Key 在一个 slot TTL 内持续 429，因此也要清理。
+// 它们没有活跃索引，只按该前缀 SCAN（键自带 TTL，数量受近期活跃 Key 数约束）。
 func (c *concurrencyCache) CleanupStaleProcessSlots(ctx context.Context, activeRequestPrefix string) error {
 	if activeRequestPrefix == "" {
 		return nil
@@ -1181,7 +1182,31 @@ func (c *concurrencyCache) CleanupStaleProcessSlots(ctx context.Context, activeR
 	if err != nil {
 		return err
 	}
-	return c.cleanupStaleProcessSlotsForIndex(ctx, userSlotIndex, userMembers, activeRequestPrefix, now)
+	if err := c.cleanupStaleProcessSlotsForIndex(ctx, userSlotIndex, userMembers, activeRequestPrefix, now); err != nil {
+		return err
+	}
+	return c.cleanupStaleAPIKeySlots(ctx, activeRequestPrefix)
+}
+
+// cleanupStaleAPIKeySlots 移除普通 API Key 槽位中非当前进程前缀的残留成员。
+// Live 租约使用独立的 concurrency:live:api_key:* 键，不在此模式内，保持不动。
+func (c *concurrencyCache) cleanupStaleAPIKeySlots(ctx context.Context, activeRequestPrefix string) error {
+	var cursor uint64
+	for {
+		keys, next, err := c.rdb.Scan(ctx, cursor, apiKeySlotKeyPrefix+"*", 200).Result()
+		if err != nil {
+			return fmt.Errorf("scan api key slots: %w", err)
+		}
+		for _, key := range keys {
+			if _, _, err := runScriptInt64Pair(ctx, c.rdb, startupCleanupSlotScript, []string{key}, activeRequestPrefix, c.slotTTLSeconds); err != nil {
+				return fmt.Errorf("cleanup stale process slots %s: %w", key, err)
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			return nil
+		}
+	}
 }
 
 // sweepLegacyWaitKeysOnce 一次性清扫活跃索引机制上线前遗留的等待计数键。

@@ -186,6 +186,8 @@ func (h *OpenAIGatewayHandler) writeLiveCreateError(c *gin.Context, err error) {
 		h.errorResponse(c, http.StatusTooManyRequests, "rate_limit_error", "Live concurrency limit reached")
 	case errors.Is(err, service.ErrLiveUnavailable):
 		h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "Live is unavailable")
+	case errors.Is(err, service.ErrUserAccountWindowQuotaExceeded):
+		service.WriteAccountWindowQuotaExceeded(c, err)
 	default:
 		var attestationErr *service.LiveAttestationUnavailableError
 		if errors.As(err, &attestationErr) {

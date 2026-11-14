@@ -762,7 +762,7 @@ func TestCacheResetCreditsSnapshot(t *testing.T) {
 }
 
 func TestCachePostResetSnapshot(t *testing.T) {
-	repo := &stubQuotaAccountRepo{}
+	repo := &stubConditionalQuotaAccountRepo{}
 	svc := &OpenAIQuotaService{accountRepo: repo}
 	credits := &OpenAIRateLimitResetCredits{AvailableCount: 0}
 	balance := "1200.50"
@@ -780,12 +780,33 @@ func TestCachePostResetSnapshot(t *testing.T) {
 		},
 	}
 
+	observedAt := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	usage.ObservedAt = observedAt
+
 	require.NoError(t, svc.CachePostResetSnapshot(context.Background(), 100, usage))
+	// 点数/卡明细走普通 UpdateExtra；官方窗口走“仅写更新快照”的条件写并推进观测标记。
 	require.Equal(t, 1, repo.extraUpdateCalls)
 	require.Equal(t, credits, repo.extraUpdates[100][openaiQuotaResetCreditsKey])
 	require.Equal(t, openAICreditsSnapshot{Credits: usage.Credits, FetchedAt: 123}, repo.extraUpdates[100][openaiQuotaCreditsKey])
-	require.Equal(t, 0.0, repo.extraUpdates[100]["codex_5h_used_percent"])
-	require.Equal(t, 0.0, repo.extraUpdates[100]["codex_7d_used_percent"])
+	require.NotContains(t, repo.extraUpdates[100], "codex_5h_used_percent")
+	require.Equal(t, 1, repo.conditionalCalls)
+	require.Equal(t, observedAt, repo.conditionalObservedAt)
+	require.Equal(t, 0.0, repo.conditionalUpdates["codex_5h_used_percent"])
+	require.Equal(t, 0.0, repo.conditionalUpdates["codex_7d_used_percent"])
+}
+
+type stubConditionalQuotaAccountRepo struct {
+	stubQuotaAccountRepo
+	conditionalCalls      int
+	conditionalObservedAt time.Time
+	conditionalUpdates    map[string]any
+}
+
+func (r *stubConditionalQuotaAccountRepo) UpdateCodexUsageSnapshotIfNewer(_ context.Context, _ int64, observedAt time.Time, updates map[string]any) (bool, error) {
+	r.conditionalCalls++
+	r.conditionalObservedAt = observedAt
+	r.conditionalUpdates = updates
+	return true, nil
 }
 
 // TestResetCreditGetByIDError_FailsClosed 验证守卫「失败关闭」语义：

@@ -200,7 +200,7 @@ describe('AdminWindowQuotaOverviewCard', () => {
 
   it('shows persisted mode without member rows and keeps it enabled if disabling fails', async () => {
     apiMocks.getOverview.mockResolvedValue({ enabled: true, account_ids: [7], shared_pool_account_ids: [7], rows: [], summaries: [] })
-    apiMocks.setSharedPool.mockRejectedValueOnce(new Error('offline'))
+    apiMocks.setSharedPool.mockRejectedValueOnce({ status: 503 })
     const wrapper = mount(AdminWindowQuotaOverviewCard)
     await flushPromises()
     const toggle = wrapper.get('[data-testid="shared-pool-toggle-7"]')
@@ -209,6 +209,16 @@ describe('AdminWindowQuotaOverviewCard', () => {
     await flushPromises()
     expect(toggle.attributes('aria-checked')).toBe('true')
     expect(storeMocks.showError).toHaveBeenCalledWith('admin.windowQuotaOverview.sharedPoolFailed')
+  })
+
+  it('surfaces the backend rejection reason from the API client error', async () => {
+    apiMocks.getOverview.mockResolvedValue({ enabled: true, account_ids: [7], shared_pool_account_ids: [7], rows: [], summaries: [] })
+    apiMocks.setSharedPool.mockRejectedValueOnce({ status: 400, message: 'account is not a carpool account' })
+    const wrapper = mount(AdminWindowQuotaOverviewCard)
+    await flushPromises()
+    await wrapper.get('[data-testid="shared-pool-toggle-7"]').trigger('click')
+    await flushPromises()
+    expect(storeMocks.showError).toHaveBeenCalledWith('account is not a carpool account')
   })
 
   it('requires separate credit permission even with shared pool already enabled', async () => {
@@ -232,7 +242,7 @@ describe('AdminWindowQuotaOverviewCard', () => {
   })
 
   it('keeps credit authorization off after a failed save and prevents duplicate submissions', async () => {
-    let reject: (reason: Error) => void = () => {}
+    let reject: (reason: unknown) => void = () => {}
     apiMocks.setCreditSpending.mockImplementationOnce(() => new Promise((_, fail) => { reject = fail }))
     const wrapper = mount(AdminWindowQuotaOverviewCard)
     await flushPromises()
@@ -242,7 +252,7 @@ describe('AdminWindowQuotaOverviewCard', () => {
     expect(toggle.attributes('aria-checked')).toBe('false')
     await toggle.trigger('click')
     expect(apiMocks.setCreditSpending).toHaveBeenCalledTimes(1)
-    reject(new Error('offline'))
+    reject({ status: 503 })
     await flushPromises()
     expect(toggle.attributes('aria-checked')).toBe('false')
     expect(toggle.attributes('disabled')).toBeUndefined()

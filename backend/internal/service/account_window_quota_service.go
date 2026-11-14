@@ -766,13 +766,16 @@ func (pv *accountWindowPoolView) minimumDonateFraction(userID int64, window stri
 	return minimum
 }
 
-// within7d 报告用户 7d 周配额是否仍有余量（无 7d 记录或上限<=0 视为不限）。
+// within7d 报告用户 7d 周配额是否仍有余量（无 7d 记录视为不限；上限<=0 表示不可用）。
 // 按 7d 有效上限判断：正当借用 7d 救急池的用户不应被排除在 5h 借用之外，
 // 与 CheckUserAccountEligible 第 1 步的 7d 判定口径保持一致。
 func (pv *accountWindowPoolView) within7d(userID int64) bool {
 	limit, ok := pv.limit7d[userID]
-	if !ok || limit <= 0 {
+	if !ok {
 		return true
+	}
+	if limit <= 0 {
+		return false
 	}
 	return pv.used7d[userID]+windowQuotaEpsilon < pv.effective7dLimit(userID)
 }
@@ -1104,7 +1107,12 @@ func (s *AccountWindowQuotaService) CheckUserAccountEligible(ctx context.Context
 
 	// 1) 7d：自己份额 + 自愿 7d 救急池（捐赠者受自留上限约束）。
 	//    无人捐赠时 effective7dLimit == 基础上限，即纯铁底线，谁也动不了你没捐的份额。
-	if limit, ok := pv.limit7d[userID]; ok && limit > 0 {
+	//    成员行存在但上限 <=0 表示该成员在此窗口不可用（与管理端“0 表示不可用”文案一致），
+	//    不能当成不限额，否则额度分完后新加入的成员（同步时默认 0）可以吃掉全车份额。
+	if limit, ok := pv.limit7d[userID]; ok {
+		if limit <= 0 {
+			return false, WindowType7d, nil
+		}
 		if pv.used7d[userID]+windowQuotaEpsilon >= pv.effective7dLimit(userID) {
 			return false, WindowType7d, pv.reset7d[userID]
 		}
@@ -1112,8 +1120,11 @@ func (s *AccountWindowQuotaService) CheckUserAccountEligible(ctx context.Context
 
 	// 2) 5h：自己份额 + 救急池增量（捐赠者受自留上限约束）。
 	base, has5h := pv.base5h[userID]
-	if !has5h || base <= 0 {
+	if !has5h {
 		return true, "", nil
+	}
+	if base <= 0 {
+		return false, WindowType5h, nil
 	}
 	if pv.used5h[userID]+windowQuotaEpsilon < pv.effective5hLimit(userID) {
 		return true, "", nil
@@ -1564,7 +1575,21 @@ func (s *AccountWindowQuotaService) SetDonateFraction(ctx context.Context, userI
 	if err != nil {
 		return fmt.Errorf("list account window quotas before donation update: %w", err)
 	}
-	records = effectiveWindowQuotaRecordsAt(records, time.Now())
+	now := time.Now()
+	hasDueReset := false
+	hasFutureReset := false
+	for _, record := range records {
+		if record.WindowType != window || record.WindowResetAt == nil {
+			continue
+		}
+		if record.WindowResetAt.After(now) {
+			hasFutureReset = true
+		} else {
+			hasDueReset = true
+		}
+	}
+	hadDueWindow := hasDueReset && !hasFutureReset
+	records = effectiveWindowQuotaRecordsAt(records, now)
 	isMember := false
 	for _, record := range records {
 		if record.UserID == userID && record.WindowType == window {
@@ -1578,7 +1603,13 @@ func (s *AccountWindowQuotaService) SetDonateFraction(ctx context.Context, userI
 	if err := ValidateAccountWindowDonateFraction(records, userID, window, fraction); err != nil {
 		return err
 	}
-	return s.repo.SetDonatePoolFraction(ctx, userID, accountID, window, fraction, s.defaultUserLimitPercent(ctx, window))
+	if err := s.repo.SetDonatePoolFraction(ctx, userID, accountID, window, fraction, s.defaultUserLimitPercent(ctx, window)); err != nil {
+		return err
+	}
+	if hadDueWindow && s.rdb != nil {
+		_ = s.rdb.Del(ctx, accountWindowCheckpointKey(accountID, window)).Err()
+	}
+	return nil
 }
 
 // UserWindowQuotaView 是用户侧展示用的窗口配额（含救急池信息）。

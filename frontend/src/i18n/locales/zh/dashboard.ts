@@ -59,6 +59,7 @@ export default {
       lockedDonationHint: '已被借用，至少保留 {pct}%',
       donateNote5h: '仅本窗口有效，刷新自动归零',
       donateNote7d: '仅本窗口有效，刷新自动归零；未借出部分随时可收回',
+      donateFailed: '捐赠比例保存失败',
       borrowing: '救急池提额 +{pct}%',
       membersTitle: '同车成员',
     },

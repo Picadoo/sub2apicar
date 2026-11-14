@@ -98,7 +98,10 @@ func cloneAccountJSONMap(value map[string]any) (map[string]any, error) {
 }
 
 var duplicateAccountDiscardedExtraKeys = map[string]struct{}{
-	AccountWindowCreditSpendingExtraKey: {}, // New accounts require their own explicit spending permission.
+	AccountWindowCreditSpendingExtraKey:                      {}, // New accounts require their own explicit spending permission.
+	AccountWindowSharedPoolModeExtraKey:                      {},
+	AccountWindowAttributionCheckpointExtraKey(WindowType5h): {},
+	AccountWindowAttributionCheckpointExtraKey(WindowType7d): {},
 	// A retry identity belongs to the operation that created one copy, not to later copies.
 	duplicateAccountOperationIDExtraKey: {},
 	// External sync identity belongs to one local account only.
@@ -164,6 +167,19 @@ func duplicateAccountExtra(value map[string]any) (map[string]any, error) {
 		delete(cloned, key)
 	}
 	return cloned, nil
+}
+
+// stripManagedWindowQuotaExtra removes server-managed carpool window-quota
+// flags and checkpoints from general account write payloads so they can only be
+// changed via dedicated window-quota admin endpoints or background attribution.
+func stripManagedWindowQuotaExtra(extra map[string]any) {
+	if extra == nil {
+		return
+	}
+	delete(extra, AccountWindowCreditSpendingExtraKey)
+	delete(extra, AccountWindowSharedPoolModeExtraKey)
+	delete(extra, AccountWindowAttributionCheckpointExtraKey(WindowType5h))
+	delete(extra, AccountWindowAttributionCheckpointExtraKey(WindowType7d))
 }
 
 func canDuplicateAccountType(accountType string) bool {
@@ -498,6 +514,7 @@ func (s *adminServiceImpl) CreateAccount(ctx context.Context, input *CreateAccou
 	if err := ValidateUpstreamRequestIDHeaderExtra(accountExtra); err != nil {
 		return nil, err
 	}
+	stripManagedWindowQuotaExtra(accountExtra)
 
 	// 绑定分组
 	groupIDs := input.GroupIDs
@@ -710,6 +727,7 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 		// 目录观察和能力 metadata 只由同步写入。表单里的旧值或注入值不能进入本次更新。
 		delete(normalizedExtra, grokObservedModelsExtraKey)
 		delete(normalizedExtra, UpstreamModelMetadataExtraKey)
+		stripManagedWindowQuotaExtra(normalizedExtra)
 		// 保留配额用量和专用服务受管字段，防止普通账号编辑意外覆盖。
 		for _, key := range []string{
 			"quota_used",
@@ -729,6 +747,10 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 			OpenAIAutoResetCreditStateExtraKey,
 			OpenCodeGoUsageAutoRefreshExtraKey,
 			OpenCodeGoUsageSnapshotExtraKey,
+			AccountWindowCreditSpendingExtraKey,
+			AccountWindowSharedPoolModeExtraKey,
+			AccountWindowAttributionCheckpointExtraKey(WindowType5h),
+			AccountWindowAttributionCheckpointExtraKey(WindowType7d),
 		} {
 			if v, ok := account.Extra[key]; ok {
 				normalizedExtra[key] = v
@@ -785,6 +807,12 @@ func (s *adminServiceImpl) UpdateAccount(ctx context.Context, id int64, input *U
 	}
 	if requestedRateSyncEnabledUpdate != nil {
 		account.Extra[UpstreamBillingRateSyncEnabledExtraKey] = *requestedRateSyncEnabledUpdate
+	}
+	if input.WindowQuotaShared != nil {
+		if account.Extra == nil {
+			account.Extra = make(map[string]any)
+		}
+		account.Extra[AccountExtraWindowQuotaShared] = *input.WindowQuotaShared
 	}
 	// 影子代理恒继承母账号(由 propagateProxyToShadows 同步),不接受独立编辑——外审 B/P1;
 	// 否则要等母账号下次改 proxy 才被覆盖,期间影子会出现"有时继承、有时独立"的漂移。
@@ -973,6 +1001,7 @@ func (s *adminServiceImpl) UpdateAccountExtra(ctx context.Context, id int64, upd
 	delete(updates, OllamaCloudUsageSnapshotExtraKey)
 	delete(updates, OpenCodeGoUsageAutoRefreshExtraKey)
 	delete(updates, OpenCodeGoUsageSnapshotExtraKey)
+	stripManagedWindowQuotaExtra(updates)
 	if _, exists := updates[openAILongContextBillingEnabledKey]; exists {
 		account, err := s.accountRepo.GetByID(ctx, id)
 		if err != nil {
@@ -1005,6 +1034,7 @@ func (s *adminServiceImpl) BulkUpdateAccounts(ctx context.Context, input *BulkUp
 	delete(input.Extra, OllamaCloudUsageSnapshotExtraKey)
 	delete(input.Extra, OpenCodeGoUsageAutoRefreshExtraKey)
 	delete(input.Extra, OpenCodeGoUsageSnapshotExtraKey)
+	stripManagedWindowQuotaExtra(input.Extra)
 
 	if len(input.AccountIDs) == 0 && input.Filters != nil {
 		accountIDs, err := s.resolveBulkUpdateTargetIDs(ctx, input.Filters)

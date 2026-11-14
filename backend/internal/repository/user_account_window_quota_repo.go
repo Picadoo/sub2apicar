@@ -107,7 +107,16 @@ func (r *userAccountWindowQuotaRepository) ApplyWindowSharesFromCheckpoint(
 				return err
 			}
 			sameWindow := candidate.ResetAt == nil || legacyCheckpointMatchesCandidate(decodedRaw, candidate) || membersMatchCandidateWindow(members, candidate.ResetAt)
-			if !sameWindow {
+			if !sameWindow && membersAwaitingFirstBoundary(members) {
+				// 定时清零已把本窗口用量/捐赠归零并删除 checkpoint，成员停在“等待新窗口首个快照”状态。
+				// 这期间用户新设的捐赠属于即将开始的窗口，不能再被第二次清零；只补写新的重置边界。
+				if err := updateAccountWindowResetBoundaryInTx(txCtx, client, accountID, window, candidate.ResetAt); err != nil {
+					return err
+				}
+				for i := range members {
+					members[i].resetAt = candidate.ResetAt
+				}
+			} else if !sameWindow {
 				if err := resetAccountWindowMembersInTx(txCtx, client, accountID, window, candidate.ResetAt); err != nil {
 					return err
 				}
@@ -390,6 +399,20 @@ func membersMatchCandidateWindow(members []accountWindowMemberState, resetAt *ti
 		}
 	}
 	return false
+}
+
+// membersAwaitingFirstBoundary 报告成员是否处于定时清零后的初始状态：
+// 全部没有重置边界且没有归因用量。只有这种状态下才允许跳过新窗口的清零（保留新设捐赠）。
+func membersAwaitingFirstBoundary(members []accountWindowMemberState) bool {
+	if len(members) == 0 {
+		return false
+	}
+	for _, member := range members {
+		if member.resetAt != nil || member.attributed > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func membersHaveNewerResetBoundary(members []accountWindowMemberState, resetAt *time.Time) bool {
@@ -1432,6 +1455,38 @@ func (r *userAccountWindowQuotaRepository) SetDonatePoolFraction(ctx context.Con
 		if !isMember {
 			return fmt.Errorf("%w: user=%d account=%d window=%s", service.ErrAccountWindowNotMember, userID, accountID, window)
 		}
+		now := time.Now()
+		hasDueReset := false
+		hasFutureReset := false
+		for _, record := range records {
+			if record.WindowResetAt == nil {
+				continue
+			}
+			if record.WindowResetAt.After(now) {
+				hasFutureReset = true
+			} else {
+				hasDueReset = true
+			}
+		}
+		if hasDueReset && !hasFutureReset {
+			const clearDueQ = `UPDATE user_account_window_quotas
+				SET attributed_percent = 0, donate_pool_fraction = 0, window_reset_at = NULL, updated_at = $3
+				WHERE account_id = $1 AND window_type = $2 AND deleted_at IS NULL`
+			if _, err := client.ExecContext(txCtx, clearDueQ, accountID, window, now); err != nil {
+				return fmt.Errorf("clear due account %d window %s before donation update: %w", accountID, window, err)
+			}
+			const clearCheckpointQ = `UPDATE accounts
+				SET extra = COALESCE(extra, '{}'::jsonb) - $2, updated_at = NOW()
+				WHERE id = $1 AND deleted_at IS NULL`
+			if _, err := client.ExecContext(txCtx, clearCheckpointQ, accountID, service.AccountWindowAttributionCheckpointExtraKey(window)); err != nil {
+				return fmt.Errorf("clear due checkpoint on account %d window %s before donation update: %w", accountID, window, err)
+			}
+			for i := range records {
+				records[i].AttributedPercent = 0
+				records[i].DonatePoolFraction = 0
+				records[i].WindowResetAt = nil
+			}
+		}
 		if err := service.ValidateAccountWindowDonateFraction(records, userID, window, fraction); err != nil {
 			return err
 		}
@@ -1439,7 +1494,7 @@ func (r *userAccountWindowQuotaRepository) SetDonatePoolFraction(ctx context.Con
 		const updateQ = `UPDATE user_account_window_quotas
 			SET donate_pool_fraction = $4, updated_at = $5
 			WHERE user_id = $1 AND account_id = $2 AND window_type = $3 AND deleted_at IS NULL`
-		res, err := client.ExecContext(txCtx, updateQ, userID, accountID, window, fraction, time.Now())
+		res, err := client.ExecContext(txCtx, updateQ, userID, accountID, window, fraction, now)
 		if err != nil {
 			return err
 		}

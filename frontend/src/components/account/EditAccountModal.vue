@@ -6437,10 +6437,19 @@ const handleSubmit = async () => {
       updatePayload.extra = newExtra
     }
 
-    updatePayload.extra = {
-      ...(((updatePayload.extra as Record<string, unknown> | undefined) ??
-        (props.account.extra as Record<string, unknown> | undefined)) || {}),
-      window_quota_shared: props.account.platform === 'openai' && form.window_quota_shared
+    const prevWindowQuotaShared =
+      (props.account.extra as Record<string, unknown> | undefined)?.window_quota_shared === true
+    const nextWindowQuotaShared =
+      props.account.platform === 'openai' && Boolean(form.window_quota_shared)
+    if (updatePayload.extra !== undefined || nextWindowQuotaShared !== prevWindowQuotaShared) {
+      const nextExtra: Record<string, unknown> = {
+        ...(((updatePayload.extra as Record<string, unknown> | undefined) ??
+          (props.account.extra as Record<string, unknown> | undefined)) || {})
+      }
+      if (props.account.platform === 'openai' || prevWindowQuotaShared) {
+        nextExtra.window_quota_shared = nextWindowQuotaShared
+      }
+      updatePayload.extra = nextExtra
     }
 
     // 上游ID头名只在改动时写回 extra，避免用弹窗打开时的快照覆盖运行态键。

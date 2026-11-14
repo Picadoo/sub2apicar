@@ -461,10 +461,34 @@ const groups = computed<AccountGroup[]>(() => {
     }))
 })
 
+interface MemberCandidate {
+  id: number
+  username?: string
+  email?: string
+}
+
+// 候选用户只拉取 active 用户；已停用但仍在车上的成员也必须出现在编辑器里，
+// 否则它们留在 selectedUserIds 却没有草稿、也无法取消勾选，整个账号的成员保存会被卡死。
+function memberCandidatesFor(group: AccountGroup | undefined): MemberCandidate[] {
+  const candidates: MemberCandidate[] = memberUsers.value.map((user) => ({
+    id: user.id,
+    username: user.username,
+    email: user.email,
+  }))
+  const known = new Set(candidates.map((user) => user.id))
+  for (const user of group?.users ?? []) {
+    if (known.has(user.userId)) continue
+    candidates.push({ id: user.userId, username: user.username, email: user.email })
+    known.add(user.userId)
+  }
+  return candidates.sort((a, b) => a.id - b.id)
+}
+
 const filteredMemberUsers = computed(() => {
+  const candidates = memberCandidatesFor(currentEditorGroup.value)
   const query = memberSearch.value.trim().toLowerCase()
-  if (!query) return memberUsers.value
-  return memberUsers.value.filter((user) =>
+  if (!query) return candidates
+  return candidates.filter((user) =>
     `${user.id} ${user.username ?? ''} ${user.email ?? ''}`.toLowerCase().includes(query),
   )
 })
@@ -524,7 +548,7 @@ function defaultMemberLimit(group: AccountGroup, windowType: WindowType): number
 function prepareMemberLimitDrafts(group: AccountGroup) {
   const drafts: Record<number, MemberLimitDraft> = {}
   const currentUsers = new Map(group.users.map((user) => [user.userId, user]))
-  for (const user of memberUsers.value) {
+  for (const user of memberCandidatesFor(group)) {
     const current = currentUsers.get(user.id)
     drafts[user.id] = {
       w5h: finiteNumber(current?.w5h?.limit_percent) ?? defaultMemberLimit(group, '5h'),
@@ -605,7 +629,7 @@ async function openMemberEditor(group: AccountGroup) {
     prepareMemberLimitDrafts(group)
   } catch (error: any) {
     appStore.showError(
-      error?.response?.data?.message || t('admin.windowQuotaOverview.loadMembersFailed'),
+      error?.message || error?.response?.data?.message || t('admin.windowQuotaOverview.loadMembersFailed'),
     )
   }
 }
@@ -704,7 +728,7 @@ async function toggleCreditSpending(accountId: number) {
     if (result.credit_spending_enabled) creditSpendingAccountIds.value.push(accountId)
     appStore.showSuccess(t('admin.windowQuotaOverview.creditSpendingSaved'))
   } catch (error: any) {
-    appStore.showError(error?.response?.data?.message || t('admin.windowQuotaOverview.creditSpendingFailed'))
+    appStore.showError(error?.message || error?.response?.data?.message || t('admin.windowQuotaOverview.creditSpendingFailed'))
   } finally {
     savingCreditSpending.value = null
   }
@@ -725,7 +749,7 @@ async function toggleSharedPool(accountId: number) {
     }
     appStore.showSuccess(t('admin.windowQuotaOverview.sharedPoolSaved'))
   } catch (error: any) {
-    appStore.showError(error?.response?.data?.message || t('admin.windowQuotaOverview.sharedPoolFailed'))
+    appStore.showError(error?.message || error?.response?.data?.message || t('admin.windowQuotaOverview.sharedPoolFailed'))
   } finally {
     savingSharedPool.value = null
   }
@@ -771,7 +795,7 @@ async function saveMembers(accountId: number) {
     closeMemberEditor()
     await load()
     appStore.showError(
-      error?.response?.data?.message ||
+      error?.message || error?.response?.data?.message ||
         t(
           membersSynced
             ? 'admin.windowQuotaOverview.memberLimitsSaveFailed'
@@ -821,7 +845,7 @@ async function confirmRebalance(accountId: number) {
     appStore.showSuccess(t('admin.windowQuotaOverview.rebalanceSuccess'))
   } catch (error: any) {
     appStore.showError(
-      error?.response?.data?.message || t('admin.windowQuotaOverview.rebalanceFailed'),
+      error?.message || error?.response?.data?.message || t('admin.windowQuotaOverview.rebalanceFailed'),
     )
   } finally {
     rebalancingAccountId.value = null

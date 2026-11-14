@@ -339,7 +339,18 @@ const QuotaLimitEditor: FunctionalComponent<{
         step: '0.01',
         value: editorProps.value ?? 1,
         'data-testid': `${editorProps.testid}-value`,
-        onInput: (event: Event) => editorEmit('value-change', (event.target as HTMLInputElement).valueAsNumber),
+        // 不回写 0：输入 0.5 的过程中会先出现 0，若直接写回会被 limitState 判成“禁用”，
+        // 输入框消失且绕过禁用确认框。禁用只能经下拉框（带确认）设置；负数/非数字仍回写并由保存校验拦截。
+        onInput: (event: Event) => {
+          const value = (event.target as HTMLInputElement).valueAsNumber
+          if (value !== 0) editorEmit('value-change', value)
+        },
+        onChange: (event: Event) => {
+          const target = event.target as HTMLInputElement
+          if (target.valueAsNumber === 0) {
+            target.value = String(editorProps.value ?? 1)
+          }
+        },
       })
     : null,
 ])
@@ -442,16 +453,41 @@ async function load(preserveNotice = false) {
     loading.value = false
   }
 }
-async function loadWindows() {
+async function loadWindows(preserveUnsavedExceptKey?: string) {
   if (!props.user) return
+  const dirtyLimits = new Map<string, number>()
+  if (preserveUnsavedExceptKey) {
+    try {
+      const baselineEntries = JSON.parse(windowBaseline.value || '[]') as Array<[number, string, number]>
+      const baselineMap = new Map(baselineEntries.map(([accId, winType, limit]) => [`${accId}.${winType}`, limit]))
+      for (const row of windowRows.value) {
+        const rowKey = `${row.account_id}.${row.window_type}`
+        if (rowKey !== preserveUnsavedExceptKey && baselineMap.has(rowKey) && baselineMap.get(rowKey) !== row.limit_percent) {
+          dirtyLimits.set(rowKey, row.limit_percent)
+        }
+      }
+    } catch {
+      // ignore malformed baseline snapshot
+    }
+  }
   windowLoading.value = true
   try {
     const response = await getUserAccountWindowQuotas(props.user.id)
-    windowRows.value = (response.windows ?? []).map((windowQuota) => ({ ...windowQuota }))
+    const freshRows = (response.windows ?? []).map((windowQuota) => ({ ...windowQuota }))
+    windowRows.value = freshRows
+    windowBaseline.value = serializeWindowQuotas()
+    if (dirtyLimits.size > 0) {
+      for (const row of windowRows.value) {
+        const dirty = dirtyLimits.get(`${row.account_id}.${row.window_type}`)
+        if (dirty !== undefined) {
+          row.limit_percent = dirty
+        }
+      }
+    }
   } catch {
     windowRows.value = []
-  } finally {
     windowBaseline.value = serializeWindowQuotas()
+  } finally {
     windowLoading.value = false
   }
 }
@@ -509,7 +545,7 @@ async function onSave() {
     appStore.showSuccess(saveNotice.value)
     emit('success')
   } catch (error: any) {
-    appStore.showError(error?.response?.data?.message || t('admin.users.platformQuota.updateFailed'))
+    appStore.showError(error?.message || error?.response?.data?.message || t('admin.users.platformQuota.updateFailed'))
   } finally {
     submitting.value = false
   }
@@ -537,9 +573,9 @@ async function onSaveLimit(accountId: number, windowQuota: AccountWindowQuotaIte
       limit_percent: value,
     })
     appStore.showSuccess(t('admin.users.windowQuota.saveSuccess'))
-    await loadWindows()
+    await loadWindows(key)
   } catch (error: any) {
-    appStore.showError(error?.response?.data?.message || t('admin.users.windowQuota.saveFailed'))
+    appStore.showError(error?.message || error?.response?.data?.message || t('admin.users.windowQuota.saveFailed'))
   } finally {
     windowSaving[key] = false
   }
@@ -558,7 +594,7 @@ async function onReset(platform: PlatformQuotaPlatform, quotaWindow: PlatformQuo
     platformBaseline.value = serializePlatformQuotas()
     appStore.showSuccess(t('admin.users.platformQuota.reset.success', { platform, window: translatedWindow }))
   } catch (error: any) {
-    appStore.showError(error?.response?.data?.message || t('admin.users.platformQuota.reset.failed'))
+    appStore.showError(error?.message || error?.response?.data?.message || t('admin.users.platformQuota.reset.failed'))
   } finally {
     resetting[key] = false
   }

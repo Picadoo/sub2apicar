@@ -112,7 +112,7 @@ async function saveSeats() {
     await load()
     appStore.showSuccess(t('admin.windowQuotaConfig.saved'))
   } catch (e: any) {
-    appStore.showError(e?.response?.data?.message || t('admin.windowQuotaConfig.saveFailed'))
+    appStore.showError(e?.message || e?.response?.data?.message || t('admin.windowQuotaConfig.saveFailed'))
   } finally {
     savingSeats.value = false
   }
@@ -131,7 +131,7 @@ async function saveCeiling(wt: '5h' | '7d') {
     await load()
     appStore.showSuccess(t('admin.windowQuotaConfig.saved'))
   } catch (e: any) {
-    appStore.showError(e?.response?.data?.message || t('admin.windowQuotaConfig.saveFailed'))
+    appStore.showError(e?.message || e?.response?.data?.message || t('admin.windowQuotaConfig.saveFailed'))
   } finally {
     flag.value = false
   }

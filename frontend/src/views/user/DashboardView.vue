@@ -5,7 +5,7 @@
       <template v-else-if="stats">
         <UserDashboardStats :stats="stats" :balance="user?.balance || 0" :is-simple="authStore.isSimpleMode" :platform-quotas="platformQuotas" />
         <AccountWindowQuotaCard />
-        <AdminWindowQuotaOverviewCard />
+        <AdminWindowQuotaOverviewCard v-if="authStore.isAdmin" />
         <ChatProxyStatusCard />
         <UserDashboardCharts v-model:startDate="startDate" v-model:endDate="endDate" v-model:granularity="granularity" :loading="loadingCharts" :trend="trendData" :models="modelStats" @dateRangeChange="loadCharts" @granularityChange="loadCharts" @refresh="refreshAll" />
         <div class="grid grid-cols-1 gap-6 lg:grid-cols-3">

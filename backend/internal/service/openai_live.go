@@ -176,6 +176,14 @@ func (s *OpenAIGatewayService) CreateLiveCall(
 		}
 
 		account := selection.Account
+		// Live 只调度 OpenAI OAuth 账号，正好可能选到拼车母账号：与 HTTP/WS 入口一致做份额预检，
+		// 不通过则排除该账号继续选号，候选耗尽后由处理器返回窗口额度 429。
+		if quotaErr := s.checkLiveAccountWindowQuota(ctx, identity.UserID, account); quotaErr != nil {
+			selection.ReleaseFunc()
+			excluded[account.ID] = struct{}{}
+			lastErr = quotaErr
+			continue
+		}
 		leaseID := generateRequestID()
 		acquired, acquireErr := liveCache.AcquireLiveLease(
 			ctx,

@@ -169,6 +169,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, reactive } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useAppStore } from '@/stores/app'
 import {
   getMyAccountWindowQuotas,
   setAccountWindowDonate,
@@ -405,8 +406,9 @@ async function onDonateCommit(w: AccountWindowQuotaItem) {
     await setAccountWindowDonate({ account_id: w.account_id, window_type: w.window_type, fraction: pct / 100 })
     savedKey.value = key
     await load()
-  } catch (error) {
+  } catch (error: any) {
     console.warn('Failed to set donate fraction:', error)
+    useAppStore().showError(error?.message || t('dashboard.accountWindowQuota.donateFailed'))
     await load()
   } finally {
     savingKey.value = null

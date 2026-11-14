@@ -59,6 +59,7 @@ export default {
       lockedDonationHint: 'In use; keep at least {pct}%',
       donateNote5h: 'This window only; resets automatically',
       donateNote7d: 'Resets to zero each window; reclaim unused share anytime',
+      donateFailed: 'Failed to save donation share',
       borrowing: 'Pool boost +{pct}%',
       membersTitle: 'Members',
     },

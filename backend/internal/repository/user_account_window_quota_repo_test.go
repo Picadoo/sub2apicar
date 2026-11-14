@@ -1350,3 +1350,41 @@ func TestUserAccountWindowQuotaRepository_EqualizeActiveMemberLimits_RollsBackWh
 	require.ErrorIs(t, err, service.ErrAccountWindowNoActiveMembers)
 	require.NoError(t, mock.ExpectationsWereMet())
 }
+
+func TestMembersAwaitingFirstBoundary(t *testing.T) {
+	resetAt := time.Now().Add(time.Hour)
+	require.False(t, membersAwaitingFirstBoundary(nil))
+	require.True(t, membersAwaitingFirstBoundary([]accountWindowMemberState{{id: 1, userID: 1}, {id: 2, userID: 2}}))
+	require.False(t, membersAwaitingFirstBoundary([]accountWindowMemberState{{id: 1, userID: 1, attributed: 0.5}}))
+	require.False(t, membersAwaitingFirstBoundary([]accountWindowMemberState{{id: 1, userID: 1, resetAt: &resetAt}}))
+}
+
+func TestUserAccountWindowQuotaRepository_SetDonatePoolFractionClearsDueWindowBeforeValidating(t *testing.T) {
+	repo, mock := newWindowQuotaRepoSQLMock(t)
+	pastReset := time.Now().Add(-2 * time.Minute).UTC()
+
+	mock.ExpectBegin()
+	expectSharedAccountWindowQuotaLock(mock, 29)
+	mock.ExpectQuery(`SELECT q\.user_id, q\.account_id, q\.window_type, q\.limit_percent, q\.attributed_percent, q\.window_reset_at, COALESCE\(q\.donate_pool_fraction, 0\)[\s\S]*FOR UPDATE`).
+		WithArgs(int64(29), service.WindowType5h).
+		WillReturnRows(sqlmock.NewRows([]string{
+			"user_id", "account_id", "window_type", "limit_percent", "attributed_percent", "window_reset_at",
+			"donate_pool_fraction", "shared_pool_mode", "credit_spending_enabled",
+		}).
+			AddRow(int64(1), int64(29), service.WindowType5h, 23.0, 0.0, pastReset, 0.5, false, false).
+			AddRow(int64(2), int64(29), service.WindowType5h, 23.0, 30.0, pastReset, 0.0, false, false))
+	mock.ExpectExec(`UPDATE user_account_window_quotas\s+SET attributed_percent = 0, donate_pool_fraction = 0, window_reset_at = NULL`).
+		WithArgs(int64(29), service.WindowType5h, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 2))
+	mock.ExpectExec(`UPDATE accounts\s+SET extra = COALESCE\(extra, '\{\}'::jsonb\) - \$2`).
+		WithArgs(int64(29), service.AccountWindowAttributionCheckpointExtraKey(service.WindowType5h)).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(`UPDATE user_account_window_quotas\s+SET donate_pool_fraction = \$4`).
+		WithArgs(int64(1), int64(29), service.WindowType5h, 0.0, sqlmock.AnyArg()).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectCommit()
+
+	err := repo.SetDonatePoolFraction(context.Background(), 1, 29, service.WindowType5h, 0.0, service.DefaultAccountWindowLimitPercent)
+	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}

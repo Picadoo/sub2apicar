@@ -634,13 +634,36 @@ func buildOpenAIAutoResetUsageUpdates(usage *OpenAIQuotaUsage, now time.Time) ma
 }
 
 func (s *OpenAIQuotaAutoResetService) persistFreshUsage(ctx context.Context, accountID int64, usage *OpenAIQuotaUsage, now time.Time) error {
-	updates := buildOpenAIAutoResetUsageUpdates(usage, now)
-	if len(updates) > 0 {
-		if err := s.accountRepo.UpdateExtra(ctx, accountID, updates); err != nil {
-			return err
-		}
+	observedAt := openAIQuotaUsageObservedAt(usage, now)
+	if err := persistOpenAIQuotaUsageWindows(ctx, s.accountRepo, accountID, buildOpenAIAutoResetUsageUpdates(usage, observedAt), observedAt); err != nil {
+		return err
 	}
 	return s.quota.CacheResetCreditsSnapshot(ctx, accountID, usage.RateLimitResetCredits)
+}
+
+// openAIQuotaUsageObservedAt 返回官方额度查询的响应观测时间；缺失时退回调用方时间。
+func openAIQuotaUsageObservedAt(usage *OpenAIQuotaUsage, fallback time.Time) time.Time {
+	if usage != nil && !usage.ObservedAt.IsZero() {
+		return usage.ObservedAt
+	}
+	if fallback.IsZero() {
+		return time.Now()
+	}
+	return fallback
+}
+
+// persistOpenAIQuotaUsageWindows 通过与网关快照相同的“仅写入更新的快照”条件写落库官方窗口，
+// 同时推进 codex_usage_observed_unix_nano。否则用卡后写入的 0% 快照不推进观测标记，
+// 一个更早观测、但更晚落库的网关快照会把已重置的窗口覆盖回旧百分比。
+func persistOpenAIQuotaUsageWindows(ctx context.Context, repo AccountRepository, accountID int64, updates map[string]any, observedAt time.Time) error {
+	if len(updates) == 0 || repo == nil {
+		return nil
+	}
+	if writer, ok := repo.(codexUsageSnapshotWriter); ok {
+		_, err := writer.UpdateCodexUsageSnapshotIfNewer(ctx, accountID, observedAt, updates)
+		return err
+	}
+	return repo.UpdateExtra(ctx, accountID, updates)
 }
 
 func selectOpenAIAutoResetCandidate(candidates []openAIAutoResetCreditCandidate, available int, previous *OpenAIAutoResetCreditState, cycleHash string) (openAIAutoResetCreditCandidate, error) {

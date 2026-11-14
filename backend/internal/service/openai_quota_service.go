@@ -281,17 +281,25 @@ func (s *OpenAIQuotaService) CachePostResetSnapshot(ctx context.Context, account
 	if usage == nil {
 		return s.cacheResetCreditsSnapshot(ctx, accountID, nil, nil)
 	}
-	updates := buildOpenAIAutoResetUsageUpdates(usage, time.Now())
-	if updates == nil {
-		updates = make(map[string]any)
-	}
-	updates[openaiQuotaCreditsKey] = openAICreditsSnapshot{Credits: usage.Credits, FetchedAt: usage.FetchedAt}
-	return s.cacheResetCreditsSnapshot(
+	// 先在原有校验下写入点数/卡明细；官方窗口单独走条件写，推进观测时间标记，
+	// 防止更早观测的网关快照随后把已重置窗口覆盖回旧值。
+	if err := s.cacheResetCreditsSnapshot(
 		ctx,
 		accountID,
 		usage.RateLimitResetCredits,
-		updates,
-	)
+		map[string]any{openaiQuotaCreditsKey: openAICreditsSnapshot{Credits: usage.Credits, FetchedAt: usage.FetchedAt}},
+	); err != nil {
+		return err
+	}
+	observedAt := openAIQuotaUsageObservedAt(usage, time.Now())
+	if err := persistOpenAIQuotaUsageWindows(ctx, s.accountRepo, accountID, buildOpenAIAutoResetUsageUpdates(usage, observedAt), observedAt); err != nil {
+		return infraerrors.New(
+			http.StatusInternalServerError,
+			"OPENAI_QUOTA_CACHE_WRITE_FAILED",
+			"failed to cache post-reset usage windows",
+		).WithCause(err)
+	}
+	return nil
 }
 
 func (s *OpenAIQuotaService) cacheResetCreditsSnapshot(ctx context.Context, accountID int64, credits *OpenAIRateLimitResetCredits, updates map[string]any) error {
