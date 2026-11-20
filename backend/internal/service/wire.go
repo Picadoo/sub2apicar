@@ -998,6 +998,8 @@ var ProviderSet = wire.NewSet(
 	ProvideUserPlatformQuotaUsageFlusher,
 	NewAccountWindowQuotaService,
 	ProvideAccountWindowQuotaResetService,
+	NewUsageBillingLaneCombiner,
+	ProvideUsageBillingRepository,
 )
 
 // ProvideAccountWindowQuotaResetService 创建并启动 user×account×window 配额的定时重置兜底服务。
@@ -1005,6 +1007,11 @@ func ProvideAccountWindowQuotaResetService(quota *AccountWindowQuotaService) *Ac
 	svc := NewAccountWindowQuotaResetService(quota, time.Minute)
 	svc.Start()
 	return svc
+}
+
+// ProvideUsageBillingRepository 以按用户合并结算的通道作为各服务使用的计费仓储。
+func ProvideUsageBillingRepository(lanes *UsageBillingLaneCombiner) UsageBillingRepository {
+	return lanes
 }
 
 // ProvideUserPlatformQuotaUsageFlusher 创建并启动 UserPlatformQuotaUsageFlusher。
