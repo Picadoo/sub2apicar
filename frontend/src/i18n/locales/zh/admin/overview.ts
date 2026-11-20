@@ -911,7 +911,7 @@ export default {
       enableSharedPool: '开启共享池',
       disableSharedPool: '关闭共享池',
       sharedPoolActive: '共享池已开启 · 个人限额暂停',
-      sharedPoolHint: '开启后，组员共用该账号 5h / 7d 余量，无需捐赠，默认仍受账号安全线限制，点数使用须单独授权。开关不清零统计；手动关闭后按原配置和累计用量恢复个人限额。',
+      sharedPoolHint: '开启后，组员共用该账号 5h / 7d 余量，无需捐赠，默认仍受账号安全线限制，点数使用须单独授权。开关不清零统计；7d 周额度刷新后自动关闭（5h 刷新不关），也可随时手动关闭以恢复个人限额。',
       sharedPoolSaved: '共享池模式已保存',
       sharedPoolFailed: '共享池模式保存失败',
       title: '窗口配额总览（Codex）',

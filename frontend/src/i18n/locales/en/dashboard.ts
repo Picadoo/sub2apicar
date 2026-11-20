@@ -33,7 +33,7 @@ export default {
     },
     accountWindowQuota: {
       sharedPoolMode: 'Shared pool mode',
-      sharedPoolHint: 'Members share account headroom without donations until the admin turns this off',
+      sharedPoolHint: 'Members share account headroom without donations; auto-disables when the 7d window resets',
       personalLimitSuspended: 'Personal cap suspended',
       title: 'Official Window Quota',
       subtitle: 'Based on official account headroom',

@@ -914,7 +914,7 @@ export default {
       enableSharedPool: 'Enable shared pool',
       disableSharedPool: 'Disable shared pool',
       sharedPoolActive: 'Shared pool active · personal caps suspended',
-      sharedPoolHint: 'Members share the account’s 5h / 7d headroom without donations, subject to account ceilings unless credit spending is separately authorized. Usage is preserved. Turn this off manually to restore personal caps using the saved settings and accumulated usage.',
+      sharedPoolHint: 'Members share the account’s 5h / 7d headroom without donations, subject to account ceilings unless credit spending is separately authorized. Usage is preserved. Automatically turns off when the 7d weekly window resets (5h resets do not close it), or turn it off manually anytime to restore personal caps.',
       sharedPoolSaved: 'Shared pool mode saved',
       sharedPoolFailed: 'Failed to save shared pool mode',
       title: 'Window Quota Overview (Codex)',

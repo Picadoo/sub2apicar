@@ -250,7 +250,26 @@ func (s *AccountWindowQuotaService) SetAccountSharedPoolMode(ctx context.Context
 	if !ok {
 		return errors.New("account shared pool mode is unavailable")
 	}
-	return manager.SetAccountSharedPoolMode(ctx, accountID, enabled)
+	var releaseLock func()
+	var hadDue7d bool
+	if enabled && s.rdb != nil {
+		var err error
+		releaseLock, err = s.acquireAttributionLock(ctx, accountID, WindowType7d)
+		if err != nil {
+			return err
+		}
+		defer releaseLock()
+		if records, listErr := s.repo.ListByAccount(ctx, accountID); listErr == nil {
+			hadDue7d = accountWindowHasDueReset(records, WindowType7d, time.Now())
+		}
+	}
+	if err := manager.SetAccountSharedPoolMode(ctx, accountID, enabled); err != nil {
+		return err
+	}
+	if hadDue7d && s.rdb != nil {
+		_ = s.rdb.Del(ctx, accountWindowCheckpointKey(accountID, WindowType7d)).Err()
+	}
+	return nil
 }
 
 func (s *AccountWindowQuotaService) ListSharedPoolAccountIDs(ctx context.Context) ([]int64, error) {
@@ -1024,6 +1043,85 @@ func (pv *accountWindowPoolView) effective7dLimit(userID int64) float64 {
 	return base + allowance
 }
 
+func accountWindowHasDueReset(records []UserAccountWindowQuotaRecord, window string, now time.Time) bool {
+	if now.IsZero() {
+		return false
+	}
+	hasDue := false
+	hasFuture := false
+	for _, record := range records {
+		if record.WindowType != window || record.WindowResetAt == nil {
+			continue
+		}
+		if record.WindowResetAt.After(now) {
+			hasFuture = true
+		} else {
+			hasDue = true
+		}
+	}
+	return hasDue && !hasFuture
+}
+
+func due7dAccountSetFromRecords(records []UserAccountWindowQuotaRecord, now time.Time) map[int64]bool {
+	if now.IsZero() {
+		return nil
+	}
+	type windowResetState struct {
+		hasDue    bool
+		hasFuture bool
+	}
+	stateByAccount := make(map[int64]windowResetState)
+	for _, record := range records {
+		if record.WindowType != WindowType7d || record.WindowResetAt == nil {
+			continue
+		}
+		st := stateByAccount[record.AccountID]
+		if record.WindowResetAt.After(now) {
+			st.hasFuture = true
+		} else {
+			st.hasDue = true
+		}
+		stateByAccount[record.AccountID] = st
+	}
+	due := make(map[int64]bool)
+	for accountID, st := range stateByAccount {
+		if st.hasDue && !st.hasFuture {
+			due[accountID] = true
+		}
+	}
+	return due
+}
+
+func due7dAccountSetFromAdminRows(rows []AdminWindowQuotaOverviewRow, now time.Time) map[int64]bool {
+	if now.IsZero() {
+		return nil
+	}
+	type windowResetState struct {
+		hasDue    bool
+		hasFuture bool
+	}
+	stateByAccount := make(map[int64]windowResetState)
+	for _, row := range rows {
+		if row.WindowType != WindowType7d || row.WindowResetAt == nil {
+			continue
+		}
+		st := stateByAccount[row.AccountID]
+		if row.WindowResetAt.After(now) {
+			st.hasFuture = true
+		} else {
+			st.hasDue = true
+		}
+		stateByAccount[row.AccountID] = st
+	}
+	due := make(map[int64]bool)
+	for accountID, st := range stateByAccount {
+		if st.hasDue && !st.hasFuture {
+			due[accountID] = true
+		}
+	}
+	return due
+}
+
 func effectiveWindowQuotaRecordAt(record UserAccountWindowQuotaRecord, now time.Time) UserAccountWindowQuotaRecord {
 	if record.WindowResetAt == nil || record.WindowResetAt.After(now) {
 		return record
@@ -1035,8 +1133,12 @@ func effectiveWindowQuotaRecordAt(record UserAccountWindowQuotaRecord, now time.
 }
 
 func effectiveWindowQuotaRecordsAt(records []UserAccountWindowQuotaRecord, now time.Time) []UserAccountWindowQuotaRecord {
+	due7d := due7dAccountSetFromRecords(records, now)
 	effective := make([]UserAccountWindowQuotaRecord, len(records))
 	for i, record := range records {
+		if due7d[record.AccountID] {
+			record.SharedPoolMode = false
+		}
 		effective[i] = effectiveWindowQuotaRecordAt(record, now)
 	}
 	return effective
@@ -1055,8 +1157,11 @@ func (s *AccountWindowQuotaService) CheckUserAccountEligible(ctx context.Context
 		slog.Warn("account_window_quota.eligibility_read_failed", "user_id", userID, "account_id", accountID, "error", err)
 		return false, AccountWindowQuotaUnavailable, nil
 	}
+	now := time.Now()
+	// Shared pool mode auto-disables once the 7d weekly window resets; 5h resets do not close it.
+	sharedPoolActive := len(records) > 0 && records[0].SharedPoolMode && !accountWindowHasDueReset(records, WindowType7d, now)
 	pv := buildAccountWindowPoolView(records)
-	pv.clearExpiredUsage(time.Now())
+	pv.clearExpiredUsage(now)
 	ceiling7d := s.GetTotalCeiling(ctx, WindowType7d)
 	ceiling5h := s.GetTotalCeiling(ctx, WindowType5h)
 
@@ -1101,7 +1206,7 @@ func (s *AccountWindowQuotaService) CheckUserAccountEligible(ctx context.Context
 	}
 	// The account flag is read with the member rows, so toggles need no cache
 	// invalidation. Shared pool cannot authorize credit spending on its own.
-	if records[0].SharedPoolMode {
+	if sharedPoolActive {
 		return true, "", nil
 	}
 
@@ -1203,7 +1308,11 @@ func (s *AccountWindowQuotaService) ListAllForAdmin(ctx context.Context) ([]Admi
 		return nil, nil, err
 	}
 	now := time.Now()
+	due7dByAccount := due7dAccountSetFromAdminRows(rows, now)
 	for i := range rows {
+		if due7dByAccount[rows[i].AccountID] {
+			rows[i].SharedPoolMode = false
+		}
 		effective := effectiveWindowQuotaRecordAt(UserAccountWindowQuotaRecord{
 			UserID:             rows[i].UserID,
 			AccountID:          rows[i].AccountID,
@@ -1647,6 +1756,7 @@ func (s *AccountWindowQuotaService) ListUserWindowsWithPool(ctx context.Context,
 		WindowType7d: s.GetTotalCeiling(ctx, WindowType7d),
 	}
 	pvCache := map[int64]*accountWindowPoolView{}
+	due7dCache := map[int64]bool{}
 	officialCache := map[string]struct {
 		percent float64
 		found   bool
@@ -1675,12 +1785,14 @@ func (s *AccountWindowQuotaService) ListUserWindowsWithPool(ctx context.Context,
 				slog.Warn("account_window_quota.list_account_failed", "account_id", r.AccountID, "error", aerr)
 				pv = nil // 退化：救急池/账号级信息不可用时按基础上限展示
 			} else {
+				due7dCache[r.AccountID] = accountWindowHasDueReset(accRecords, WindowType7d, now)
 				pv = buildAccountWindowPoolView(effectiveWindowQuotaRecordsAt(accRecords, now))
 			}
 			pvCache[r.AccountID] = pv
 		}
+		sharedPoolMode := r.SharedPoolMode && !due7dCache[r.AccountID]
 		v := UserWindowQuotaView{
-			SharedPoolMode:        r.SharedPoolMode,
+			SharedPoolMode:        sharedPoolMode,
 			AccountID:             r.AccountID,
 			WindowType:            r.WindowType,
 			LimitPercent:          r.LimitPercent,

@@ -107,6 +107,7 @@ func (r *userAccountWindowQuotaRepository) ApplyWindowSharesFromCheckpoint(
 				return err
 			}
 			sameWindow := candidate.ResetAt == nil || legacyCheckpointMatchesCandidate(decodedRaw, candidate) || membersMatchCandidateWindow(members, candidate.ResetAt)
+			disableSharedPool := false
 			if !sameWindow && membersAwaitingFirstBoundary(members) {
 				// 定时清零已把本窗口用量/捐赠归零并删除 checkpoint，成员停在“等待新窗口首个快照”状态。
 				// 这期间用户新设的捐赠属于即将开始的窗口，不能再被第二次清零；只补写新的重置边界。
@@ -123,6 +124,9 @@ func (r *userAccountWindowQuotaRepository) ApplyWindowSharesFromCheckpoint(
 				for i := range members {
 					members[i].attributed = 0
 					members[i].resetAt = candidate.ResetAt
+				}
+				if window == service.WindowType7d && (decodedRaw != nil || len(members) > 0) {
+					disableSharedPool = true
 				}
 			} else if candidate.ResetAt != nil {
 				if err := updateAccountWindowResetBoundaryInTx(txCtx, client, accountID, window, candidate.ResetAt); err != nil {
@@ -141,7 +145,7 @@ func (r *userAccountWindowQuotaRepository) ApplyWindowSharesFromCheckpoint(
 			winner.UnattributedPercent = roundWindowPercent(math.Max(0, winner.LatestOfficialPercent-memberTotal))
 			winner.SeenThroughCreatedAt = upper.createdAt
 			winner.SeenThroughUsageLogID = upper.id
-			if err := persistAccountWindowCheckpointInTx(txCtx, client, accountID, checkpointKey, winner); err != nil {
+			if err := persistAccountWindowCheckpointInTx(txCtx, client, accountID, checkpointKey, winner, disableSharedPool); err != nil {
 				return err
 			}
 			applied = true
@@ -179,7 +183,8 @@ func (r *userAccountWindowQuotaRepository) ApplyWindowSharesFromCheckpoint(
 			winner.SeenThroughUsageLogID = upper.id
 			winner.UsageLog = nil
 			winner.CandidateExpired = false
-			if err := persistAccountWindowCheckpointInTx(txCtx, client, accountID, checkpointKey, winner); err != nil {
+			disableSharedPool := window == service.WindowType7d
+			if err := persistAccountWindowCheckpointInTx(txCtx, client, accountID, checkpointKey, winner, disableSharedPool); err != nil {
 				return err
 			}
 			applied = true
@@ -240,7 +245,7 @@ func (r *userAccountWindowQuotaRepository) ApplyWindowSharesFromCheckpoint(
 			}
 			winner.UsageLog = nil
 			winner.CandidateExpired = false
-			if err := persistAccountWindowCheckpointInTx(txCtx, client, accountID, checkpointKey, winner); err != nil {
+			if err := persistAccountWindowCheckpointInTx(txCtx, client, accountID, checkpointKey, winner, false); err != nil {
 				return err
 			}
 			applied = true
@@ -307,7 +312,7 @@ func (r *userAccountWindowQuotaRepository) ApplyWindowSharesFromCheckpoint(
 		}
 		winner.UsageLog = nil
 		winner.CandidateExpired = false
-		if err := persistAccountWindowCheckpointInTx(txCtx, client, accountID, checkpointKey, winner); err != nil {
+		if err := persistAccountWindowCheckpointInTx(txCtx, client, accountID, checkpointKey, winner, false); err != nil {
 			return err
 		}
 		applied = true
@@ -678,14 +683,19 @@ func reconcileFrozenMemberTotalInTx(ctx context.Context, client *dbent.Client, m
 	return roundWindowPercent(adjustedTotal), nil
 }
 
-func persistAccountWindowCheckpointInTx(ctx context.Context, client *dbent.Client, accountID int64, checkpointKey string, checkpoint service.AccountWindowAttributionCheckpoint) error {
+func persistAccountWindowCheckpointInTx(ctx context.Context, client *dbent.Client, accountID int64, checkpointKey string, checkpoint service.AccountWindowAttributionCheckpoint, disableSharedPool bool) error {
 	checkpoint.UsageLog = nil
 	checkpoint.CandidateExpired = false
 	encodedCheckpoint, err := json.Marshal(checkpoint)
 	if err != nil {
 		return fmt.Errorf("encode account %d checkpoint: %w", accountID, err)
 	}
-	payload, err := json.Marshal(map[string]any{checkpointKey: json.RawMessage(encodedCheckpoint)})
+	updateMap := map[string]any{checkpointKey: json.RawMessage(encodedCheckpoint)}
+	if disableSharedPool {
+		// 7d weekly rollover automatically turns off shared-pool mode while leaving credit spending untouched.
+		updateMap[service.AccountWindowSharedPoolModeExtraKey] = false
+	}
+	payload, err := json.Marshal(updateMap)
 	if err != nil {
 		return fmt.Errorf("encode account %d checkpoint update: %w", accountID, err)
 	}
@@ -893,10 +903,18 @@ func (r *userAccountWindowQuotaRepository) ResetWindowForAccountIfDue(ctx contex
 			return nil
 		}
 		checkpointKey := service.AccountWindowAttributionCheckpointExtraKey(window)
-		if _, err := client.ExecContext(txCtx, `UPDATE accounts
-			SET extra = COALESCE(extra, '{}'::jsonb) - $2, updated_at = NOW()
-			WHERE id = $1 AND deleted_at IS NULL`, accountID, checkpointKey); err != nil {
-			return fmt.Errorf("clear account %d window %s checkpoint: %w", accountID, window, err)
+		if window == service.WindowType7d {
+			if _, err := client.ExecContext(txCtx, `UPDATE accounts
+				SET extra = (COALESCE(extra, '{}'::jsonb) - $2) || jsonb_build_object($3::text, false), updated_at = NOW()
+				WHERE id = $1 AND deleted_at IS NULL`, accountID, checkpointKey, service.AccountWindowSharedPoolModeExtraKey); err != nil {
+				return fmt.Errorf("clear account %d window %s checkpoint: %w", accountID, window, err)
+			}
+		} else {
+			if _, err := client.ExecContext(txCtx, `UPDATE accounts
+				SET extra = COALESCE(extra, '{}'::jsonb) - $2, updated_at = NOW()
+				WHERE id = $1 AND deleted_at IS NULL`, accountID, checkpointKey); err != nil {
+				return fmt.Errorf("clear account %d window %s checkpoint: %w", accountID, window, err)
+			}
 		}
 		reset = true
 		return nil
@@ -1009,33 +1027,128 @@ func (r *userAccountWindowQuotaRepository) ListSharedAccountIDs(ctx context.Cont
 	return accountIDs, rows.Err()
 }
 
-// SetAccountSharedPoolMode changes only this account flag. JSONB merge preserves
+// SetAccountSharedPoolMode changes this account flag. JSONB merge preserves
 // attribution checkpoints and concurrent writes to other account extra fields.
+// When enabling after a 7d window has already expired (before the background
+// ticker runs), the stale due 7d window is cleared in the same transaction so
+// the upcoming tick or first snapshot of the new 7d window won't immediately
+// turn off the newly enabled shared pool.
 func (r *userAccountWindowQuotaRepository) SetAccountSharedPoolMode(ctx context.Context, accountID int64, enabled bool) error {
-	result, err := clientFromContext(ctx, r.client).ExecContext(ctx, `UPDATE accounts
-		SET extra = COALESCE(extra, '{}'::jsonb) || jsonb_build_object($2::text, $3::boolean), updated_at = NOW()
-		WHERE id = $1 AND deleted_at IS NULL
-		  AND platform = 'openai'
-		  AND COALESCE(extra->>'window_quota_shared', 'false') = 'true'`,
-		accountID, service.AccountWindowSharedPoolModeExtraKey, enabled)
-	if err != nil {
+	if !enabled {
+		result, err := clientFromContext(ctx, r.client).ExecContext(ctx, `UPDATE accounts
+			SET extra = COALESCE(extra, '{}'::jsonb) || jsonb_build_object($2::text, $3::boolean), updated_at = NOW()
+			WHERE id = $1 AND deleted_at IS NULL
+			  AND platform = 'openai'
+			  AND COALESCE(extra->>'window_quota_shared', 'false') = 'true'`,
+			accountID, service.AccountWindowSharedPoolModeExtraKey, false)
+		if err != nil {
+			return err
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if count == 0 {
+			return service.ErrAccountWindowInvalidMembers
+		}
+		return nil
+	}
+
+	return r.withWindowQuotaTx(ctx, func(txCtx context.Context, client *dbent.Client) error {
+		rows, err := client.QueryContext(txCtx, `SELECT id FROM accounts
+			WHERE id = $1 AND deleted_at IS NULL
+			  AND platform = 'openai'
+			  AND COALESCE(extra->>'window_quota_shared', 'false') = 'true'
+			FOR UPDATE`, accountID)
+		if err != nil {
+			return err
+		}
+		exists := rows.Next()
+		if rows.Err() != nil {
+			err = rows.Err()
+		}
+		_ = rows.Close()
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return service.ErrAccountWindowInvalidMembers
+		}
+
+		resetRows, err := client.QueryContext(txCtx, `SELECT window_reset_at
+			FROM user_account_window_quotas
+			WHERE account_id = $1 AND window_type = $2 AND deleted_at IS NULL
+			ORDER BY user_id
+			FOR UPDATE`, accountID, service.WindowType7d)
+		if err != nil {
+			return err
+		}
+		now := time.Now()
+		hasDueReset := false
+		hasFutureReset := false
+		for resetRows.Next() {
+			var resetAt sql.NullTime
+			if err := resetRows.Scan(&resetAt); err != nil {
+				_ = resetRows.Close()
+				return err
+			}
+			if !resetAt.Valid {
+				continue
+			}
+			if resetAt.Time.After(now) {
+				hasFutureReset = true
+			} else {
+				hasDueReset = true
+			}
+		}
+		if err := resetRows.Err(); err != nil {
+			_ = resetRows.Close()
+			return err
+		}
+		_ = resetRows.Close()
+
+		if hasDueReset && !hasFutureReset {
+			const clearDueQ = `UPDATE user_account_window_quotas
+				SET attributed_percent = 0, donate_pool_fraction = 0, window_reset_at = NULL, updated_at = $3
+				WHERE account_id = $1 AND window_type = $2 AND deleted_at IS NULL`
+			if _, err := client.ExecContext(txCtx, clearDueQ, accountID, service.WindowType7d, now); err != nil {
+				return fmt.Errorf("clear due 7d window on account %d before enabling shared pool: %w", accountID, err)
+			}
+			if _, err := client.ExecContext(txCtx, `UPDATE accounts
+				SET extra = (COALESCE(extra, '{}'::jsonb) - $2) || jsonb_build_object($3::text, true), updated_at = NOW()
+				WHERE id = $1 AND deleted_at IS NULL`,
+				accountID, service.AccountWindowAttributionCheckpointExtraKey(service.WindowType7d), service.AccountWindowSharedPoolModeExtraKey); err != nil {
+				return err
+			}
+			return nil
+		}
+
+		_, err = client.ExecContext(txCtx, `UPDATE accounts
+			SET extra = COALESCE(extra, '{}'::jsonb) || jsonb_build_object($2::text, $3::boolean), updated_at = NOW()
+			WHERE id = $1 AND deleted_at IS NULL`,
+			accountID, service.AccountWindowSharedPoolModeExtraKey, true)
 		return err
-	}
-	count, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if count == 0 {
-		return service.ErrAccountWindowInvalidMembers
-	}
-	return nil
+	})
 }
 
 func (r *userAccountWindowQuotaRepository) ListSharedPoolAccountIDs(ctx context.Context) ([]int64, error) {
-	rows, err := clientFromContext(ctx, r.client).QueryContext(ctx, `SELECT id FROM accounts
-		WHERE deleted_at IS NULL AND platform = 'openai'
-		  AND COALESCE(extra->>'window_quota_shared', 'false') = 'true'
-		  AND COALESCE(extra->>$1, 'false') = 'true' ORDER BY id`, service.AccountWindowSharedPoolModeExtraKey)
+	rows, err := clientFromContext(ctx, r.client).QueryContext(ctx, `SELECT a.id FROM accounts a
+		WHERE a.deleted_at IS NULL AND a.platform = 'openai'
+		  AND COALESCE(a.extra->>'window_quota_shared', 'false') = 'true'
+		  AND COALESCE(a.extra->>$1, 'false') = 'true'
+		  AND NOT (
+			EXISTS (
+				SELECT 1 FROM user_account_window_quotas due
+				WHERE due.account_id = a.id AND due.window_type = '7d' AND due.deleted_at IS NULL
+				  AND due.window_reset_at IS NOT NULL AND due.window_reset_at <= NOW()
+			)
+			AND NOT EXISTS (
+				SELECT 1 FROM user_account_window_quotas future
+				WHERE future.account_id = a.id AND future.window_type = '7d' AND future.deleted_at IS NULL
+				  AND future.window_reset_at > NOW()
+			)
+		  )
+		ORDER BY a.id`, service.AccountWindowSharedPoolModeExtraKey)
 	if err != nil {
 		return nil, err
 	}
@@ -1475,16 +1588,28 @@ func (r *userAccountWindowQuotaRepository) SetDonatePoolFraction(ctx context.Con
 			if _, err := client.ExecContext(txCtx, clearDueQ, accountID, window, now); err != nil {
 				return fmt.Errorf("clear due account %d window %s before donation update: %w", accountID, window, err)
 			}
-			const clearCheckpointQ = `UPDATE accounts
-				SET extra = COALESCE(extra, '{}'::jsonb) - $2, updated_at = NOW()
-				WHERE id = $1 AND deleted_at IS NULL`
-			if _, err := client.ExecContext(txCtx, clearCheckpointQ, accountID, service.AccountWindowAttributionCheckpointExtraKey(window)); err != nil {
-				return fmt.Errorf("clear due checkpoint on account %d window %s before donation update: %w", accountID, window, err)
+			if window == service.WindowType7d {
+				const clearCheckpointQ = `UPDATE accounts
+					SET extra = (COALESCE(extra, '{}'::jsonb) - $2) || jsonb_build_object($3::text, false), updated_at = NOW()
+					WHERE id = $1 AND deleted_at IS NULL`
+				if _, err := client.ExecContext(txCtx, clearCheckpointQ, accountID, service.AccountWindowAttributionCheckpointExtraKey(window), service.AccountWindowSharedPoolModeExtraKey); err != nil {
+					return fmt.Errorf("clear due checkpoint on account %d window %s before donation update: %w", accountID, window, err)
+				}
+			} else {
+				const clearCheckpointQ = `UPDATE accounts
+					SET extra = COALESCE(extra, '{}'::jsonb) - $2, updated_at = NOW()
+					WHERE id = $1 AND deleted_at IS NULL`
+				if _, err := client.ExecContext(txCtx, clearCheckpointQ, accountID, service.AccountWindowAttributionCheckpointExtraKey(window)); err != nil {
+					return fmt.Errorf("clear due checkpoint on account %d window %s before donation update: %w", accountID, window, err)
+				}
 			}
 			for i := range records {
 				records[i].AttributedPercent = 0
 				records[i].DonatePoolFraction = 0
 				records[i].WindowResetAt = nil
+				if window == service.WindowType7d {
+					records[i].SharedPoolMode = false
+				}
 			}
 		}
 		if err := service.ValidateAccountWindowDonateFraction(records, userID, window, fraction); err != nil {
@@ -1902,7 +2027,7 @@ func (r *userAccountWindowQuotaRepository) SyncAccountMembers(ctx context.Contex
 				}
 			}
 			if changed {
-				if err := persistAccountWindowCheckpointInTx(txCtx, client, accountID, service.AccountWindowAttributionCheckpointExtraKey(window), checkpoint); err != nil {
+				if err := persistAccountWindowCheckpointInTx(txCtx, client, accountID, service.AccountWindowAttributionCheckpointExtraKey(window), checkpoint, false); err != nil {
 					return err
 				}
 				checkpoints[window] = checkpoint

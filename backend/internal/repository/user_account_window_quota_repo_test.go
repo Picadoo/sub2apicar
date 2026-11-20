@@ -64,9 +64,15 @@ func TestUserAccountWindowQuotaRepository_ResetWindowForAccountIfDueIsConditiona
 				mock.ExpectExec(`UPDATE user_account_window_quotas AS target[\s\S]*donate_pool_fraction = 0[\s\S]*EXISTS[\s\S]*due.window_reset_at <= \$3[\s\S]*NOT EXISTS[\s\S]*future.window_reset_at > \$3`).
 					WithArgs(int64(29), window, dueAt, sqlmock.AnyArg()).
 					WillReturnResult(sqlmock.NewResult(0, 2))
-				mock.ExpectExec(`UPDATE accounts[\s\S]*extra = COALESCE\(extra`).
-					WithArgs(int64(29), service.AccountWindowAttributionCheckpointExtraKey(window)).
-					WillReturnResult(sqlmock.NewResult(0, 1))
+				if window == service.WindowType7d {
+					mock.ExpectExec(`UPDATE accounts[\s\S]*extra = \(COALESCE\(extra[\s\S]*jsonb_build_object\(\$3::text, false\)`).
+						WithArgs(int64(29), service.AccountWindowAttributionCheckpointExtraKey(window), service.AccountWindowSharedPoolModeExtraKey).
+						WillReturnResult(sqlmock.NewResult(0, 1))
+				} else {
+					mock.ExpectExec(`UPDATE accounts[\s\S]*extra = COALESCE\(extra`).
+						WithArgs(int64(29), service.AccountWindowAttributionCheckpointExtraKey(window)).
+						WillReturnResult(sqlmock.NewResult(0, 1))
+				}
 				mock.ExpectCommit()
 
 				reset, err := repo.ResetWindowForAccountIfDue(context.Background(), 29, window, dueAt)

@@ -33,7 +33,7 @@ export default {
     },
     accountWindowQuota: {
       sharedPoolMode: '共享池模式',
-      sharedPoolHint: '全体组员共用账号余量，无需捐赠；管理员手动关闭',
+      sharedPoolHint: '全体组员共用账号余量，无需捐赠；7d 周额度刷新后自动关闭',
       personalLimitSuspended: '个人限额暂停',
       title: '官方窗口配额',
       subtitle: '以账号官方余量为准',
