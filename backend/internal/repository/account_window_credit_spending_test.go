@@ -50,10 +50,10 @@ func TestAccountWindowCreditSpendingSurvivesStaleAccountEdit(t *testing.T) {
 			}
 			mock.ExpectQuery(`SELECT[\s\S]*window_quota_credit_spending_enabled[\s\S]*FOR NO KEY UPDATE`).
 				WithArgs(int64(7), service.PlatformOpenAI, service.AccountTypeOAuth, `{}`, nil).
-				WillReturnRows(sqlmock.NewRows([]string{"identity", "ollama_identity", "proxy_identity", "probe", "rate_sync", "snapshot", "ollama_session", "ollama_auto", "ollama_snapshot", "opencode_identity", "opencode_auto", "opencode_snapshot", "shared_pool_mode", "grok_observed_models", "upstream_model_metadata", "credit_spending_enabled"}).
-					AddRow(true, false, true, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, value))
+				WillReturnRows(sqlmock.NewRows([]string{"identity", "ollama_identity", "proxy_identity", "probe", "rate_sync", "snapshot", "ollama_session", "ollama_auto", "ollama_snapshot", "opencode_identity", "opencode_auto", "opencode_snapshot", "shared_pool_mode", "grok_observed_models", "upstream_model_metadata", "credit_spending_enabled", "group_sync_enabled"}).
+					AddRow(true, false, true, nil, nil, nil, nil, nil, nil, false, nil, nil, nil, nil, nil, value, nil))
 			account := &service.Account{ID: 7, Platform: service.PlatformOpenAI, Type: service.AccountTypeOAuth, Extra: map[string]any{service.AccountWindowCreditSpendingExtraKey: stored != "true", "unrelated": "keep"}}
-			merged, err := lockAndMergeAccountProbeExtra(context.Background(), repo.client, account, nil, nil)
+			merged, err := lockAndMergeAccountProbeExtra(context.Background(), repo.client, account, service.AccountBillingSettingsUpdate{})
 			require.NoError(t, err)
 			if stored == "" {
 				require.NotContains(t, merged, service.AccountWindowCreditSpendingExtraKey)
