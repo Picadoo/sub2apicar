@@ -38,6 +38,18 @@ export interface AccountWindowQuotaItem {
   reset_in_seconds?: number
 }
 
+export interface AccountResetCreditDetail {
+  expires_at: string
+  expires_in_seconds?: number
+}
+
+export interface AccountResetCreditsInfo {
+  available_count: number
+  earliest_expires_at?: string
+  earliest_expires_in_seconds?: number
+  credits?: AccountResetCreditDetail[]
+}
+
 export interface AccountWindowQuotasResponse {
   enabled: boolean
   windows: AccountWindowQuotaItem[]
@@ -45,6 +57,8 @@ export interface AccountWindowQuotasResponse {
   members?: AdminWindowQuotaOverviewItem[]
   /** 当前用户参与的拼车账号汇总。 */
   summaries?: AdminWindowQuotaSummary[]
+  /** 当前用户参与的拼车账号重置卡摘要（按账号 ID 字符串索引，仅含脱敏张数与到期时间）。 */
+  account_reset_credits?: Record<string, AccountResetCreditsInfo>
 }
 
 /** 获取当前登录用户的全部窗口百分比配额。 */
@@ -169,6 +183,8 @@ export interface AdminWindowQuotaOverviewResponse {
   summaries: AdminWindowQuotaSummary[]
   /** 已启用拼车额度的账号，包括尚无成员额度行的账号。 */
   account_ids?: number[]
+  /** 各拼车账号的重置卡摘要（按账号 ID 字符串索引，仅含脱敏张数与到期时间）。 */
+  account_reset_credits?: Record<string, AccountResetCreditsInfo>
 }
 
 export interface RebalanceAccountWindowQuotasPayload {

@@ -24,16 +24,17 @@ type keyUsageAccountGroup struct {
 }
 
 type keyUsageAccount struct {
-	ID          int64                            `json:"id"`
-	Name        string                           `json:"name"`
-	Email       string                           `json:"email,omitempty"`
-	Platform    string                           `json:"platform"`
-	Type        string                           `json:"type"`
-	Status      string                           `json:"status"`
-	Schedulable bool                             `json:"schedulable"`
-	Shared      bool                             `json:"shared"`
-	Windows     map[string]keyUsageAccountWindow `json:"windows,omitempty"`
-	LocalQuota  *keyUsageLocalQuota              `json:"local_quota,omitempty"`
+	ID           int64                            `json:"id"`
+	Name         string                           `json:"name"`
+	Email        string                           `json:"email,omitempty"`
+	Platform     string                           `json:"platform"`
+	Type         string                           `json:"type"`
+	Status       string                           `json:"status"`
+	Schedulable  bool                             `json:"schedulable"`
+	Shared       bool                             `json:"shared"`
+	ResetCredits *accountResetCreditsItem         `json:"reset_credits,omitempty"`
+	Windows      map[string]keyUsageAccountWindow `json:"windows,omitempty"`
+	LocalQuota   *keyUsageLocalQuota              `json:"local_quota,omitempty"`
 }
 
 type keyUsageAccountWindow struct {
@@ -147,6 +148,9 @@ func buildKeyUsageAccount(account *service.Account, userWindows map[string]servi
 	item.Status = account.Status
 	item.Schedulable = account.Schedulable
 	item.Shared = account.IsWindowQuotaShared()
+	if account.Platform == service.PlatformOpenAI && account.Type == service.AccountTypeOAuth && !account.IsShadow() {
+		item.ResetCredits = buildAccountResetCreditsItem(service.ExtractAccountResetCreditsSummary(account.Extra, now), now)
+	}
 
 	for _, windowType := range []string{service.WindowType5h, service.WindowType7d} {
 		window, found := buildStoredAccountWindow(account, windowType, now)

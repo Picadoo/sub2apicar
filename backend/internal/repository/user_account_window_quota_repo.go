@@ -15,6 +15,7 @@ import (
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/lib/pq"
 )
 
 // userAccountWindowQuotaRepository 是 service.UserAccountWindowQuotaRepository 的 ent 实现。
@@ -1204,6 +1205,40 @@ func (r *userAccountWindowQuotaRepository) ListCreditSpendingAccountIDs(ctx cont
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+func (r *userAccountWindowQuotaRepository) ListAccountResetCredits(ctx context.Context, accountIDs []int64) (map[int64]*service.AccountResetCreditSummary, error) {
+	result := make(map[int64]*service.AccountResetCreditSummary)
+	if len(accountIDs) == 0 {
+		return result, nil
+	}
+	rows, err := clientFromContext(ctx, r.client).QueryContext(ctx, `SELECT id, extra -> $2
+		FROM accounts
+		WHERE id = ANY($1)
+		  AND deleted_at IS NULL
+		  AND platform = 'openai'
+		  AND type = 'oauth'
+		  AND parent_account_id IS NULL
+		  AND extra ? $2
+		ORDER BY id`, pq.Array(accountIDs), service.OpenAIQuotaResetCreditsExtraKey)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	now := time.Now()
+	for rows.Next() {
+		var (
+			accountID int64
+			raw       []byte
+		)
+		if err := rows.Scan(&accountID, &raw); err != nil {
+			return nil, err
+		}
+		if summary := service.ParseAccountResetCreditSnapshot(raw, now); summary != nil {
+			result[accountID] = summary
+		}
+	}
+	return result, rows.Err()
 }
 
 // IsAccountWindowForceUnattributed 读取账号是否处于「官方用量强制未归因」模式。

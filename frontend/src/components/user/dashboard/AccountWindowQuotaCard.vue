@@ -18,6 +18,13 @@
             {{ t('dashboard.accountWindowQuota.sharedPoolMode') }}
           </span>
         </div>
+        <div class="mb-2">
+          <AccountResetCreditsBadge
+            :reset-credits="g.resetCredits"
+            :show-unknown="true"
+            :data-testid="`user-reset-credits-${g.accountId}`"
+          />
+        </div>
         <div class="space-y-3">
           <div
             v-for="w in g.windows"
@@ -170,9 +177,11 @@
 import { computed, onMounted, ref, reactive } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
+import AccountResetCreditsBadge from '@/components/common/AccountResetCreditsBadge.vue'
 import {
   getMyAccountWindowQuotas,
   setAccountWindowDonate,
+  type AccountResetCreditsInfo,
   type AccountWindowQuotaItem,
   type AdminWindowQuotaOverviewItem,
 } from '@/api/accountWindowQuota'
@@ -182,6 +191,7 @@ const { t } = useI18n()
 const enabled = ref(false)
 const windows = ref<AccountWindowQuotaItem[]>([])
 const sharedMembers = ref<AdminWindowQuotaOverviewItem[]>([])
+const accountResetCredits = ref<Record<string, AccountResetCreditsInfo>>({})
 // 每个 (账号, 窗口) 各自一个捐赠比例，key = `${accountId}:${window}`
 const donatePct = reactive<Record<string, number>>({})
 const savingKey = ref<string | null>(null)
@@ -198,6 +208,7 @@ interface AccountGroup {
   accountId: number
   windows: AccountWindowQuotaItem[]
   members: SharedMember[]
+  resetCredits: AccountResetCreditsInfo | null
 }
 
 const WINDOW_ORDER: Record<string, number> = { '5h': 0, '7d': 1 }
@@ -228,7 +239,12 @@ const groups = computed<AccountGroup[]>(() => {
     arr.sort((a, b) => (WINDOW_ORDER[a.window_type] ?? 9) - (WINDOW_ORDER[b.window_type] ?? 9))
     const members = Array.from(membersByAccount.get(accountId)?.values() ?? [])
       .sort((a, b) => a.userId - b.userId)
-    result.push({ accountId, windows: arr, members })
+    result.push({
+      accountId,
+      windows: arr,
+      members,
+      resetCredits: accountResetCredits.value[String(accountId)] ?? null,
+    })
   }
   result.sort((a, b) => a.accountId - b.accountId)
   return result
@@ -421,6 +437,7 @@ async function load() {
     enabled.value = data.enabled
     windows.value = data.windows ?? []
     sharedMembers.value = data.members ?? []
+    accountResetCredits.value = data.account_reset_credits ?? {}
     for (const w of windows.value) {
       // 保留 0.1% 精度，与滑块 step 一致；取整会让 52.2% 之类的值显示漂移。
       donatePct[dKey(w)] = Math.max(
@@ -433,6 +450,7 @@ async function load() {
     enabled.value = false
     windows.value = []
     sharedMembers.value = []
+    accountResetCredits.value = {}
   }
 }
 

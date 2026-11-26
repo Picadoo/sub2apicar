@@ -17,8 +17,15 @@
       >
         <div class="mb-3 flex flex-wrap items-start justify-between gap-3">
           <div>
-            <div class="text-xs font-semibold text-gray-700 dark:text-gray-300">
-              {{ t('admin.windowQuotaOverview.account', { id: g.accountId }) }}
+            <div class="flex flex-wrap items-center gap-2">
+              <div class="text-xs font-semibold text-gray-700 dark:text-gray-300">
+                {{ t('admin.windowQuotaOverview.account', { id: g.accountId }) }}
+              </div>
+              <AccountResetCreditsBadge
+                :reset-credits="g.resetCredits"
+                :show-unknown="true"
+                :data-testid="`admin-reset-credits-${g.accountId}`"
+              />
             </div>
             <div class="mt-2 flex flex-wrap gap-2">
               <div
@@ -358,6 +365,7 @@ import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores/app'
 import { adminAPI } from '@/api/admin'
 import type { AdminUser } from '@/types'
+import AccountResetCreditsBadge from '@/components/common/AccountResetCreditsBadge.vue'
 import {
   getAccountWindowCeilings,
   getAccountWindowQuotaOverview,
@@ -366,6 +374,7 @@ import {
   rebalanceAccountWindowQuotas,
   setAccountSharedPoolMode,
   setAccountCreditSpending,
+  type AccountResetCreditsInfo,
   type AdminWindowQuotaSummary,
   type AdminWindowQuotaOverviewItem,
   type AdminWindowQuotaOverviewResponse,
@@ -382,6 +391,7 @@ const sharedPoolAccountIds = ref<number[]>([])
 const savingSharedPool = ref<number | null>(null)
 const creditSpendingAccountIds = ref<number[]>([])
 const savingCreditSpending = ref<number | null>(null)
+const accountResetCredits = ref<Record<string, AccountResetCreditsInfo>>({})
 const previewAccountId = ref<number | null>(null)
 const rebalancingAccountId = ref<number | null>(null)
 const memberEditorAccountId = ref<number | null>(null)
@@ -415,6 +425,7 @@ interface AccountGroup {
   accountId: number
   users: UserRow[]
   diagnostics: AdminWindowQuotaSummary[]
+  resetCredits: AccountResetCreditsInfo | null
 }
 
 const groups = computed<AccountGroup[]>(() => {
@@ -458,6 +469,7 @@ const groups = computed<AccountGroup[]>(() => {
               ? 1
               : a.window_type.localeCompare(b.window_type),
         ),
+      resetCredits: accountResetCredits.value[String(accountId)] ?? null,
     }))
 })
 
@@ -717,6 +729,7 @@ function applyOverviewData(data: AdminWindowQuotaOverviewResponse) {
   sharedAccountIds.value = data.account_ids ?? []
   sharedPoolAccountIds.value = data.shared_pool_account_ids ?? []
   creditSpendingAccountIds.value = data.credit_spending_account_ids ?? []
+  accountResetCredits.value = data.account_reset_credits ?? {}
 }
 
 async function toggleCreditSpending(accountId: number) {
@@ -832,6 +845,7 @@ async function load() {
     sharedAccountIds.value = []
     sharedPoolAccountIds.value = []
     creditSpendingAccountIds.value = []
+    accountResetCredits.value = {}
   }
 }
 

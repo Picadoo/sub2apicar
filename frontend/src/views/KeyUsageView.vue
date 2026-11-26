@@ -229,6 +229,16 @@
                           {{ t('keyUsage.sharedPool') }}
                         </span>
                       </div>
+                      <div
+                        v-if="account.platform === 'openai' && account.type === 'oauth' && (account.shared || account.reset_credits)"
+                        class="mt-2.5"
+                      >
+                        <AccountResetCreditsBadge
+                          :reset-credits="account.reset_credits ?? null"
+                          :show-unknown="account.shared"
+                          :data-testid="`key-usage-reset-credits-${account.id}`"
+                        />
+                      </div>
                     </div>
 
                     <div class="min-w-0">
@@ -591,7 +601,9 @@ import { useI18n } from 'vue-i18n'
 import { useAppStore } from '@/stores'
 import { FeatureFlags, resolveFeatureFlag } from '@/utils/featureFlags'
 import LocaleSwitcher from '@/components/common/LocaleSwitcher.vue'
+import AccountResetCreditsBadge from '@/components/common/AccountResetCreditsBadge.vue'
 import Icon from '@/components/icons/Icon.vue'
+import type { AccountResetCreditsInfo } from '@/api/accountWindowQuota'
 import { buildGatewayUrl } from '@/api/client'
 import { formatDateLocalInput } from '@/utils/format'
 import { sanitizeUrl } from '@/utils/url'
@@ -667,6 +679,7 @@ interface UsageAccount {
   status: string
   schedulable: boolean
   shared: boolean
+  reset_credits?: AccountResetCreditsInfo | null
   windows?: Partial<Record<AccountWindowKey, UsageAccountWindow>>
   local_quota?: {
     total?: UsageQuotaDimension

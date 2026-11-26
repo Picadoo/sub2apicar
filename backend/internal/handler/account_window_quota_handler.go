@@ -44,6 +44,59 @@ type accountWindowQuotaItem struct {
 	ResetInSeconds             *int64   `json:"reset_in_seconds,omitempty"`
 }
 
+type accountResetCreditDetailItem struct {
+	ExpiresAt        string `json:"expires_at"`
+	ExpiresInSeconds *int64 `json:"expires_in_seconds,omitempty"`
+}
+
+type accountResetCreditsItem struct {
+	AvailableCount           int                            `json:"available_count"`
+	EarliestExpiresAt        *string                        `json:"earliest_expires_at,omitempty"`
+	EarliestExpiresInSeconds *int64                         `json:"earliest_expires_in_seconds,omitempty"`
+	Credits                  []accountResetCreditDetailItem `json:"credits,omitempty"`
+}
+
+func buildAccountResetCreditsItem(summary *service.AccountResetCreditSummary, now time.Time) *accountResetCreditsItem {
+	if summary == nil {
+		return nil
+	}
+	item := &accountResetCreditsItem{
+		AvailableCount: summary.AvailableCount,
+	}
+	if len(summary.Credits) > 0 {
+		details := make([]accountResetCreditDetailItem, 0, len(summary.Credits))
+		for _, credit := range summary.Credits {
+			detail := accountResetCreditDetailItem{
+				ExpiresAt: credit.ExpiresAt,
+			}
+			if parsed, err := time.Parse(time.RFC3339Nano, credit.ExpiresAt); err == nil {
+				secs := int64(parsed.Sub(now).Seconds())
+				if secs < 0 {
+					secs = 0
+				}
+				detail.ExpiresInSeconds = &secs
+			}
+			details = append(details, detail)
+		}
+		item.Credits = details
+		first := details[0]
+		firstExp := first.ExpiresAt
+		item.EarliestExpiresAt = &firstExp
+		item.EarliestExpiresInSeconds = first.ExpiresInSeconds
+	}
+	return item
+}
+
+func buildAccountResetCreditsMap(summaries map[int64]*service.AccountResetCreditSummary, now time.Time) map[string]accountResetCreditsItem {
+	out := make(map[string]accountResetCreditsItem, len(summaries))
+	for accountID, summary := range summaries {
+		if item := buildAccountResetCreditsItem(summary, now); item != nil {
+			out[strconv.FormatInt(accountID, 10)] = *item
+		}
+	}
+	return out
+}
+
 // GetMyWindows 返回当前登录用户的全部窗口配额（含救急池信息）。
 // GET /api/v1/user/account-window-quotas
 func (h *AccountWindowQuotaHandler) GetMyWindows(c *gin.Context) {
@@ -54,10 +107,11 @@ func (h *AccountWindowQuotaHandler) GetMyWindows(c *gin.Context) {
 	}
 	if h.quota == nil || !h.quota.Enabled() {
 		response.Success(c, gin.H{
-			"enabled":   false,
-			"windows":   []accountWindowQuotaItem{},
-			"members":   []adminWindowQuotaOverviewItem{},
-			"summaries": []adminWindowQuotaSummaryItem{},
+			"enabled":               false,
+			"windows":               []accountWindowQuotaItem{},
+			"members":               []adminWindowQuotaOverviewItem{},
+			"summaries":             []adminWindowQuotaSummaryItem{},
+			"account_reset_credits": map[string]accountResetCreditsItem{},
 		})
 		return
 	}
@@ -71,11 +125,25 @@ func (h *AccountWindowQuotaHandler) GetMyWindows(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
+	userAccountIDs := make([]int64, 0, len(views)+len(summaryRecords))
+	for _, v := range views {
+		userAccountIDs = append(userAccountIDs, v.AccountID)
+	}
+	for _, s := range summaryRecords {
+		userAccountIDs = append(userAccountIDs, s.AccountID)
+	}
+	resetCredits, err := h.quota.ListAccountResetCredits(c.Request.Context(), userAccountIDs)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	now := time.Now()
 	response.Success(c, gin.H{
-		"enabled":   true,
-		"windows":   buildWindowItemsFromViews(views, time.Now()),
-		"members":   buildOverviewItems(memberRecords, time.Now()),
-		"summaries": buildSummaryItems(summaryRecords),
+		"enabled":               true,
+		"windows":               buildWindowItemsFromViews(views, now),
+		"members":               buildOverviewItems(memberRecords, now),
+		"summaries":             buildSummaryItems(summaryRecords),
+		"account_reset_credits": buildAccountResetCreditsMap(resetCredits, now),
 	})
 }
 
@@ -233,10 +301,11 @@ func buildSummaryItems(records []service.AdminWindowQuotaSummary) []adminWindowQ
 func (h *AccountWindowQuotaHandler) AdminOverview(c *gin.Context) {
 	if h.quota == nil || !h.quota.Enabled() {
 		response.Success(c, gin.H{
-			"enabled":     false,
-			"rows":        []adminWindowQuotaOverviewItem{},
-			"summaries":   []adminWindowQuotaSummaryItem{},
-			"account_ids": []int64{},
+			"enabled":               false,
+			"rows":                  []adminWindowQuotaOverviewItem{},
+			"summaries":             []adminWindowQuotaSummaryItem{},
+			"account_ids":           []int64{},
+			"account_reset_credits": map[string]accountResetCreditsItem{},
 		})
 		return
 	}
@@ -260,13 +329,28 @@ func (h *AccountWindowQuotaHandler) AdminOverview(c *gin.Context) {
 		response.ErrorFrom(c, err)
 		return
 	}
+	allAccountIDs := make([]int64, 0, len(accountIDs)+len(summaryRecords)+len(records))
+	allAccountIDs = append(allAccountIDs, accountIDs...)
+	for _, s := range summaryRecords {
+		allAccountIDs = append(allAccountIDs, s.AccountID)
+	}
+	for _, r := range records {
+		allAccountIDs = append(allAccountIDs, r.AccountID)
+	}
+	resetCredits, err := h.quota.ListAccountResetCredits(c.Request.Context(), allAccountIDs)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	now := time.Now()
 	response.Success(c, gin.H{
 		"enabled":                     true,
-		"rows":                        buildOverviewItems(records, time.Now()),
+		"rows":                        buildOverviewItems(records, now),
 		"summaries":                   buildSummaryItems(summaryRecords),
 		"account_ids":                 accountIDs,
 		"shared_pool_account_ids":     sharedPoolIDs,
 		"credit_spending_account_ids": creditIDs,
+		"account_reset_credits":       buildAccountResetCreditsMap(resetCredits, now),
 	})
 }
 

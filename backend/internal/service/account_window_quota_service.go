@@ -221,6 +221,43 @@ type accountWindowCreditSpendingManager interface {
 	ListCreditSpendingAccountIDs(ctx context.Context) ([]int64, error)
 }
 
+type accountWindowResetCreditsReader interface {
+	ListAccountResetCredits(ctx context.Context, accountIDs []int64) (map[int64]*AccountResetCreditSummary, error)
+}
+
+func (s *AccountWindowQuotaService) ListAccountResetCredits(ctx context.Context, accountIDs []int64) (map[int64]*AccountResetCreditSummary, error) {
+	if !s.Enabled() || len(accountIDs) == 0 {
+		return map[int64]*AccountResetCreditSummary{}, nil
+	}
+	reader, ok := s.repo.(accountWindowResetCreditsReader)
+	if !ok {
+		return map[int64]*AccountResetCreditSummary{}, nil
+	}
+	seen := make(map[int64]struct{}, len(accountIDs))
+	unique := make([]int64, 0, len(accountIDs))
+	for _, id := range accountIDs {
+		if id <= 0 {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+	if len(unique) == 0 {
+		return map[int64]*AccountResetCreditSummary{}, nil
+	}
+	result, err := reader.ListAccountResetCredits(ctx, unique)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return map[int64]*AccountResetCreditSummary{}, nil
+	}
+	return result, nil
+}
+
 func (s *AccountWindowQuotaService) SetAccountCreditSpending(ctx context.Context, accountID int64, enabled bool) error {
 	if !s.Enabled() || accountID <= 0 {
 		return ErrAccountWindowInvalidMembers

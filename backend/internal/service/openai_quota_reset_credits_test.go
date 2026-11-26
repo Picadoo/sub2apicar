@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -189,4 +190,59 @@ func TestQueryUsageResetCreditCountPrecedence(t *testing.T) {
 			require.Len(t, usage.RateLimitResetCredits.Credits, tt.wantCredits)
 		})
 	}
+}
+
+func TestParseAccountResetCreditSnapshot(t *testing.T) {
+	now := time.Date(2026, 11, 26, 8, 0, 0, 0, time.UTC)
+
+	t.Run("filters expired credits, sorts ascending, and clamps count", func(t *testing.T) {
+		raw := []byte(`{
+			"available_count": 3,
+			"credits": [
+				{"expires_at": "2026-12-12T22:17:35Z"},
+				{"expires_at": "2026-11-25T00:00:00Z"},
+				{"expires_at": "2026-11-30T19:53:06.241696Z"}
+			]
+		}`)
+		got := ParseAccountResetCreditSnapshot(raw, now)
+		require.NotNil(t, got)
+		require.Equal(t, 2, got.AvailableCount)
+		require.Len(t, got.Credits, 2)
+		require.Equal(t, "2026-11-30T19:53:06.241696Z", got.Credits[0].ExpiresAt)
+		require.Equal(t, "2026-12-12T22:17:35Z", got.Credits[1].ExpiresAt)
+	})
+
+	t.Run("explicit zero available count returns empty summary", func(t *testing.T) {
+		got := ParseAccountResetCreditSnapshot([]byte(`{"available_count":0,"credits":[]}`), now)
+		require.NotNil(t, got)
+		require.Equal(t, 0, got.AvailableCount)
+		require.Empty(t, got.Credits)
+	})
+
+	t.Run("all credits expired returns nil instead of fabricating zero", func(t *testing.T) {
+		raw := []byte(`{"available_count":1,"credits":[{"expires_at":"2026-11-26T07:59:59Z"}]}`)
+		require.Nil(t, ParseAccountResetCreditSnapshot(raw, now))
+	})
+
+	t.Run("null or invalid payload returns nil", func(t *testing.T) {
+		require.Nil(t, ParseAccountResetCreditSnapshot(nil, now))
+		require.Nil(t, ParseAccountResetCreditSnapshot([]byte("null"), now))
+		require.Nil(t, ParseAccountResetCreditSnapshot([]byte(`{"available_count":-1}`), now))
+	})
+
+	t.Run("extracts from account extra map", func(t *testing.T) {
+		extra := map[string]any{
+			OpenAIQuotaResetCreditsExtraKey: map[string]any{
+				"available_count": 1,
+				"credits": []map[string]any{
+					{"expires_at": "2026-12-01T10:00:00Z"},
+				},
+			},
+		}
+		got := ExtractAccountResetCreditsSummary(extra, now)
+		require.NotNil(t, got)
+		require.Equal(t, 1, got.AvailableCount)
+		require.Len(t, got.Credits, 1)
+		require.Equal(t, "2026-12-01T10:00:00Z", got.Credits[0].ExpiresAt)
+	})
 }

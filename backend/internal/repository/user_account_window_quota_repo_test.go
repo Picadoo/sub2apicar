@@ -13,6 +13,7 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	dbent "github.com/Wei-Shaw/sub2api/ent"
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/require"
 
 	"entgo.io/ent/dialect"
@@ -1392,5 +1393,30 @@ func TestUserAccountWindowQuotaRepository_SetDonatePoolFractionClearsDueWindowBe
 
 	err := repo.SetDonatePoolFraction(context.Background(), 1, 29, service.WindowType5h, 0.0, service.DefaultAccountWindowLimitPercent)
 	require.NoError(t, err)
+	require.NoError(t, mock.ExpectationsWereMet())
+}
+
+func TestListAccountResetCredits(t *testing.T) {
+	repo, mock := newWindowQuotaRepoSQLMock(t)
+	future1 := time.Now().Add(48 * time.Hour).UTC().Format(time.RFC3339)
+	future2 := time.Now().Add(120 * time.Hour).UTC().Format(time.RFC3339)
+	expired := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339)
+
+	mock.ExpectQuery(`SELECT id, extra -> \$2[\s\S]*FROM accounts[\s\S]*WHERE id = ANY\(\$1\)`).
+		WithArgs(pq.Array([]int64{30, 51, 57}), service.OpenAIQuotaResetCreditsExtraKey).
+		WillReturnRows(sqlmock.NewRows([]string{"id", "snapshot"}).
+			AddRow(int64(30), []byte(`{"available_count":0,"credits":[]}`)).
+			AddRow(int64(51), []byte(`{"available_count":2,"credits":[{"expires_at":"`+future2+`"},{"expires_at":"`+future1+`"}]}`)).
+			AddRow(int64(57), []byte(`{"available_count":1,"credits":[{"expires_at":"`+expired+`"}]}`)))
+
+	got, err := repo.ListAccountResetCredits(context.Background(), []int64{30, 51, 57})
+	require.NoError(t, err)
+	require.Contains(t, got, int64(30))
+	require.Equal(t, 0, got[30].AvailableCount)
+	require.Contains(t, got, int64(51))
+	require.Equal(t, 2, got[51].AvailableCount)
+	require.Equal(t, future1, got[51].Credits[0].ExpiresAt)
+	require.Equal(t, future2, got[51].Credits[1].ExpiresAt)
+	require.NotContains(t, got, int64(57), "stale snapshot with only expired credits must be omitted")
 	require.NoError(t, mock.ExpectationsWereMet())
 }

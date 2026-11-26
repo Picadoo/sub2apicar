@@ -31,6 +31,7 @@ type accountWindowQuotaHandlerRepo struct {
 	modeErr          error
 	official5h       *float64
 	official7d       *float64
+	resetCredits     map[int64]*service.AccountResetCreditSummary
 }
 
 func (r *accountWindowQuotaHandlerRepo) ResetWindowForAccountIfDue(context.Context, int64, string, time.Time) (bool, error) {
@@ -401,4 +402,110 @@ func (r *accountWindowQuotaHandlerRepo) SetAccountCreditSpending(_ context.Conte
 }
 func (r *accountWindowQuotaHandlerRepo) ListCreditSpendingAccountIDs(context.Context) ([]int64, error) {
 	return r.creditIDs, nil
+}
+
+func (r *accountWindowQuotaHandlerRepo) ListAccountResetCredits(_ context.Context, accountIDs []int64) (map[int64]*service.AccountResetCreditSummary, error) {
+	out := make(map[int64]*service.AccountResetCreditSummary)
+	for _, id := range accountIDs {
+		if summary, ok := r.resetCredits[id]; ok {
+			out[id] = summary
+		}
+	}
+	return out, nil
+}
+
+func TestAccountWindowQuotaHandler_ResetCreditsInOverviewAndUserWindows(t *testing.T) {
+	exp1 := time.Now().Add(48 * time.Hour).UTC().Format(time.RFC3339)
+	exp2 := time.Now().Add(120 * time.Hour).UTC().Format(time.RFC3339)
+	repo := &accountWindowQuotaHandlerRepo{
+		rows: []service.UserAccountWindowQuotaRecord{
+			{UserID: 1, AccountID: 7, WindowType: service.WindowType5h, LimitPercent: 46, AttributedPercent: 5},
+		},
+		adminRows: []service.AdminWindowQuotaOverviewRow{
+			{UserID: 1, Email: "me@example.com", AccountID: 7, WindowType: service.WindowType5h, LimitPercent: 46, AttributedPercent: 5},
+			{UserID: 2, Email: "other@example.com", AccountID: 8, WindowType: service.WindowType5h, LimitPercent: 46, AttributedPercent: 9},
+		},
+		sharedAccountIDs: []int64{7, 8},
+		resetCredits: map[int64]*service.AccountResetCreditSummary{
+			7: {
+				AvailableCount: 2,
+				Credits: []service.OpenAIRateLimitResetCreditDetail{
+					{ExpiresAt: exp1},
+					{ExpiresAt: exp2},
+				},
+			},
+			8: {
+				AvailableCount: 0,
+			},
+		},
+	}
+	h, _ := newAccountWindowQuotaHandlerTest(t, repo)
+
+	// Admin overview returns both account 7 and account 8.
+	adminW := performAccountWindowQuotaRequest(t, http.MethodGet, "/api/v1/admin/account-window-quotas/overview", "", h.AdminOverview)
+	require.Equal(t, http.StatusOK, adminW.Code)
+	adminData := decodeAccountWindowQuotaResponse(t, adminW)
+	adminCredits, ok := adminData["account_reset_credits"].(map[string]any)
+	require.True(t, ok)
+	acc7, ok := adminCredits["7"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, float64(2), acc7["available_count"])
+	require.Equal(t, exp1, acc7["earliest_expires_at"])
+	require.Greater(t, acc7["earliest_expires_in_seconds"], float64(0))
+	require.Len(t, acc7["credits"], 2)
+	acc8, ok := adminCredits["8"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, float64(0), acc8["available_count"])
+
+	// User windows returns only account 7 (not account 8 which user 1 is not on).
+	gin.SetMode(gin.TestMode)
+	userW := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(userW)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/user/account-window-quotas", nil)
+	c.Set(string(servermiddleware.ContextKeyUser), servermiddleware.AuthSubject{UserID: 1})
+	h.GetMyWindows(c)
+	require.Equal(t, http.StatusOK, userW.Code)
+	userData := decodeAccountWindowQuotaResponse(t, userW)
+	userCredits, ok := userData["account_reset_credits"].(map[string]any)
+	require.True(t, ok)
+	require.Contains(t, userCredits, "7")
+	require.NotContains(t, userCredits, "8")
+}
+
+func TestBuildKeyUsageAccount_ResetCredits(t *testing.T) {
+	now := time.Date(2026, 11, 26, 8, 0, 0, 0, time.UTC)
+	parentID := int64(30)
+	oauthParent := &service.Account{
+		ID:       30,
+		Name:     "car-1",
+		Platform: service.PlatformOpenAI,
+		Type:     service.AccountTypeOAuth,
+		Status:   service.StatusActive,
+		Extra: map[string]any{
+			service.AccountExtraWindowQuotaShared: true,
+			service.OpenAIQuotaResetCreditsExtraKey: map[string]any{
+				"available_count": 2,
+				"credits": []map[string]any{
+					{"expires_at": "2026-12-01T08:00:00Z"},
+					{"expires_at": "2026-11-28T08:00:00Z"},
+				},
+			},
+		},
+	}
+	got := buildKeyUsageAccount(oauthParent, nil, now)
+	require.NotNil(t, got.ResetCredits)
+	require.Equal(t, 2, got.ResetCredits.AvailableCount)
+	require.NotNil(t, got.ResetCredits.EarliestExpiresAt)
+	require.Equal(t, "2026-11-28T08:00:00Z", *got.ResetCredits.EarliestExpiresAt)
+	require.NotNil(t, got.ResetCredits.EarliestExpiresInSeconds)
+	require.Equal(t, int64(48*3600), *got.ResetCredits.EarliestExpiresInSeconds)
+
+	shadow := &service.Account{
+		ID:              31,
+		ParentAccountID: &parentID,
+		Platform:        service.PlatformOpenAI,
+		Type:            service.AccountTypeOAuth,
+		Extra:           oauthParent.Extra,
+	}
+	require.Nil(t, buildKeyUsageAccount(shadow, nil, now).ResetCredits)
 }
